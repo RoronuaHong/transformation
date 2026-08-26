@@ -1,0 +1,43 @@
+# 日更发现 · 居家小技巧（最小 MVP）
+#
+# 产品：C 端免费信息流（小程序）；完整笔记看广告；原片跳 B 站/油管。
+# 采集：相关搜索 → 有口播、≥3 分钟 → 播放量 Top 5。
+# daily: false —— 08:00 定时不爬；要测用：yarn discover --topic home_tips --dry-run
+
+topics:
+  - id: home_tips
+    daily: false
+    locales_title:
+      zh: 居家小技巧
+      en: Home Tips
+    fresh_hours: 0
+    daily_quota_per_platform: 5
+    quota_scope: total
+    score_mode: views
+    search_mode: relevance
+    bili_search_order: totalrank
+    min_duration_sec: 180
+    min_views:
+      youtube: 0
+      bilibili: 0
+    sources:
+      - search
+    keywords:
+      default:
+        - 居家收纳
+      youtube:
+        - 居家收纳教程
+        - 厨房清洁教程
+        - home organization tutorial
+      bilibili:
+        - 居家收纳
+        - 收纳教程
+        - 厨房清洁
+        - 卫生间收纳
+    platforms:
+      - youtube
+      - bilibili
+    exclude_authors: []
+    seed_channels:
+      youtube: []
+      bilibili: []

@@ -1,0 +1,95 @@
+# 依赖与缓存
+node_modules/
+.pnpm-store/
+.yarn/
+**/.next/
+**/out/
+**/*.tsbuildinfo
+
+# 浏览器自动化 profile（含登录态，敏感且体积大）
+pw_profile_52pojie/
+
+# 凭证 / 环境变量
+*.env
+.env
+storage_state_52pojie.json
+subtitle_pipeline/cookies.txt
+subtitle_pipeline/cookies*.txt
+subtitle_pipeline/.env
+subtitle_pipeline/llm.yaml
+
+# 临时目录 / 脚本
+.tmp-bili/
+.tmp-bili2/
+.tmp-bili3/
+.tmp-v2ray-*.py
+.planning/
+
+# 发现队列 / 本机数据库
+subtitle_pipeline/data/
+subtitle_pipeline/downloads/
+*.db
+
+# 运行时产物
+output/
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+*.log
+
+# ── 音视屏 / 媒体（不提交）──
+*.wav
+*.m4a
+*.mp4
+*.mp3
+*.webm
+*.avi
+*.mov
+*.mkv
+*.flac
+*.ogg
+
+# ── 图片（不提交，运行时可生成）──
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.ico
+
+# ── 文档 / 非代码（不提交）──
+*.md
+*.html
+*.docx
+*.pdf
+
+# 保留 agent skills 说明
+!.cursor/**/*.md
+
+# ── 研究与资产目录（非代码）──
+下沉市场/
+国内电商平台/
+职场付费桌面软件/
+阿里嘎多与空泥基蛙/
+热门视频周报/
+
+# ── 根目录杂项数据 / 临时文件 ──
+v2ray_*.txt
+_raw_*
+top5_urls.txt
+findings.md
+progress.md
+task_plan.md
+generate-report.js
+虚拟资产*.docx
+
+# ── transform 运行时媒体 ──
+transform/public/clips/
+transform/public/frames/
+
+# ── trans / subtitle_pipeline 文档与静态页 ──
+trans/*.md
+trans/*.html
+subtitle_pipeline/*.md
+subtitle_pipeline/*.html

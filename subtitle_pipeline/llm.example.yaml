@@ -1,0 +1,84 @@
+# LLM profiles for subtitle_pipeline (chat = polish/summary, translate = subtitles)
+# Copy to llm.yaml to customize. Secrets stay in env — never commit keys.
+#
+# Switch:
+#   --llm-profile tokenhub
+#   set VITUAL_LLM_PROFILE=hybrid
+#
+# TokenHub / 腾讯云 (same env as Claude Code / Cursor Agent):
+#   ANTHROPIC_BASE_URL=https://tokenhub.tencentmaas.com
+#   ANTHROPIC_AUTH_TOKEN=YOUR_TOKEN_HERE
+#   ANTHROPIC_MODEL=hy3
+#
+# Other sites:
+#   Singapore: https://tokenhub-intl.tencentcloudmaas.com
+#   US:        https://tokenhub-us.tencentcloudmaas.com
+
+profile: local
+
+profiles:
+  local:
+    chat:
+      provider: ollama
+      model: gemma4:e2b
+      base_url: http://127.0.0.1:11434
+      temperature: 0.2
+    translate:
+      provider: ollama
+      model: translategemma:4b
+      base_url: http://127.0.0.1:11434
+      temperature: 0.2
+
+  # 腾讯 TokenHub hy3（OpenAI 协议优先，失败再试 Anthropic Messages）
+  tokenhub:
+    chat:
+      provider: tokenhub
+      model: hy3
+      base_url: ${ANTHROPIC_BASE_URL}
+      api_key_env: ANTHROPIC_AUTH_TOKEN
+      temperature: 0.2
+    translate:
+      provider: tokenhub
+      model: hy3
+      base_url: ${ANTHROPIC_BASE_URL}
+      api_key_env: ANTHROPIC_AUTH_TOKEN
+      temperature: 0.2
+
+  # 强制走 Anthropic Messages（与 Claude Code 同协议）
+  tokenhub_anthropic:
+    chat:
+      provider: tokenhub
+      model: hy3
+      base_url: ${ANTHROPIC_BASE_URL}
+      api_key_env: ANTHROPIC_AUTH_TOKEN
+      prefer_anthropic: true
+    translate:
+      provider: tokenhub
+      model: hy3
+      base_url: ${ANTHROPIC_BASE_URL}
+      api_key_env: ANTHROPIC_AUTH_TOKEN
+      prefer_anthropic: true
+
+  openai:
+    chat:
+      provider: openai_compat
+      model: gpt-4o-mini
+      base_url: https://api.openai.com/v1
+      api_key_env: OPENAI_API_KEY
+    translate:
+      provider: openai_compat
+      model: gpt-4o-mini
+      base_url: https://api.openai.com/v1
+      api_key_env: OPENAI_API_KEY
+
+  hybrid:
+    # 总结/润色走腾讯 hy3；字幕翻译仍本地 translategemma
+    chat:
+      provider: tokenhub
+      model: hy3
+      base_url: ${ANTHROPIC_BASE_URL}
+      api_key_env: ANTHROPIC_AUTH_TOKEN
+    translate:
+      provider: ollama
+      model: translategemma:4b
+      base_url: http://127.0.0.1:11434

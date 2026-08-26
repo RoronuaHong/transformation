@@ -1,0 +1,25 @@
+{
+  "name": "subtitle-pipeline",
+  "private": true,
+  "scripts": {
+    "asr": ".venv/Scripts/python.exe pipeline.py transcribe --device cpu",
+    "asr:fast": ".venv/Scripts/python.exe pipeline.py transcribe --no-multipass --no-llm-correct --device cpu",
+    "full": ".venv/Scripts/python.exe pipeline.py run --device cpu --langs site",
+    "url": ".venv/Scripts/python.exe pipeline.py url",
+    "fetch": ".venv/Scripts/python.exe fetch_media.py",
+    "translate": ".venv/Scripts/python.exe pipeline.py translate --ollama-model translategemma:4b --langs all",
+    "summarize": ".venv/Scripts/python.exe pipeline.py summarize --chat-model gemma4:e2b",
+    "keypoints": ".venv/Scripts/python.exe pipeline.py keypoints --chat-model gemma4:e2b",
+    "shift-srt": ".venv/Scripts/python.exe pipeline.py shift-srt",
+    "discover": ".venv/Scripts/python.exe -m discover.run_discover",
+    "discover:mock": ".venv/Scripts/python.exe -m discover.run_discover --mock",
+    "discover:query": ".venv/Scripts/python.exe -m discover.run_discover --query",
+    "inbox": ".venv/Scripts/python.exe -m discover.run_inbox",
+    "batch": ".venv/Scripts/python.exe -m discover.run_batch --langs site --limit 1",
+    "batch:fast": ".venv/Scripts/python.exe -m discover.run_batch --langs site --limit 1 --no-multipass --device cpu",
+    "batch:cloud": ".venv/Scripts/python.exe -m discover.run_batch --llm-profile tokenhub --langs site --limit 1",
+    "export-site": ".venv/Scripts/python.exe -m discover.export_site",
+    "api": ".venv/Scripts/python.exe -m uvicorn api.app:app --host 127.0.0.1 --port 8800 --reload",
+    "api:prod": ".venv/Scripts/python.exe -m uvicorn api.app:app --host 127.0.0.1 --port 8800"
+  }
+}

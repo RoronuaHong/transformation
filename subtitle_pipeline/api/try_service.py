@@ -1,0 +1,1519 @@
+"""Public single-video try: paste URL or upload a file → notes + GIF."""
+
+from __future__ import annotations
+
+import json
+import shutil
+import threading
+import time
+import uuid
+from pathlib import Path
+
+from discover.content_db import ContentDB
+from discover.export_site import main as export_main
+from discover.models import Candidate
+from discover.queue_db import QueueDB
+from discover.run_inbox import canonical_url, parse_url
+from fetch_media import ensure_source_video, find_ffmpeg
+from job_layout import existing_wav, job_media_dir, list_locale_srts
+from langs import PACKS, coalesce_source_lang, normalize_lang, resolve_targets
+
+SITE_LANG_CODES = tuple(PACKS.get("site") or ())
+
+# Platforms that require login cookies for anonymous download.
+COOKIE_POLICY: dict[str, dict] = {
+    "douyin": {"required": True, "label": "Douyin"},
+    "bilibili": {"required": False, "label": "Bilibili"},
+    "youtube": {"required": False, "soft": True, "label": "YouTube"},
+}
+
+
+def _looks_like_netscape(text: str) -> bool:
+    low = text.lower()
+    if "# netscape" in low or "http cookie file" in low:
+        return True
+    for ln in text.splitlines():
+        parts = ln.split("\t")
+        if len(parts) >= 7 and parts[1] in ("TRUE", "FALSE"):
+            return True
+    return False
+
+
+def _cookies_file_covers_platform(platform: str) -> bool:
+    from fetch_media import cookie_domain_for, resolve_cookies_file
+
+    cf = resolve_cookies_file()
+    if cf is None:
+        return False
+    try:
+        text = cf.read_text(encoding="utf-8", errors="replace").lower()
+    except OSError:
+        return False
+    host = cookie_domain_for(platform).lstrip(".").lower()
+    return host in text
+
+
+def cookies_satisfied(platform: str, *, pasted: str | None = None) -> bool:
+    pol = COOKIE_POLICY.get(platform) or {}
+    if not pol.get("required"):
+        return True
+    raw = (pasted or "").strip()
+    if raw:
+        if _looks_like_netscape(raw):
+            from fetch_media import cookie_domain_for
+
+            host = cookie_domain_for(platform).lstrip(".").lower()
+            return host in raw.lower()
+        return True
+    return _cookies_file_covers_platform(platform)
+
+
+def apply_batch_cookies(pasted: str | None, urls: list[str]) -> None:
+    """Merge user cookie paste once before a batch enqueue."""
+    from fetch_media import upsert_try_cookies
+
+    raw = (pasted or "").strip()
+    if not raw:
+        return
+    if _looks_like_netscape(raw):
+        upsert_try_cookies(raw, platform="douyin", url=urls[0] if urls else "")
+        return
+    platforms: set[str] = set()
+    for url in urls:
+        try:
+            platform, _ = parse_url(url)
+        except ValueError:
+            continue
+        if (COOKIE_POLICY.get(platform) or {}).get("required"):
+            platforms.add(platform)
+    if not platforms:
+        try:
+            platform, _ = parse_url(urls[0])
+            platforms.add(platform)
+        except ValueError:
+            platforms.add("douyin")
+    for platform in sorted(platforms):
+        upsert_try_cookies(raw, platform=platform, url=urls[0] if urls else "")
+
+
+def schedule_next_try_job(*, skip_job_id: int | None = None) -> None:
+    """Chain the next high-priority pending try job when idle."""
+
+    def _runner() -> None:
+        time.sleep(0.25)
+        q = QueueDB()
+        try:
+            row = q._conn.execute(
+                """
+                SELECT id FROM jobs
+                WHERE status='pending' AND priority='high'
+                ORDER BY created_at ASC
+                LIMIT 1
+                """
+            ).fetchone()
+            if row is None:
+                return
+            jid = int(row["id"])
+            if skip_job_id is not None and jid == skip_job_id:
+                return
+            run_try_job(jid)
+        finally:
+            q.close()
+
+    threading.Thread(target=_runner, daemon=True).start()
+
+
+def normalize_try_langs(raw: str | list | None) -> str:
+    """Comma list of site locales, or ``site`` when empty / full pack."""
+    allowed = {normalize_lang(x) for x in SITE_LANG_CODES}
+    codes: list[str] = []
+    if isinstance(raw, list):
+        for item in raw:
+            tag = normalize_lang(str(item or "").strip())
+            if tag and tag in allowed and tag not in codes:
+                codes.append(tag)
+    else:
+        text = (raw or "").strip()
+        if not text or text.lower() in ("site", "all", "*"):
+            return "site"
+        for part in text.replace(";", ",").split(","):
+            tag = normalize_lang(part.strip())
+            if tag and tag in allowed and tag not in codes:
+                codes.append(tag)
+    if not codes:
+        return "site"
+    if set(codes) >= allowed:
+        return "site"
+    return ",".join(codes)
+
+
+def expand_try_langs(pack: str | None) -> frozenset[str]:
+    """Normalized set of locale codes for comparison."""
+    p = normalize_try_langs(pack)
+    if p == "site":
+        return frozenset(normalize_lang(x) for x in SITE_LANG_CODES)
+    return frozenset(normalize_lang(x) for x in p.split(",") if x.strip())
+
+
+def langs_equal(a: str | list | None, b: str | list | None) -> bool:
+    return expand_try_langs(normalize_try_langs(a)) == expand_try_langs(
+        normalize_try_langs(b)
+    )
+
+
+def job_langs(job) -> str:
+    raw = None
+    if job and job.get("meta_json"):
+        try:
+            meta = json.loads(job["meta_json"])
+            if isinstance(meta, dict):
+                raw = meta.get("langs")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raw = None
+    return normalize_try_langs(raw)
+
+
+def frame_opts_equal(a: dict | None, b: dict | None) -> bool:
+    """Compare normalized frame_opts for already-done noop detection."""
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return False
+    try:
+        sec_a = float(a.get("gif_sec") if a.get("gif_sec") is not None else 4.0)
+        sec_b = float(b.get("gif_sec") if b.get("gif_sec") is not None else 4.0)
+    except (TypeError, ValueError):
+        return False
+    return (
+        str(a.get("frames") or "auto") == str(b.get("frames") or "auto")
+        and abs(sec_a - sec_b) < 0.05
+        and list(a.get("clips") or []) == list(b.get("clips") or [])
+        and list(a.get("gif_ranges") or []) == list(b.get("gif_ranges") or [])
+    )
+
+
+def entry_frame_opts(
+    *,
+    global_frames: str = "auto",
+    global_gif_sec: float = 4.0,
+    global_clips: list | None = None,
+    global_gif_ranges: list | None = None,
+    entry: dict | None = None,
+    duration_sec: float | None = None,
+) -> dict:
+    """Merge per-link overrides with batch defaults."""
+    if not entry or not entry.get("override"):
+        return normalize_frame_opts(
+            global_frames,
+            global_gif_sec,
+            global_clips,
+            gif_ranges=global_gif_ranges,
+            duration_sec=duration_sec,
+        )
+    frames = entry.get("frames") if entry.get("frames") is not None else global_frames
+    gif_sec = (
+        entry.get("gif_sec") if entry.get("gif_sec") is not None else global_gif_sec
+    )
+    clips = entry.get("clips") if entry.get("clips") is not None else global_clips
+    gif_ranges = (
+        entry.get("gif_ranges")
+        if entry.get("gif_ranges") is not None
+        else global_gif_ranges
+    )
+    return normalize_frame_opts(
+        frames,
+        gif_sec,
+        clips,
+        gif_ranges=gif_ranges,
+        duration_sec=duration_sec,
+    )
+
+
+def compose_try_stages(
+    *,
+    want_translate: bool = True,
+    want_notes: bool = True,
+    has_media: bool = False,
+) -> str:
+    """Map workbench module toggles → batch stages string."""
+    if want_translate and want_notes:
+        return "all"
+    parts: list[str] = ["fetch", "asr"]
+    if want_translate:
+        parts.append("translate")
+    if want_notes:
+        parts.extend(["notes", "localize"])
+    if has_media:
+        parts.extend(["frames", "clips"])
+    if not want_translate and not want_notes and not has_media:
+        parts.extend(["notes", "localize"])
+    # unique, preserve order
+    out: list[str] = []
+    seen: set[str] = set()
+    for p in parts:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return ",".join(out)
+
+
+def resolve_try_intent(
+    *,
+    job_status: str | None,
+    stages: str | None = None,
+    frames: str = "auto",
+    has_clips: bool = False,
+    has_gif_ranges: bool = False,
+    new_langs: str | list | None = None,
+    prev_langs: str | list | None = None,
+    new_frame_opts: dict | None = None,
+    prev_frame_opts: dict | None = None,
+) -> dict:
+    """Decide what a try submit should do.
+
+    Priority (explicit > langs change > media tweak > noop):
+      1. stages in clips|media|frames → media-only refresh
+      2. new / pending / failed job → full pipeline (stages=all)
+      3. done + langs changed → post (reuse ASR, re-translate + media)
+      4. done + langs same + frame_opts same → noop
+      5. done + frames=none + clips → clips-only
+      6. done + media fields / opts changed → media refresh
+    """
+    new_pack = normalize_try_langs(new_langs)
+    prev_pack = normalize_try_langs(prev_langs) if prev_langs is not None else None
+    mode = (frames or "auto").strip().lower()
+    explicit = (stages or "").strip().lower()
+
+    if explicit in ("clips", "media", "frames", "gif", "mp4", "jpg"):
+        if explicit in ("gif", "jpg"):
+            explicit = "frames"
+        if explicit == "mp4":
+            explicit = "clips"
+        return {
+            "intent": explicit,
+            "stages": explicit,
+            "langs": new_pack,
+            "reason": "explicit_stages",
+        }
+
+    st = (job_status or "").strip().lower()
+    if st not in ("done", "published"):
+        return {
+            "intent": "full",
+            "stages": "all",
+            "langs": new_pack,
+            "reason": "new_or_retry",
+        }
+
+    if prev_pack is None or not langs_equal(prev_pack, new_pack):
+        return {
+            "intent": "post",
+            "stages": "post",
+            "langs": new_pack,
+            "reason": "langs_changed",
+        }
+
+    opts_same = frame_opts_equal(prev_frame_opts, new_frame_opts)
+    if opts_same:
+        return {
+            "intent": "noop",
+            "stages": "noop",
+            "langs": new_pack,
+            "reason": "unchanged",
+        }
+
+    if mode == "none" and has_clips:
+        return {
+            "intent": "clips",
+            "stages": "clips",
+            "langs": new_pack,
+            "reason": "clips_only",
+        }
+
+    if has_clips or has_gif_ranges or mode in ("gif", "jpg"):
+        media_stages = "media"
+        if has_clips and not has_gif_ranges and mode == "none":
+            media_stages = "clips"
+        elif (has_gif_ranges or mode in ("gif", "jpg")) and not has_clips:
+            media_stages = "frames"
+        return {
+            "intent": media_stages,
+            "stages": media_stages,
+            "langs": new_pack,
+            "reason": "media_refresh",
+        }
+
+    # e.g. gif_sec or frames mode flipped with no explicit ranges
+    return {
+        "intent": "media",
+        "stages": "media",
+        "langs": new_pack,
+        "reason": "frame_opts_changed",
+    }
+
+
+def normalize_frame_opts(
+    frames: str | None = "auto",
+    gif_sec: float | int | None = 4.0,
+    clips: list | None = None,
+    *,
+    gif_ranges: list | None = None,
+    duration_sec: float | int | None = None,
+) -> dict:
+    mode = (frames or "auto").strip().lower()
+    if mode not in ("auto", "none", "gif", "jpg"):
+        mode = "auto"
+    try:
+        sec = float(gif_sec if gif_sec is not None else 4.0)
+    except (TypeError, ValueError):
+        sec = 4.0
+    sec = max(1.0, min(20.0, sec))
+    vid_dur: float | None = None
+    try:
+        if duration_sec is not None:
+            vid_dur = float(duration_sec)
+            if vid_dur <= 0:
+                vid_dur = None
+    except (TypeError, ValueError):
+        vid_dur = None
+    if vid_dur is not None:
+        sec = min(sec, vid_dur)
+
+    def _clean_spans(raw: list | None, *, max_span: float) -> list[dict]:
+        out: list[dict] = []
+        if not isinstance(raw, list):
+            return out
+        for item in raw[:24]:
+            if not isinstance(item, dict):
+                continue
+            try:
+                start = float(item.get("start"))
+                end = float(item.get("end"))
+            except (TypeError, ValueError):
+                continue
+            if end <= start:
+                continue
+            if start < 0:
+                start = 0.0
+            if vid_dur is not None:
+                if start >= vid_dur:
+                    continue
+                end = min(end, vid_dur)
+            if end - start > max_span:
+                end = start + max_span
+            if end <= start:
+                continue
+            out.append({"start": round(start, 3), "end": round(end, 3)})
+        return out
+
+    clean_gif = _clean_spans(gif_ranges, max_span=20.0)
+    clean_clips = _clean_spans(clips, max_span=60.0)
+    # If custom GIF ranges exist, derive gif_sec from the longest span (auto fallback unused).
+    if clean_gif:
+        longest = max(x["end"] - x["start"] for x in clean_gif)
+        sec = max(1.0, min(20.0, longest))
+    return {
+        "frames": mode,
+        "gif_sec": sec,
+        "gif_ranges": clean_gif,
+        "clips": clean_clips,
+    }
+
+
+def job_frame_opts(job) -> dict:
+    raw = job["meta_json"] if job is not None else None
+    if not raw:
+        return normalize_frame_opts()
+    try:
+        meta = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return normalize_frame_opts()
+    if not isinstance(meta, dict):
+        return normalize_frame_opts()
+    opts = meta.get("frame_opts") if isinstance(meta.get("frame_opts"), dict) else meta
+    dur = None
+    try:
+        if job is not None and job["duration_sec"] is not None:
+            dur = float(job["duration_sec"])
+    except (TypeError, ValueError, KeyError):
+        dur = None
+    return normalize_frame_opts(
+        opts.get("frames"),
+        opts.get("gif_sec"),
+        opts.get("clips"),
+        gif_ranges=opts.get("gif_ranges"),
+        duration_sec=dur,
+    )
+
+
+def clear_keypoint_images(work_dir: Path) -> int:
+    """Remove step GIF/JPG fields from locale notes. Keeps custom-range MP4 rows."""
+    from note_frames import _is_range_clip_row
+
+    notes = Path(work_dir) / "notes"
+    if not notes.is_dir():
+        return 0
+    n = 0
+    for js in notes.glob("*/summary.json"):
+        try:
+            data = json.loads(js.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        kps = list(data.get("key_points") or [])
+        changed = False
+        cleaned = []
+        for kp in kps:
+            if not isinstance(kp, dict):
+                cleaned.append(kp)
+                continue
+            row = dict(kp)
+            # Range MP4 rows are owned by attach_video_range_clips — do not strip.
+            if _is_range_clip_row(row):
+                cleaned.append(row)
+                continue
+            # Orphan "片段 N" / "动图 N" rows left after a bad clear — drop them.
+            title = str(row.get("title") or "")
+            if not row.get("image") and (
+                title.startswith("片段")
+                or title.startswith("动图 ")
+                or title.lower().startswith("clip ")
+                or title.lower().startswith("gif ")
+            ):
+                changed = True
+                continue
+            if title.startswith("动图 ") or title.lower().startswith("gif "):
+                # Recreated by attach_gif_ranges when custom ranges are set.
+                changed = True
+                continue
+            if "image" in row or "start_sec" in row or "end_sec" in row:
+                row.pop("image", None)
+                row.pop("start_sec", None)
+                row.pop("end_sec", None)
+                # Study notes must not keep mp4 clip paths (GIF block only).
+                row.pop("clip", None)
+                changed = True
+            cleaned.append(row)
+        if changed:
+            data["key_points"] = cleaned
+            js.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            n += 1
+    return n
+
+
+ROOT = Path(__file__).resolve().parents[1]
+WORK_ROOT = ROOT / "downloads" / "batch"
+SITE_FRAMES = ROOT.parent / "site" / "public" / "frames"
+
+_try_lock = threading.Lock()
+_busy = False
+_STALE_SEC = 300
+
+
+def _work_dir(platform: str, video_id: str) -> Path:
+    return WORK_ROOT / f"{platform}_{video_id}"
+
+
+def _latest_mtime(root: Path) -> float | None:
+    if not root.is_dir():
+        return None
+    latest = None
+    for p in root.rglob("*"):
+        if p.is_file():
+            try:
+                mt = p.stat().st_mtime
+            except OSError:
+                continue
+            if latest is None or mt > latest:
+                latest = mt
+    return latest
+
+
+def infer_work_source_lang(work: Path, srts: dict[str, Path]) -> str:
+    """Prefer notes.source_lang, then sole SRT locale, then zh/en heuristic."""
+    notes = work / "notes"
+    if notes.is_dir():
+        for js in sorted(notes.glob("*/summary.json")):
+            try:
+                data = json.loads(js.read_text(encoding="utf-8-sig"))
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                data = {}
+            raw = ""
+            if isinstance(data, dict):
+                raw = str(data.get("source_lang") or data.get("summary_lang") or "")
+            tag = normalize_lang(raw) if raw else normalize_lang(js.parent.name)
+            if tag:
+                return coalesce_source_lang(tag)
+    if len(srts) == 1:
+        return coalesce_source_lang(next(iter(srts)))
+    if "en" in srts and "zh" not in srts:
+        return "en"
+    if "zh" in srts:
+        return "zh"
+    if srts:
+        return coalesce_source_lang(next(iter(srts)))
+    return "en"
+
+
+def infer_try_progress(
+    platform: str,
+    video_id: str,
+    status: str,
+    *,
+    langs: str = "site",
+) -> dict:
+    """Best-effort progress from work-dir artifacts (no pipeline hooks needed)."""
+    work = _work_dir(platform, video_id)
+    now = time.time()
+    latest = _latest_mtime(work)
+    active = (
+        status == "processing"
+        and latest is not None
+        and (now - latest) < _STALE_SEC
+    )
+    stale = status == "processing" and latest is not None and (now - latest) >= _STALE_SEC
+
+    if status in ("done", "published"):
+        return {
+            "percent": 100,
+            "stage": "done",
+            "detail": None,
+            "active": False,
+            "stale": False,
+            "updated_sec_ago": int(now - latest) if latest else None,
+        }
+    if status in ("failed", "dead"):
+        return {
+            "percent": 0,
+            "stage": "failed",
+            "detail": None,
+            "active": False,
+            "stale": False,
+            "updated_sec_ago": int(now - latest) if latest else None,
+        }
+    if status == "pending":
+        return {
+            "percent": 0,
+            "stage": "queued",
+            "detail": None,
+            "active": False,
+            "stale": False,
+            "updated_sec_ago": int(now - latest) if latest else None,
+        }
+
+    wav = existing_wav(work)
+    srts = list_locale_srts(work) if work.is_dir() else {}
+    pack = normalize_try_langs(langs)
+    src_lang = infer_work_source_lang(work, srts)
+    targets = resolve_targets(pack, src_lang)
+    translated = [t for t in srts if t != src_lang]
+    notes_dir = work / "notes"
+    note_langs = (
+        sorted(p.parent.name for p in notes_dir.glob("*/summary.json"))
+        if notes_dir.is_dir()
+        else []
+    )
+    src_notes = notes_dir / src_lang / "summary.json"
+    localized = [t for t in note_langs if t != src_lang]
+    slug_guess = video_id.lower()
+    frame_dirs = [
+        work / "media" / "frames",
+        SITE_FRAMES / slug_guess,
+    ]
+    has_frames = any(d.is_dir() and any(d.glob("*")) for d in frame_dirs)
+
+    percent = 2
+    stage = "download"
+    detail: str | None = None
+    translate_total = max(len(targets), 1)
+    translate_done = len(translated)
+    translate_complete = (
+        translate_done >= len(targets) if targets else bool(srts.get(src_lang))
+    )
+
+    if wav and wav.is_file():
+        # Download finished; ASR can take a long time before any .srt appears.
+        percent = 15
+        stage = "transcribe"
+    if srts.get(src_lang):
+        percent = 38
+        stage = "transcribe"
+    if translated:
+        stage = "translate"
+        percent = 38 + int(32 * translate_done / translate_total)
+        detail = f"{translate_done}/{translate_total}"
+    # Notes often run parallel with translate — advance stage only when captions caught up.
+    if src_notes.is_file() and translate_complete:
+        percent = max(percent, 72)
+        stage = "notes"
+        detail = None
+    if localized and translate_complete:
+        stage = "localize"
+        total = max(len(targets), 1)
+        done = len(localized)
+        percent = 72 + int(18 * min(done, total) / total)
+        detail = f"{done}/{total}"
+    if has_frames:
+        percent = max(percent, 94)
+        stage = "gif"
+        detail = None
+
+    if status == "processing" and percent >= 94 and not has_frames and src_notes.is_file():
+        stage = "gif"
+        percent = max(percent, 92)
+
+    return {
+        "percent": min(percent, 99) if status == "processing" else percent,
+        "stage": stage,
+        "detail": detail,
+        "active": active or _busy,
+        "stale": stale and not _busy,
+        "updated_sec_ago": int(now - latest) if latest else None,
+    }
+
+
+def try_status() -> dict:
+    return {"busy": _busy}
+
+
+def _job_id(queue: QueueDB, platform: str, video_id: str) -> int | None:
+    row = queue._conn.execute(
+        "SELECT id FROM jobs WHERE platform=? AND video_id=? ORDER BY id DESC LIMIT 1",
+        (platform, video_id),
+    ).fetchone()
+    return int(row["id"]) if row else None
+
+
+def _article_for_job(content: ContentDB, platform: str, video_id: str) -> dict | None:
+    row = content._conn.execute(
+        "SELECT id, slug, topic_id, status FROM articles WHERE platform=? AND video_id=?",
+        (platform, video_id),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "article_id": int(row["id"]),
+        "slug": row["slug"],
+        "topic": row["topic_id"],
+        "status": row["status"],
+    }
+
+
+def job_snapshot(job_id: int) -> dict:
+    queue = QueueDB()
+    content = ContentDB()
+    try:
+        job = queue.get_job(job_id)
+        if job is None:
+            return {"ok": False, "error": "job not found", "job_id": job_id}
+        platform = job["platform"]
+        video_id = job["video_id"]
+        article = _article_for_job(content, platform, video_id)
+        st = job["status"]
+        duration_sec = None
+        try:
+            if job["duration_sec"] is not None:
+                duration_sec = float(job["duration_sec"])
+        except (TypeError, ValueError, KeyError):
+            duration_sec = None
+        if duration_sec is None:
+            meta_path = _work_dir(platform, video_id) / "media" / "fetch_meta.json"
+            if meta_path.is_file():
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8-sig"))
+                    if meta.get("duration") is not None:
+                        duration_sec = float(meta["duration"])
+                except (TypeError, ValueError, json.JSONDecodeError, OSError):
+                    pass
+        out: dict = {
+            "ok": True,
+            "job_id": job_id,
+            "status": st,
+            "platform": platform,
+            "video_id": video_id,
+            "title": job["title"],
+            "topic": job["topic_id"],
+            "error": job["last_error"],
+            "busy": _busy,
+            "duration_sec": duration_sec,
+            "frame_opts": job_frame_opts(job),
+        }
+        if article:
+            out["article"] = article
+            out["path"] = f"/topics/{article['topic']}/{article['slug']}"
+        if st in ("pending", "processing", "done", "failed", "dead"):
+            out["progress"] = infer_try_progress(platform, video_id, st)
+        return out
+    finally:
+        queue.close()
+        content.close()
+
+
+def probe_url_duration(url: str) -> dict:
+    """Probe URL: duration + whether cookies are required/usable for try form."""
+    from fetch_media import resolve_cookies_file
+
+    url = (url or "").strip()
+    if len(url) < 8:
+        return {"ok": False, "error": "url too short"}
+    try:
+        platform, video_id = parse_url(url)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+
+    cookies_required = bool((COOKIE_POLICY.get(platform) or {}).get("required"))
+    cookies_present = resolve_cookies_file() is not None
+    base: dict = {
+        "platform": platform,
+        "video_id": video_id,
+        "cookies_required": cookies_required,
+        "cookies_present": cookies_present,
+        "cookies_ok": (not cookies_required) or cookies_present,
+    }
+
+    # Reuse known job / fetch meta first (fast).
+    queue = QueueDB()
+    try:
+        job_id = _job_id(queue, platform, video_id)
+        if job_id is not None:
+            job = queue.get_job(job_id)
+            snap = job_snapshot(job_id)
+            job_info = {
+                "job_id": job_id,
+                "job_status": snap.get("status"),
+                "langs": job_langs(job) if job else "site",
+                "frame_opts": job_frame_opts(job) if job else normalize_frame_opts(),
+                "path": snap.get("path"),
+                "cached": snap.get("status") in ("done", "published"),
+            }
+            dur = snap.get("duration_sec")
+            if dur is not None and float(dur) > 0:
+                return {
+                    **base,
+                    **job_info,
+                    "ok": True,
+                    "duration_sec": float(dur),
+                    "source": "job",
+                    "cookies_ok": True if not cookies_required else cookies_present,
+                }
+            # Still surface cache info when duration missing.
+            base = {**base, **job_info}
+    finally:
+        queue.close()
+
+    meta_path = _work_dir(platform, video_id) / "media" / "fetch_meta.json"
+    if meta_path.is_file():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8-sig"))
+            if meta.get("duration") is not None and float(meta["duration"]) > 0:
+                return {
+                    **base,
+                    "ok": True,
+                    "duration_sec": float(meta["duration"]),
+                    "source": "fetch_meta",
+                    "cookies_ok": True if not cookies_required else cookies_present,
+                }
+        except (TypeError, ValueError, json.JSONDecodeError, OSError):
+            pass
+
+    try:
+        import yt_dlp
+
+        opts: dict = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "noplaylist": True,
+        }
+        cf = resolve_cookies_file()
+        if cf is not None:
+            opts["cookiefile"] = str(cf)
+        probe_url = canonical_url(platform, video_id)
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(probe_url, download=False)
+        dur = info.get("duration") if isinstance(info, dict) else None
+        if dur is None or float(dur) <= 0:
+            return {
+                **base,
+                "ok": False,
+                "error": "duration unavailable",
+                "cookies_ok": False if cookies_required else True,
+            }
+        return {
+            **base,
+            "ok": True,
+            "duration_sec": float(dur),
+            "source": "yt_dlp",
+            "title": (info.get("title") if isinstance(info, dict) else None),
+            "cookies_ok": True,
+        }
+    except Exception as e:
+        err = str(e)[:300]
+        cookie_fail = cookies_required and (
+            "Fresh cookies" in err
+            or "cookie" in err.lower()
+            or "cookies" in err.lower()
+            or not cookies_present
+        )
+        return {
+            **base,
+            "ok": False,
+            "error": err,
+            "cookies_ok": False if cookie_fail else base["cookies_ok"],
+            "need_sessionid": bool(cookie_fail),
+        }
+
+
+def probe_urls(urls: list[str], *, pasted_cookies: str | None = None) -> dict:
+    """Aggregate URL parse + per-platform cookie requirements for the try form."""
+    from fetch_media import resolve_cookies_file
+
+    valid: list[str] = []
+    invalid: list[dict] = []
+    counts: dict[str, int] = {}
+    seen: set[str] = set()
+
+    for raw in urls:
+        url = (raw or "").strip()
+        if len(url) < 8:
+            continue
+        key = url.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            platform, _vid = parse_url(url)
+        except ValueError as e:
+            invalid.append({"url": url, "error": str(e)})
+            continue
+        valid.append(url)
+        counts[platform] = counts.get(platform, 0) + 1
+
+    platforms: dict[str, dict] = {}
+    block_submit = False
+    missing_labels: list[str] = []
+    for platform, count in sorted(counts.items()):
+        pol = COOKIE_POLICY.get(platform) or {
+            "required": False,
+            "label": platform,
+        }
+        required = bool(pol.get("required"))
+        soft = bool(pol.get("soft"))
+        ok = cookies_satisfied(platform, pasted=pasted_cookies)
+        present = ok if required else (_cookies_file_covers_platform(platform) or bool((pasted_cookies or "").strip()))
+        entry = {
+            "count": count,
+            "required": required,
+            "soft": soft,
+            "present": present,
+            "ok": ok,
+            "label": pol.get("label") or platform,
+        }
+        platforms[platform] = entry
+        if required and not ok:
+            block_submit = True
+            missing_labels.append(str(entry["label"]))
+
+    message = ""
+    if block_submit:
+        message = "Login cookies required for: " + ", ".join(missing_labels)
+    elif invalid and not valid:
+        message = "No valid links found"
+
+    out: dict = {
+        "ok": bool(valid),
+        "total_lines": len([u for u in urls if (u or "").strip()]),
+        "valid_count": len(valid),
+        "invalid_count": len(invalid),
+        "valid_urls": valid,
+        "invalid": invalid,
+        "counts": counts,
+        "platforms": platforms,
+        "block_submit": block_submit,
+        "message": message,
+        "cookies_local": resolve_cookies_file() is not None,
+    }
+    if valid:
+        first = probe_url_duration(valid[0])
+        if first.get("duration_sec"):
+            out["duration_sec"] = first["duration_sec"]
+        if first.get("cached"):
+            out["cached"] = first.get("cached")
+            out["job_status"] = first.get("job_status")
+            out["langs"] = first.get("langs")
+            out["frame_opts"] = first.get("frame_opts")
+    return out
+
+
+def submit_urls(
+    urls: list[str],
+    *,
+    entries: list[dict] | None = None,
+    topic: str = "general",
+    frames: str = "auto",
+    gif_sec: float = 4.0,
+    clips: list | None = None,
+    gif_ranges: list | None = None,
+    sessionid: str | None = None,
+    langs: str | list | None = None,
+    want_translate: bool = True,
+    want_notes: bool = True,
+    stages: str | None = None,
+) -> dict:
+    probe = probe_urls(urls, pasted_cookies=sessionid)
+    if probe.get("block_submit"):
+        return {"ok": False, "error": probe.get("message") or "cookies required"}
+    valid = probe.get("valid_urls") or []
+    if not valid:
+        return {"ok": False, "error": probe.get("message") or "no valid urls"}
+
+    entry_by_url: dict[str, dict] = {}
+    for raw in entries or []:
+        if not isinstance(raw, dict):
+            continue
+        url = (raw.get("url") or "").strip()
+        if url:
+            entry_by_url[url.lower()] = raw
+
+    apply_batch_cookies(sessionid, valid)
+    jobs: list[dict] = []
+    for url in valid:
+        try:
+            platform, video_id = parse_url(url)
+        except ValueError:
+            platform, video_id = "", ""
+        dur: float | None = None
+        if platform and video_id:
+            meta_path = _work_dir(platform, video_id) / "media" / "fetch_meta.json"
+            if meta_path.is_file():
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8-sig"))
+                    if meta.get("duration") is not None:
+                        dur = float(meta["duration"])
+                except (TypeError, ValueError, json.JSONDecodeError, OSError):
+                    dur = None
+        entry = entry_by_url.get(url.lower())
+        frame_opts = entry_frame_opts(
+            global_frames=frames,
+            global_gif_sec=gif_sec,
+            global_clips=clips,
+            global_gif_ranges=gif_ranges,
+            entry=entry,
+            duration_sec=dur,
+        )
+        out = submit_url(
+            url,
+            topic=topic,
+            frames=frame_opts["frames"],
+            gif_sec=frame_opts["gif_sec"],
+            clips=frame_opts.get("clips"),
+            gif_ranges=frame_opts.get("gif_ranges"),
+            sessionid=None,
+            langs=langs,
+            want_translate=want_translate,
+            want_notes=want_notes,
+            stages=stages,
+        )
+        jobs.append({"url": url, **out})
+
+    starter: int | None = None
+    for item in jobs:
+        if not item.get("ok"):
+            continue
+        enq = item.get("enqueue")
+        if enq in ("inserted", "requeued", "already_pending"):
+            starter = int(item["job_id"])
+            break
+
+    return {
+        "ok": True,
+        "jobs": jobs,
+        "queued": sum(1 for j in jobs if j.get("ok")),
+        "failed": sum(1 for j in jobs if not j.get("ok")),
+        "started_job_id": starter,
+        "probe": probe,
+    }
+
+
+def submit_url(
+    url: str,
+    *,
+    topic: str = "general",
+    frames: str = "auto",
+    gif_sec: float = 4.0,
+    clips: list | None = None,
+    gif_ranges: list | None = None,
+    sessionid: str | None = None,
+    langs: str | list | None = None,
+    want_translate: bool = True,
+    want_notes: bool = True,
+    stages: str | None = None,
+) -> dict:
+    url = url.strip()
+    if len(url) < 8:
+        return {"ok": False, "error": "url too short"}
+    try:
+        platform, video_id = parse_url(url)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+
+    sid = (sessionid or "").strip()
+    if sid:
+        try:
+            from fetch_media import upsert_try_cookies
+
+            upsert_try_cookies(sid, platform=platform, url=url)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+
+    dur: float | None = None
+    meta_path = _work_dir(platform, video_id) / "media" / "fetch_meta.json"
+    if meta_path.is_file():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8-sig"))
+            if meta.get("duration") is not None:
+                dur = float(meta["duration"])
+        except (TypeError, ValueError, json.JSONDecodeError, OSError):
+            dur = None
+
+    frame_opts = normalize_frame_opts(
+        frames, gif_sec, clips, gif_ranges=gif_ranges, duration_sec=dur
+    )
+    langs_pack = normalize_try_langs(langs)
+    c = Candidate(
+        platform=platform,
+        video_id=video_id,
+        url=canonical_url(platform, video_id),
+        original_url=url,
+        title=f"try:{platform}:{video_id}",
+        topic_id=topic,
+        score=9999.0,
+        duration_sec=int(dur) if dur is not None else None,
+    )
+    queue = QueueDB()
+    try:
+        result = queue.enqueue(c, priority="high")
+        job_id = _job_id(queue, platform, video_id)
+        if job_id is None:
+            return {"ok": False, "error": "enqueue failed"}
+        if result == "ignored":
+            job = queue.get_job(job_id)
+            if job and job["status"] in ("dead", "failed"):
+                if queue.requeue_job(job_id):
+                    result = "requeued"
+            elif job and job["status"] == "pending":
+                result = "already_pending"
+            elif job and job["status"] in ("done", "published"):
+                result = "already_done"
+            elif job and job["status"] == "processing":
+                result = "already_processing"
+        elif result == "skipped_done":
+            result = "already_done"
+        job = queue.get_job(job_id)
+        prev_langs = job_langs(job) if job else "site"
+        prev_frame_opts = job_frame_opts(job) if job else normalize_frame_opts()
+        job_status = str(job["status"]) if job else None
+        meta_patch: dict = {
+            "frame_opts": frame_opts,
+            "langs": langs_pack,
+            "want_translate": bool(want_translate),
+            "want_notes": bool(want_notes),
+        }
+        if result != "already_done":
+            mode = str(frame_opts.get("frames") or "auto")
+            has_media = (
+                mode != "none"
+                or bool(frame_opts.get("clips"))
+                or bool(frame_opts.get("gif_ranges"))
+            )
+            meta_patch["stages"] = (stages or "").strip() or compose_try_stages(
+                want_translate=want_translate,
+                want_notes=want_notes,
+                has_media=has_media,
+            )
+        queue.set_meta(job_id, meta_patch)
+        return {
+            "ok": True,
+            "job_id": job_id,
+            "enqueue": result,
+            "platform": platform,
+            "video_id": video_id,
+            "frame_opts": frame_opts,
+            "langs": langs_pack,
+            "prev_langs": prev_langs,
+            "prev_frame_opts": prev_frame_opts,
+            "job_status": job_status,
+        }
+    finally:
+        queue.close()
+
+
+def _prepare_upload(file_bytes: bytes, filename: str) -> tuple[Path, str]:
+    uid = uuid.uuid4().hex[:12]
+    work_dir = WORK_ROOT / f"upload_{uid}"
+    media = job_media_dir(work_dir)
+    ext = Path(filename or "upload.mp4").suffix.lower()
+    if ext not in {".mp4", ".mkv", ".webm", ".mov", ".m4a", ".wav"}:
+        ext = ".mp4"
+    src = media / f"source{ext}"
+    src.write_bytes(file_bytes)
+    wav = media / "full_16k.wav"
+    ffmpeg = find_ffmpeg()
+    import subprocess
+
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(src),
+            "-vn",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            str(wav),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    # Keep video for GIF when input is video
+    if ext in {".mp4", ".mkv", ".webm", ".mov"} and src.name != "source.mp4":
+        target = media / "source.mp4"
+        if ext != ".mp4":
+            subprocess.run(
+                [
+                    ffmpeg,
+                    "-y",
+                    "-i",
+                    str(src),
+                    "-c",
+                    "copy",
+                    str(target),
+                ],
+                check=True,
+                capture_output=True,
+            )
+        else:
+            shutil.copy2(src, target)
+    return work_dir, uid
+
+
+def submit_upload(
+    file_bytes: bytes,
+    filename: str,
+    *,
+    topic: str = "general",
+    frames: str = "auto",
+    gif_sec: float = 4.0,
+    clips: list | None = None,
+    gif_ranges: list | None = None,
+    langs: str | list | None = None,
+    frame_opts: dict | None = None,
+    want_translate: bool = True,
+    want_notes: bool = True,
+    stages: str | None = None,
+) -> dict:
+    if len(file_bytes) < 10_000:
+        return {"ok": False, "error": "file too small"}
+    if len(file_bytes) > 500 * 1024 * 1024:
+        return {"ok": False, "error": "file too large (max 500MB)"}
+    if frame_opts is None:
+        frame_opts = normalize_frame_opts(frames, gif_sec, clips, gif_ranges=gif_ranges)
+    langs_pack = normalize_try_langs(langs)
+    try:
+        work_dir, uid = _prepare_upload(file_bytes, filename)
+    except Exception as e:
+        return {"ok": False, "error": f"upload prepare failed: {e}"}
+    wav = existing_wav(work_dir)
+    c = Candidate(
+        platform="upload",
+        video_id=uid,
+        url=f"upload://{uid}",
+        original_url=f"upload://{uid}",
+        title=Path(filename or "upload").stem[:80] or f"upload:{uid}",
+        topic_id=topic,
+        score=9999.0,
+    )
+    queue = QueueDB()
+    try:
+        result = queue.enqueue(c, priority="high")
+        job_id = _job_id(queue, "upload", uid)
+        if job_id is None:
+            return {"ok": False, "error": "enqueue failed"}
+        if result == "ignored":
+            job = queue.get_job(job_id)
+            if job and job["status"] in ("dead", "failed"):
+                if queue.requeue_job(job_id):
+                    result = "requeued"
+        if wav:
+            queue.set_source_wav(job_id, str(wav))
+        mode = str(frame_opts.get("frames") or "auto")
+        has_media = (
+            mode != "none"
+            or bool(frame_opts.get("clips"))
+            or bool(frame_opts.get("gif_ranges"))
+        )
+        stage_s = (stages or "").strip() or compose_try_stages(
+            want_translate=want_translate,
+            want_notes=want_notes,
+            has_media=has_media,
+        )
+        queue.set_meta(
+            job_id,
+            {
+                "frame_opts": frame_opts,
+                "langs": langs_pack,
+                "stages": stage_s,
+                "want_translate": bool(want_translate),
+                "want_notes": bool(want_notes),
+            },
+        )
+        return {
+            "ok": True,
+            "job_id": job_id,
+            "enqueue": result,
+            "platform": "upload",
+            "video_id": uid,
+            "work_dir": str(work_dir),
+            "frame_opts": frame_opts,
+            "langs": langs_pack,
+        }
+    finally:
+        queue.close()
+
+
+def submit_uploads(
+    items: list[dict],
+    *,
+    topic: str = "general",
+    frames: str = "auto",
+    gif_sec: float = 4.0,
+    clips: list | None = None,
+    gif_ranges: list | None = None,
+    langs: str | list | None = None,
+    want_translate: bool = True,
+    want_notes: bool = True,
+    stages: str | None = None,
+) -> dict:
+    """Batch upload enqueue; chains like submit_urls."""
+    if not items:
+        return {"ok": False, "error": "no files"}
+
+    jobs: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        raw = item.get("bytes")
+        name = str(item.get("filename") or "upload.mp4")
+        if not isinstance(raw, (bytes, bytearray)):
+            jobs.append({"filename": name, "ok": False, "error": "missing bytes"})
+            continue
+        entry = item.get("entry") if isinstance(item.get("entry"), dict) else None
+        dur: float | None = None
+        try:
+            if item.get("duration_sec") is not None:
+                dur = float(item["duration_sec"])
+        except (TypeError, ValueError):
+            dur = None
+        fo = entry_frame_opts(
+            global_frames=frames,
+            global_gif_sec=gif_sec,
+            global_clips=clips,
+            global_gif_ranges=gif_ranges,
+            entry=entry,
+            duration_sec=dur,
+        )
+        out = submit_upload(
+            bytes(raw),
+            name,
+            topic=topic,
+            frame_opts=fo,
+            langs=langs,
+            want_translate=want_translate,
+            want_notes=want_notes,
+            stages=stages,
+        )
+        jobs.append({"filename": name, **out})
+
+    starter: int | None = None
+    for item in jobs:
+        if not item.get("ok"):
+            continue
+        enq = item.get("enqueue")
+        if enq in ("inserted", "requeued", "already_pending"):
+            starter = int(item["job_id"])
+            break
+
+    return {
+        "ok": True,
+        "jobs": jobs,
+        "queued": sum(1 for j in jobs if j.get("ok")),
+        "failed": sum(1 for j in jobs if not j.get("ok")),
+        "started_job_id": starter,
+    }
+
+
+def refresh_try_frames(job_id: int, *, stages: str | None = None) -> dict:
+    """Re-cut GIF/MP4 on an already-done job (no ASR). Delegates to batch media-only."""
+    global _busy
+    if not _try_lock.acquire(blocking=False):
+        return {"ok": False, "error": "another try job is running"}
+    _busy = True
+    try:
+        from discover.run_batch import (
+            _process_media_only,
+            resolve_media_refresh_stages,
+        )
+
+        queue = QueueDB()
+        content = ContentDB()
+        try:
+            job = queue.get_job(job_id)
+            if job is None:
+                return {"ok": False, "error": "job not found"}
+            platform = job["platform"]
+            video_id = job["video_id"]
+            work_dir = _work_dir(platform, video_id)
+            opts = job_frame_opts(job)
+            enabled = resolve_media_refresh_stages(
+                stages=stages,
+                frames=opts.get("frames"),
+                has_clips=bool(opts.get("clips")),
+            )
+
+            queue._conn.execute(
+                "UPDATE jobs SET status='processing', updated_at=? WHERE id=?",
+                (time.time(), job_id),
+            )
+            queue._conn.commit()
+
+            if "frames" in enabled:
+                clear_keypoint_images(work_dir)
+
+            _process_media_only(
+                job,
+                queue=queue,
+                content=content,
+                work_dir=work_dir,
+                enabled=enabled,
+                frame_mode=opts.get("frames"),
+                gif_duration=opts.get("gif_sec"),
+                frame_clips=list(opts.get("clips") or []),
+            )
+            export_main([])
+            snap = job_snapshot(job_id)
+            snap["stages"] = sorted(enabled)
+            snap["clips_only"] = enabled == frozenset({"clips"})
+            return snap
+        except Exception as e:
+            try:
+                queue.mark_failed(job_id, str(e)[:2000])
+            except Exception:
+                pass
+            raise
+        finally:
+            queue.close()
+            content.close()
+    finally:
+        _busy = False
+        _try_lock.release()
+        schedule_next_try_job(skip_job_id=job_id)
+
+
+def run_try_job(job_id: int) -> dict:
+    """Background: process one queued job, export site."""
+    global _busy
+    if not _try_lock.acquire(blocking=False):
+        return {"ok": False, "error": "another try job is running"}
+    _busy = True
+    try:
+        from discover.run_batch import process_job
+        from llm.factory import configure_llm
+
+        configure_llm(profile="local")
+        queue = QueueDB()
+        content = ContentDB()
+        try:
+            job = queue.get_job(job_id)
+            if job is None:
+                return {"ok": False, "error": "job not found"}
+            if job["status"] == "done":
+                export_main([])
+                return job_snapshot(job_id)
+            if job["status"] in ("dead", "failed"):
+                return job_snapshot(job_id)
+
+            platform = job["platform"]
+            video_id = job["video_id"]
+            url = job["canonical_url"] or job["url"]
+            frame_opts = job_frame_opts(job)
+            langs_pack = job_langs(job)
+            stages = "all"
+            want_translate = True
+            want_notes = True
+            if job.get("meta_json"):
+                try:
+                    meta = json.loads(job["meta_json"])
+                    if isinstance(meta, dict):
+                        if meta.get("stages"):
+                            stages = str(meta["stages"])
+                        if "want_translate" in meta:
+                            want_translate = bool(meta["want_translate"])
+                        if "want_notes" in meta:
+                            want_notes = bool(meta["want_notes"])
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    pass
+
+            if platform in ("bilibili", "youtube"):
+                work_dir = WORK_ROOT / f"{platform}_{video_id}"
+                try:
+                    ensure_source_video(url, work_dir, cookies_from_browser=None)
+                except Exception as e:
+                    print(f"[try] video prefetch skip ({e})")
+
+            job = queue.claim_next(max_attempts=5, video_id=video_id)
+            if job is None:
+                return job_snapshot(job_id)
+
+            try:
+                print(
+                    f"[try] langs={langs_pack} stages={stages} "
+                    f"translate={want_translate} notes={want_notes}"
+                )
+                process_job(
+                    job,
+                    queue=queue,
+                    content=content,
+                    work_root=WORK_ROOT,
+                    langs=langs_pack,
+                    source_lang="auto",
+                    chat_model="gemma4:e2b",
+                    translate_model="translategemma:4b",
+                    device="cpu",
+                    multipass=False,
+                    llm_correct=True,
+                    skip_translate=not want_translate,
+                    skip_summary=not want_notes,
+                    skip_keypoints=not want_notes,
+                    localize_summary=want_notes,
+                    max_attempts=5,
+                    dry_run=False,
+                    skip_fetch=(platform == "upload"),
+                    frame_mode=frame_opts["frames"],
+                    gif_duration=frame_opts["gif_sec"],
+                    frame_clips=frame_opts.get("clips") or None,
+                    stages=stages,
+                )
+            except Exception as e:
+                queue.mark_failed(job_id, str(e)[:2000])
+                raise
+
+            export_main([])
+            return job_snapshot(job_id)
+        finally:
+            queue.close()
+            content.close()
+    finally:
+        _busy = False
+        _try_lock.release()
+        schedule_next_try_job(skip_job_id=job_id)
