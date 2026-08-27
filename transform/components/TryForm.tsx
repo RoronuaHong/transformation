@@ -21,8 +21,20 @@ import { parseUrlLines, type UrlProbeResult } from "@/lib/try-urls";
 import type { Locale } from "@/lib/locales";
 import { localeNames, localePath, locales } from "@/lib/locales";
 
+/** Direct FastAPI. Prefer absolute URL so long yt-dlp probes are not cut by Next rewrites. */
 const API =
   process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") || "http://127.0.0.1:8800";
+
+function isFetchNetworkError(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  const m = e.message.toLowerCase();
+  return (
+    e.name === "TypeError" ||
+    m.includes("failed to fetch") ||
+    m.includes("networkerror") ||
+    m.includes("load failed")
+  );
+}
 
 type Progress = {
   percent: number;
@@ -681,7 +693,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
         }
       }
     } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
+      setErr(isFetchNetworkError(e) ? copy.apiDown : e instanceof Error ? e.message : String(e));
       stopPoll();
       setLoading(false);
       return;
@@ -731,8 +743,10 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
             ...(sessionid.trim() ? { sessionid: sessionid.trim() } : {}),
           }),
         });
+        if (!r.ok) throw new Error(`probe ${r.status}`);
         const data = (await r.json()) as UrlProbeResult;
         setUrlProbe(data);
+        setErr((prev) => (prev === copy.apiDown ? null : prev));
         const done =
           !!data.cached || data.job_status === "done" || data.job_status === "published";
         setCachedDone(done);
@@ -740,8 +754,12 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
         setPrevFrameOpts(data.frame_opts || null);
         if (data.duration_sec != null) applyVideoDuration(data.duration_sec);
         else if (!files.length) applyVideoDuration(null);
-      } catch {
+      } catch (e) {
         if (!files.length) applyVideoDuration(null);
+        setUrlProbe(null);
+        if (isFetchNetworkError(e) || (e instanceof Error && /probe\s+[45]\d\d/.test(e.message))) {
+          setErr(copy.apiDown);
+        }
       }
     }, 450);
     return () => {
@@ -934,7 +952,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      setErr(msg.includes("fetch") ? copy.apiDown : msg);
+      setErr(isFetchNetworkError(e) || msg.toLowerCase().includes("fetch") ? copy.apiDown : msg);
       setLoading(false);
     }
   }

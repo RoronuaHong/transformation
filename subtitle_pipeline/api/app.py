@@ -38,15 +38,24 @@ async def lifespan(app: FastAPI):
         pass
 
     settings = get_settings()
-    _store = MongoStore(settings)
+    mongo_ready = False
     try:
-        _store.ping()
+        candidate = MongoStore(settings)
+        candidate.ping()
+        _store = candidate
+        mongo_ready = True
+        _store.write_log("info", "api", "ops api started (mongo)")
     except Exception as e:
-        raise RuntimeError(
-            f"MongoDB not reachable at {settings.mongo_uri}. Start local mongod first. ({e})"
-        ) from e
-    _store.write_log("info", "api", "ops api started")
-    if settings.schedule_enabled:
+        # Workbench /api/try/* does not need Mongo; keep API up for local try.
+        from api.memory_store import MemoryStore
+
+        print(
+            f"WARNING: MongoDB not reachable at {settings.mongo_uri} ({e}). "
+            "Using in-memory store; admin persistence disabled until mongod :27018 is up."
+        )
+        _store = MemoryStore()
+        _store.write_log("info", "api", "ops api started (memory fallback)")
+    if settings.schedule_enabled and mongo_ready:
         from apscheduler.schedulers.background import BackgroundScheduler
         from apscheduler.triggers.cron import CronTrigger
 
@@ -176,17 +185,21 @@ def _job_inbox(settings: Settings, body: InboxBody) -> dict:
 @app.get("/health")
 def health() -> dict[str, Any]:
     mongo_ok = False
+    store_kind = "none"
     try:
-        store().ping()
-        mongo_ok = True
+        s = store()
+        s.ping()
+        mongo_ok = getattr(s, "client", None) is not None
+        store_kind = "mongo" if mongo_ok else "memory"
     except Exception:
         mongo_ok = False
     return {
-        "ok": mongo_ok,
+        "ok": True,
         "role": "backend-ops",
-        "frontend": "site/ Next.js :3000",
+        "frontend": "transform/ Next.js :3000",
         "admin": "admin/ Next.js :3001",
         "mongo": mongo_ok,
+        "store": store_kind,
         "scheduler": current_status(),
     }
 
