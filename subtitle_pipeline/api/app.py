@@ -1,4 +1,4 @@
-"""FastAPI ops server: schedule + admin APIs. Public SEO site stays in site/."""
+"""FastAPI ops server: schedule + admin APIs + workbench Try. Public frontend is transform/."""
 
 from __future__ import annotations
 
@@ -100,8 +100,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Vitual ops (backend)",
-    description="Admin/ops API. Public frontend is Next.js `site/` (port 3000). "
-    "This service is the management backend (port 8000) + scheduler.",
+    description="Admin/ops API + workbench Try. Public frontend is Next.js `transform/` (port 3000). "
+    "This service is the management backend (port 8800) + scheduler.",
     lifespan=lifespan,
     docs_url="/admin/docs",
     redoc_url=None,

@@ -1,6 +1,6 @@
 """Language packs and display names for the subtitle pipeline.
 
-Default pack is ``site`` (16 codes, synced with ``site/lib/locales.ts``).
+Default pack is ``site`` (16 codes, synced with ``transform/lib/locales.ts``).
 ``all`` = TranslateGemma WMT24++ verified set (dialect-collapsed).
 Translation goes through ``translategemma:4b``; chat/polish via ``gemma4:e2b``.
 """
@@ -109,7 +109,7 @@ ALIASES: dict[str, str] = {
 }
 
 PACKS: dict[str, tuple[str, ...]] = {
-    # Site pack (16). Keep in sync with site/lib/locales.ts (nav order differs).
+    # Site pack (16). Keep in sync with transform/lib/locales.ts (nav order differs).
     "site": (
         "zh",
         "zh-Hant",

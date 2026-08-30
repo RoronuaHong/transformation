@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Restore minimal Bilibili folding article so site pages stop 404ing."""
+"""Restore minimal Bilibili folding article so transform pages stop 404ing."""
 
 from __future__ import annotations
 
@@ -148,7 +148,7 @@ def main() -> int:
         content.close()
 
     export_main([])
-    print("[restore] exported site/content/articles.json")
+    print("[restore] exported transform/content/articles.json")
     return 0
 
 

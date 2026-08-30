@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export content.db → site/content/articles.json for Next.js static reads."""
+"""Export content.db → transform/content/articles.json for Next.js static reads."""
 
 from __future__ import annotations
 
@@ -67,7 +67,7 @@ def cues_from_locale_srts(locales: dict[str, dict]) -> list[dict]:
 
 
 def export_articles(db: ContentDB, *, site_public: Path | None = None) -> list[dict]:
-    site_public = site_public or (ROOT.parent / "site" / "public")
+    site_public = site_public or (ROOT.parent / "transform" / "public")
     rows = db._conn.execute(
         "SELECT * FROM articles WHERE status IN ('ready','published') ORDER BY updated_at DESC"
     ).fetchall()
@@ -156,12 +156,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--out",
         type=Path,
-        default=ROOT.parent / "site" / "content" / "articles.json",
+        default=ROOT.parent / "transform" / "content" / "articles.json",
     )
     p.add_argument(
         "--site-public",
         type=Path,
-        default=ROOT.parent / "site" / "public",
+        default=ROOT.parent / "transform" / "public",
     )
     args = p.parse_args(argv)
     db = ContentDB(args.content_db)

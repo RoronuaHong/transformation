@@ -37,6 +37,8 @@ output/
 .DS_Store
 Thumbs.db
 *.log
+.vscode/
+__pycache__/
 
 # ── 音视屏 / 媒体（不提交）──
 *.wav

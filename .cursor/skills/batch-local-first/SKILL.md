@@ -1,6 +1,6 @@
 ---
 name: batch-local-first
-description: Processes pending discover jobs with ASR/translate/summary and exports the Next.js site pack. Default LLM is local Ollama; optional hybrid/tokenhub hy3. Use when the user asks for yarn batch, 加工, 转写, 翻译, LLM profile switching, 导出站点, or export-site.
+description: Processes pending queue jobs with ASR/translate/notes and optional export-site. Default LLM is local Ollama; optional hybrid/tokenhub hy3. Use when the user asks for yarn batch, 加工, 转写, 翻译, LLM profile, --stages, --requeue-failed, or export-site command details — not for full e2e smoke (use main-path).
 ---
 
 # Batch process (local first) · WF-01 + WF-02
@@ -12,7 +12,7 @@ description: Processes pending discover jobs with ASR/translate/summary and expo
 - Default profile: **local** (`gemma4:e2b` + `translategemma:4b` via Ollama).
 - Cloud: `--llm-profile hybrid` (hy3 for polish/summary, local translate) or `tokenhub` (all hy3).
 - Never commit API keys. Use env `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`.
-- Site pack: `--langs site` (**16 langs**, same as `site/lib/locales.ts`). Default in `pipeline.py` / `yarn batch` / `yarn full`. `yarn translate` still passes `--langs all` when you want the full set.
+- Site pack: `--langs site` (**16 langs**, same as `transform/lib/locales.ts`; pack name `site`, frontend dir `transform/`). Default in `pipeline.py` / `yarn batch` / `yarn full`. `yarn translate` still passes `--langs all` when you want the full set.
 - Notes (WF-02): source-lang `one_liner`/`summary`/`focuses`/`key_points`/`hard_points`, then localize to the same lang pack as captions.
 - Parallel translate / notes localize: `--lang-workers N` or env `VITUAL_LANG_WORKERS` (default **2**, max 8). Whisper/fetch stay serial.
 - After source SRT: **source notes ∥ subtitle translate** (fork). Notes localize still waits on source notes.
@@ -36,7 +36,7 @@ yarn batch:fast                    # langs=site, no-multipass, cpu
 yarn batch:fast --requeue-failed   # after a failed fetch/ASR
 python -m discover.run_batch --llm-profile hybrid --langs site --limit 1
 yarn batch:cloud                   # tokenhub hy3
-yarn export-site                   # content.db → site/content/articles.json (includes cues)
+yarn export-site                   # content.db → transform/content/articles.json (includes cues)
 ```
 
 Register existing work dir without ASR:
@@ -63,5 +63,5 @@ downloads/batch/{platform}_{id}/
 - Job status: pending → processing → done | failed | dead
 - Content: `subtitle_pipeline/data/content.db`
 - Export: `articles.json` must contain `cues` (parsed SRT), not only `srt_path`
-- 前台: `cd ../site && npm run build` (or `npm run dev`)
+- 前台: `cd ../transform && npm run build` (or `npm run dev`)
 - Mongo logs/alerts: only if the job was started via `ops-api` (`POST /admin/batch`), not plain yarn

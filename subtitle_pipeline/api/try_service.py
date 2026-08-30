@@ -500,7 +500,7 @@ def clear_keypoint_images(work_dir: Path) -> int:
 
 ROOT = Path(__file__).resolve().parents[1]
 WORK_ROOT = ROOT / "downloads" / "batch"
-SITE_FRAMES = ROOT.parent / "site" / "public" / "frames"
+SITE_FRAMES = ROOT.parent / "transform" / "public" / "frames"
 
 _try_lock = threading.Lock()
 _busy = False
