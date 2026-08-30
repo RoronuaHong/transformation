@@ -1,0 +1,53 @@
+# 一桌 Deskline · 知识库统一知识源
+# A(自研 chromadb) 与 B(AnythingLLM/RAGFlow) 共用此清单
+# 新增文档只需改这里，两边重建索引即可
+
+sources:
+  # 1. 货架 SKU（职场数字资产）
+  - path: web/src/data/products.ts
+    type: ts-export
+    label: 资产货架
+    description: 周报/述职/Excel/简历/入职等工作流包 SKU
+
+  # 2. 工具聚合导航
+  - path: web/src/data/tools.ts
+    type: ts-export
+    label: 工具目录
+    description: 精选职场工具导航（写作/表格/演示/协作/AI）
+
+  # 3. 调研与计划文档
+  - path: findings.md
+    type: markdown
+    label: 调研发现
+  - path: task_plan.md
+    type: markdown
+    label: 执行计划
+  - path: progress.md
+    type: markdown
+    label: 项目进度
+
+  # 4. 字幕管线沉淀笔记（已是 md 的可直接索引）
+  - path: subtitle_pipeline/downloads
+    type: dir-markdown
+    label: 字幕笔记
+    description: 视频转字幕后产出的笔记/总结 md
+
+  # 5. 处理产出结果
+  - path: output
+    type: dir-markdown
+    label: 处理产出
+    description: ASR/改写/多轮校正等文本产出
+
+# 嵌入与生成配置（A 方案使用，B 方案在 UI 中选同样模型）
+embed:
+  provider: ollama
+  model: nomic-embed-text
+  base_url: http://127.0.0.1:11434
+  dim: 768
+
+generate:
+  # 复用 subtitle_pipeline 的 hy3 profile
+  provider: tokenhub
+  model: hy3
+  base_url_env: ANTHROPIC_BASE_URL
+  api_key_env: ANTHROPIC_AUTH_TOKEN

@@ -1,0 +1,7 @@
+# A 方案：自研 LLM Wiki 依赖（向量库：Milvus Lite）
+pymilvus>=3.0.0
+ollama>=0.4.0
+pyyaml>=6.0
+fastapi>=0.110.0
+uvicorn>=0.29.0
+requests>=2.31.0

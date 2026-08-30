@@ -1,0 +1,57 @@
+services:
+  # A 方案向量库：Milvus standalone（官方三容器组合，最稳妥）
+  etcd:
+    container_name: deskline-milvus-etcd
+    image: quay.io/coreos/etcd:v3.5.5
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - ./etcd-data:/etcd
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    restart: unless-stopped
+
+  minio:
+    container_name: deskline-milvus-minio
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - ./minio-data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    restart: unless-stopped
+
+  milvus:
+    container_name: deskline-milvus
+    image: milvusdb/milvus:latest
+    command: ["milvus", "run", "standalone"]
+    environment:
+      - ETCD_ENDPOINTS=etcd:2379
+      - MINIO_ADDRESS=minio:9000
+    volumes:
+      - ./milvus-data:/var/lib/milvus
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    depends_on:
+      - etcd
+      - minio
+    restart: unless-stopped
+
+  # B 方案：AnythingLLM 现成 LLM Wiki 产品
+  anythingllm:
+    image: mintplexlabs/anythingllm:latest
+    container_name: deskline-kb
+    ports:
+      - "3005:3001"
+    environment:
+      - STORAGE_DIR=/app/server/storage
+    volumes:
+      - ./anythingllm-storage:/app/server/storage
+    restart: unless-stopped
