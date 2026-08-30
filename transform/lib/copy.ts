@@ -43,6 +43,7 @@ export type NavCopy = {
   language: string;
   brand: string;
   feed: string;
+  ask: string;
   themeLight: string;
   themeDark: string;
   themeToLight: string;
@@ -175,11 +176,17 @@ export type TryCopy = {
   clipsSection: string;
 };
 
+export type AskCopy = {
+  lede: string;
+  placeholder: string;
+};
+
 export type UiCopy = {
   feed: FeedCopy;
   article: ArticleCopy;
   nav: NavCopy;
   try: TryCopy;
+  ask: AskCopy;
 };
 
 const en: UiCopy = {
@@ -226,6 +233,7 @@ const en: UiCopy = {
     language: "Language",
     brand: "Vitual",
     feed: "Library",
+    ask: "Ask",
     themeLight: "Light",
     themeDark: "Dark",
     themeToLight: "Switch to light",
@@ -289,7 +297,7 @@ const en: UiCopy = {
     statusFailed: "Failed",
     openNotes: "Open notes",
     hint: "We publish written notes and short clips only — not the full original video.",
-    apiDown: "Backend offline. Start subtitle_pipeline with yarn api on port 8800.",
+    apiDown: "Backend offline. Start subtitle_pipeline with yarn api on port 8900.",
     progressActive: "Running",
     progressStale: "No updates for 5+ minutes — may be stuck",
     stageQueued: "Waiting to start",
@@ -358,6 +366,10 @@ const en: UiCopy = {
     workflowRailSoon: "Soon",
     workflowRailHint: "Tap to enable workflows for this run. Grey ones are not built yet.",
   },
+  ask: {
+    lede: "Ask questions about the project knowledge base. Answers are grounded in indexed docs with sources cited.",
+    placeholder: "Ask anything, e.g. Which workspace packs are available and how much do they cost?",
+  },
 };
 
 const zh: UiCopy = {
@@ -403,6 +415,7 @@ const zh: UiCopy = {
     language: "语言",
     brand: "Vitual",
     feed: "列表",
+    ask: "问问一桌",
     themeLight: "浅色",
     themeDark: "深色",
     themeToLight: "切换到浅色",
@@ -465,7 +478,7 @@ const zh: UiCopy = {
     statusFailed: "失败",
     openNotes: "查看笔记",
     hint: "本站只整理文字步骤与短片段，不托管完整原视频。",
-    apiDown: "后台未启动。请在 subtitle_pipeline 目录运行 yarn api（8800 端口）。",
+    apiDown: "后台未启动。请在 subtitle_pipeline 目录运行 yarn api（8900 端口）。",
     progressActive: "运行中",
     progressStale: "超过 5 分钟无更新，可能已卡住",
     stageQueued: "排队等待",
@@ -535,6 +548,10 @@ const zh: UiCopy = {
     workflowRailSoon: "待上线",
     workflowRailHint: "点选本轮要跑的工作流；灰色暂未开放。",
   },
+  ask: {
+    lede: "基于项目知识库（Milvus 向量库 + 本地大模型）回答问题，答案附引用来源。",
+    placeholder: "向知识库提问，例如：有哪些职场资产包？分别多少钱？",
+  },
 };
 
 const zhHant: UiCopy = {
@@ -580,6 +597,7 @@ const zhHant: UiCopy = {
     language: "語言",
     brand: "Vitual",
     feed: "列表",
+    ask: "問問一桌",
     themeLight: "淺色",
     themeDark: "深色",
     themeToLight: "切換到淺色",
@@ -614,6 +632,10 @@ const zhHant: UiCopy = {
     workflowRailSoon: "待上線",
     workflowRailHint: "點選本輪要跑的工作流；灰色暫未開放。",
   },
+  ask: {
+    lede: "基於專案知識庫（Milvus 向量庫 + 本地大模型）回答問題，答案附引用來源。",
+    placeholder: "向知識庫提問，例如：有哪些職場資產包？分別多少錢？",
+  },
 };
 
 function overlay(partial: {
@@ -621,12 +643,14 @@ function overlay(partial: {
   article?: Partial<ArticleCopy>;
   nav?: Partial<NavCopy>;
   try?: Partial<TryCopy>;
+  ask?: Partial<AskCopy>;
 }): UiCopy {
   return {
     feed: { ...en.feed, ...partial.feed },
     article: { ...en.article, ...partial.article },
     nav: { ...en.nav, ...partial.nav },
     try: { ...en.try, ...partial.try },
+    ask: { ...en.ask, ...partial.ask },
   };
 }
 

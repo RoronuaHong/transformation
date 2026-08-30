@@ -39,6 +39,7 @@ export default async function LocaleLayout({
         </div>
         <nav className="nav-links" aria-label={nav.brand}>
           <Link href={`/${locale}/feed`}>{nav.feed}</Link>
+          <Link href={`/${locale}/ask`}>{nav.ask}</Link>
           <ThemeToggle locale={locale} />
           <LangSwitch locale={locale} />
         </nav>

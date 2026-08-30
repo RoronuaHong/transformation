@@ -102,7 +102,11 @@ kb/anythingllm-storage/
 kb/*.log
 kb/*.err
 kb/ask_out.txt
+kb/smoke_ask_out.txt
 kb/wait_containers.ps1
+# 一次性辅助脚本（CSS 已并入 globals.css）
+transform/append_ask_css.py
+transform/rebuild.py
 # 排查过程的一次性脚本，仅保留 test_client.py / test_ask.py
 kb/test_embed.py
 kb/test_insert.py

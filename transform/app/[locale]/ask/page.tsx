@@ -1,6 +1,28 @@
-import { isLocale, type Locale } from "@/lib/locales";
-import { redirect } from "next/navigation";
+import type { Metadata } from "next";
+import { notFound, redirect } from "next/navigation";
 import AskPanel from "@/components/AskPanel";
+import { siteOrigin } from "@/lib/content";
+import { t } from "@/lib/copy";
+import { isLocale, locales, type Locale } from "@/lib/locales";
+
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ locale: string }>;
+}): Promise<Metadata> {
+  const { locale: raw } = await params;
+  if (!isLocale(raw)) return {};
+  const locale = raw as Locale;
+  const origin = siteOrigin();
+  const languages = Object.fromEntries(
+    locales.map((l) => [l, `${origin}/${l}/ask`])
+  );
+  languages["x-default"] = `${origin}/zh/ask`;
+  return {
+    title: t(locale).nav.ask,
+    alternates: { canonical: `${origin}/${locale}/ask`, languages },
+  };
+}
 
 export default async function AskPage({
   params,
@@ -8,15 +30,18 @@ export default async function AskPage({
   params: Promise<{ locale: string }>;
 }) {
   const { locale: raw } = await params;
-  if (!isLocale(raw)) redirect("/zh");
+  if (!isLocale(raw)) notFound();
   const locale = raw as Locale;
+  const copy = t(locale);
+
   return (
-    <main style={{ padding: "32px 16px", minHeight: "100vh", background: "#0b0f17", color: "#fff" }}>
-      <h1 style={{ textAlign: "center", fontSize: 22, marginBottom: 4 }}>问问一桌</h1>
-      <p style={{ textAlign: "center", opacity: 0.6, fontSize: 13, marginBottom: 16 }}>
-        基于项目知识库（Milvus + 本地大模型）的智能问答
-      </p>
-      <AskPanel />
+    <main className="ask-page">
+      <header className="ask-intro">
+        <p className="kicker">{copy.nav.brand}</p>
+        <h1 className="hero-line">{copy.nav.ask}</h1>
+        <p className="lede">{copy.ask?.lede}</p>
+      </header>
+      <AskPanel placeholder={copy.ask?.placeholder} />
     </main>
   );
 }
