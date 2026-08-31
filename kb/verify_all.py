@@ -93,13 +93,16 @@ except Exception as e:
 # 7. Git sync with origin
 try:
     subprocess.run(["git", "fetch", "origin"], cwd=REPO, capture_output=True, timeout=120)
-    st = subprocess.run(
+    branch = subprocess.run(
         ["git", "status", "-sb"], capture_output=True, text=True, timeout=60, cwd=REPO
-    ).stdout
-    first = st.splitlines()[0] if st else ""
+    ).stdout.splitlines()
+    first = branch[0] if branch else ""
     ahead = "ahead" in first
     behind = "behind" in first
-    dirty = len([l for l in st.splitlines() if l.strip().startswith(("M ", "??", "A "))])
+    porcelain = subprocess.run(
+        ["git", "status", "--porcelain"], capture_output=True, text=True, timeout=60, cwd=REPO
+    ).stdout
+    dirty = len([l for l in porcelain.splitlines() if l.strip()])
     log("Git 与 origin 同步", not ahead and not behind,
         f"{first.strip()}，工作区未提交 {dirty} 项")
 except Exception as e:
