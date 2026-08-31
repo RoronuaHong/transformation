@@ -1238,24 +1238,24 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                 disabled={submitting}
                 aria-label={copy.fileLabel}
                 onClick={() => {
-                  if (loading) return;
+                  if (submitting) return;
                   fileInputRef.current?.click();
                 }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
-                    if (!loading) fileInputRef.current?.click();
+                    if (!submitting) fileInputRef.current?.click();
                   }
                 }}
                 onDragEnter={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
-                  if (!loading) setFileDragOver(true);
+                  if (!submitting) setFileDragOver(true);
                 }}
                 onDragOver={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
-                  if (!loading) setFileDragOver(true);
+                  if (!submitting) setFileDragOver(true);
                 }}
                 onDragLeave={(e) => {
                   e.preventDefault();
@@ -1268,7 +1268,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                   e.preventDefault();
                   e.stopPropagation();
                   setFileDragOver(false);
-                  if (loading) return;
+                  if (submitting) return;
                   mergePickedFiles(e.dataTransfer.files);
                 }}
               >
@@ -1395,7 +1395,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                       copy={copy}
                       media={sm}
                       clipMax={itemMax}
-                      loading={loading}
+                      loading={submitting}
                       gifError={errs.gif}
                       clipError={errs.clip}
                       onToggle={() => patchSourceMedia(key, { open: !sm.open })}
@@ -1461,7 +1461,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                       <button
                         type="button"
                         className="try-lang-action"
-                        disabled={loading || allLangsSelected}
+                        disabled={submitting || allLangsSelected}
                         onClick={() => setTargetLangs([...locales])}
                       >
                         {copy.langsSelectAll}
@@ -1469,7 +1469,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                       <button
                         type="button"
                         className="try-lang-action"
-                        disabled={loading || targetLangs.length === 0}
+                        disabled={submitting || targetLangs.length === 0}
                         onClick={() => setTargetLangs([])}
                       >
                         {copy.langsClear}
@@ -1527,7 +1527,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
             type="submit"
             className="watch-btn try-submit"
             disabled={
-              loading ||
+              submitting ||
               Boolean(linkRangeError) ||
               sourceItems.length === 0 ||
               !hasAnyModule ||
