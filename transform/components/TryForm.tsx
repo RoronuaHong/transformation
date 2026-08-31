@@ -719,6 +719,49 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     }
   }, [stopPoll]);
 
+  const resumedRef = useRef(false);
+  useEffect(() => {
+    if (resumedRef.current) return;
+    resumedRef.current = true;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`${API}/api/try/active`);
+        if (!r.ok || cancelled) return;
+        const data = (await r.json()) as {
+          jobs?: Array<Poll & { job_id: number; title?: string }>;
+        };
+        const active = (data.jobs || []).filter(
+          (j) => j.status === "pending" || j.status === "processing"
+        );
+        if (!active.length || cancelled) return;
+        const mapped = active.map((j) => ({
+          job_id: j.job_id,
+          label: j.title || String(j.job_id),
+          status: j.status,
+          path: j.path,
+          title: j.title,
+          error: j.error ?? null,
+          progress: j.progress,
+        }));
+        setBatchJobs(mapped);
+        batchJobsRef.current = mapped;
+        setPoll(active[0]);
+        setLoading(true);
+        if (!timer.current) {
+          timer.current = setInterval(() => {
+            void refreshJobs();
+          }, 3000);
+        }
+      } catch {
+        /* ignore — probe/submit will surface API errors */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshJobs]);
+
   useEffect(() => () => stopPoll(), [stopPoll]);
 
   useEffect(() => {
@@ -1574,6 +1617,13 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
             <li key={j.job_id}>
               <span className="try-batch-jobs-label">{j.label}</span>
               <span className="try-batch-jobs-status">{j.status}</span>
+              {j.progress &&
+              (j.status === "pending" || j.status === "processing") ? (
+                <span className="try-batch-jobs-progress">
+                  {stageLabel(copy, j.progress.stage)}
+                  {j.progress.percent != null ? ` · ${j.progress.percent}%` : null}
+                </span>
+              ) : null}
               {j.path && j.status === "done" ? (
                 <Link href={localePath(locale, j.path)}>{copy.openNotes}</Link>
               ) : null}

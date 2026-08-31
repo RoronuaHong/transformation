@@ -162,11 +162,25 @@ def langs_equal(a: str | list | None, b: str | list | None) -> bool:
     )
 
 
+def _job_field(job, key: str, default=None):
+    """Read a column from queue job (sqlite3.Row or dict)."""
+    if job is None:
+        return default
+    if hasattr(job, "get"):
+        return job.get(key, default)
+    try:
+        val = job[key]
+        return default if val is None else val
+    except (KeyError, TypeError, IndexError):
+        return default
+
+
 def job_langs(job) -> str:
     raw = None
-    if job and job.get("meta_json"):
+    meta_json = _job_field(job, "meta_json")
+    if meta_json:
         try:
-            meta = json.loads(job["meta_json"])
+            meta = json.loads(meta_json)
             if isinstance(meta, dict):
                 raw = meta.get("langs")
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -590,6 +604,27 @@ def infer_try_progress(
             "updated_sec_ago": int(now - latest) if latest else None,
         }
     if status == "pending":
+        media = work / "media"
+        src_mp4 = media / "source.mp4"
+        has_activity = latest is not None and (now - latest) < _STALE_SEC
+        if _busy or has_activity or (src_mp4.is_file() and src_mp4.stat().st_size > 0):
+            percent = 8
+            if src_mp4.is_file():
+                try:
+                    sz = src_mp4.stat().st_size
+                    percent = min(12 + int(min(sz, 80_000_000) / 80_000_000 * 12), 24)
+                except OSError:
+                    pass
+            elif (media / "full_16k.wav").is_file() or existing_wav(work):
+                percent = 14
+            return {
+                "percent": percent,
+                "stage": "download",
+                "detail": None,
+                "active": True,
+                "stale": False,
+                "updated_sec_ago": int(now - latest) if latest else 0,
+            }
         return {
             "percent": 0,
             "stage": "queued",
@@ -674,6 +709,29 @@ def try_status() -> dict:
     return {"busy": _busy}
 
 
+def list_active_try_jobs(*, limit: int = 10) -> dict:
+    """Pending/processing high-priority try jobs (for workbench resume)."""
+    queue = QueueDB()
+    try:
+        rows = queue._conn.execute(
+            """
+            SELECT id FROM jobs
+            WHERE status IN ('pending', 'processing') AND priority='high'
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (max(1, min(int(limit), 50)),),
+        ).fetchall()
+        jobs = []
+        for row in rows:
+            snap = job_snapshot(int(row["id"]))
+            if snap.get("ok"):
+                jobs.append(snap)
+        return {"ok": True, "jobs": jobs, "count": len(jobs), "busy": _busy}
+    finally:
+        queue.close()
+
+
 def _job_id(queue: QueueDB, platform: str, video_id: str) -> int | None:
     row = queue._conn.execute(
         "SELECT id FROM jobs WHERE platform=? AND video_id=? ORDER BY id DESC LIMIT 1",
@@ -740,7 +798,9 @@ def job_snapshot(job_id: int) -> dict:
             out["article"] = article
             out["path"] = f"/topics/{article['topic']}/{article['slug']}"
         if st in ("pending", "processing", "done", "failed", "dead"):
-            out["progress"] = infer_try_progress(platform, video_id, st)
+            out["progress"] = infer_try_progress(
+                platform, video_id, st, langs=job_langs(job)
+            )
         return out
     finally:
         queue.close()
@@ -1464,6 +1524,13 @@ def run_try_job(job_id: int) -> dict:
             if job["status"] in ("dead", "failed"):
                 return job_snapshot(job_id)
 
+            video_id = job["video_id"]
+            claimed = queue.claim_next(max_attempts=5, video_id=video_id)
+            if claimed is None:
+                return job_snapshot(job_id)
+            job = claimed
+            job_id = int(job["id"])
+
             platform = job["platform"]
             video_id = job["video_id"]
             url = job["canonical_url"] or job["url"]
@@ -1472,9 +1539,10 @@ def run_try_job(job_id: int) -> dict:
             stages = "all"
             want_translate = True
             want_notes = True
-            if job.get("meta_json"):
+            meta_json = _job_field(job, "meta_json")
+            if meta_json:
                 try:
-                    meta = json.loads(job["meta_json"])
+                    meta = json.loads(meta_json)
                     if isinstance(meta, dict):
                         if meta.get("stages"):
                             stages = str(meta["stages"])
@@ -1491,10 +1559,6 @@ def run_try_job(job_id: int) -> dict:
                     ensure_source_video(url, work_dir, cookies_from_browser=None)
                 except Exception as e:
                     print(f"[try] video prefetch skip ({e})")
-
-            job = queue.claim_next(max_attempts=5, video_id=video_id)
-            if job is None:
-                return job_snapshot(job_id)
 
             try:
                 print(

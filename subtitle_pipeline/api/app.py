@@ -733,6 +733,13 @@ def try_duration(url: str) -> dict:
 
     return probe_url_duration(url)
 
+@app.get("/api/try/active")
+def try_active(limit: int = 10) -> dict:
+    from api.try_service import list_active_try_jobs
+
+    return list_active_try_jobs(limit=limit)
+
+
 @app.get("/api/try/{job_id}")
 def try_poll(job_id: int) -> dict:
     from api.try_service import job_snapshot, try_status
