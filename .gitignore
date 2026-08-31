@@ -104,6 +104,7 @@ kb/*.log
 kb/*.err
 kb/ask_out.txt
 kb/smoke_ask_out.txt
+kb/verify_out.txt
 kb/wait_containers.ps1
 # 一次性辅助脚本（CSS 已并入 globals.css）
 transform/append_ask_css.py
