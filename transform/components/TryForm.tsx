@@ -249,7 +249,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
   const [prevLangs, setPrevLangs] = useState<string | null>(null);
   const [prevFrameOpts, setPrevFrameOpts] = useState<FrameOptsLike | null>(null);
   const [langsOpen, setLangsOpen] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const [poll, setPoll] = useState<Poll | null>(null);
   const [batchJobs, setBatchJobs] = useState<
     Array<{
@@ -655,7 +655,6 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     const toPoll = current.filter((j) => j.job_id && !isTerminal(j.status));
     if (!toPoll.length) {
       stopPoll();
-      setLoading(false);
       return;
     }
 
@@ -695,7 +694,6 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     } catch (e) {
       setErr(isFetchNetworkError(e) ? copy.apiDown : e instanceof Error ? e.message : String(e));
       stopPoll();
-      setLoading(false);
       return;
     }
 
@@ -715,7 +713,6 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     });
     if (!stillActive) {
       stopPoll();
-      setLoading(false);
     }
   }, [stopPoll]);
 
@@ -747,7 +744,6 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
         setBatchJobs(mapped);
         batchJobsRef.current = mapped;
         setPoll(active[0]);
-        setLoading(true);
         if (!timer.current) {
           timer.current = setInterval(() => {
             void refreshJobs();
@@ -838,7 +834,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
       return;
     }
 
-    setLoading(true);
+    setSubmitting(true);
     stopPoll();
 
     try {
@@ -852,12 +848,12 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
       if (tab === "url") {
         const urls = parseUrlLines(urlsText);
         if (!urls.length) {
-          setLoading(false);
+          setSubmitting(false);
           return;
         }
         if (cookiesBlockSubmit && !sessionid.trim()) {
           setErr(urlProbe?.message || copy.cookiesBlockBatch.replace("{platforms}", ""));
-          setLoading(false);
+          setSubmitting(false);
           return;
         }
         res = await fetch(`${API}/api/try/urls`, {
@@ -880,7 +876,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
         });
       } else {
         if (!files.length) {
-          setLoading(false);
+          setSubmitting(false);
           return;
         }
         const fd = new FormData();
@@ -967,7 +963,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
 
       if (data.noop) {
         setCachedDone(true);
-        setLoading(false);
+        setSubmitting(false);
         setPoll({ ...data, status: data.status || "done" });
         return;
       }
@@ -986,7 +982,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
         data.status === "failed" ||
         data.status === "dead";
       if (terminal || mapped.length === 0) {
-        setLoading(false);
+        setSubmitting(false);
       } else {
         timer.current = setInterval(() => {
           void refreshJobs();
@@ -996,12 +992,11 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setErr(isFetchNetworkError(e) || msg.toLowerCase().includes("fetch") ? copy.apiDown : msg);
-      setLoading(false);
+      setSubmitting(false);
     }
   }
 
   const inFlight =
-    loading &&
     poll &&
     (poll.status === "pending" || poll.status === "processing");
 
@@ -1066,7 +1061,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
               type="button"
               className="try-workflow-rail-toggle"
               aria-pressed={wf.on}
-              disabled={loading}
+              disabled={submitting}
               onClick={() => wf.set((v) => !v)}
             >
               <span className="try-workflow-rail-n" aria-hidden="true">
@@ -1133,7 +1128,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                   value={urlsText}
                   onChange={(e) => setUrlsText(e.target.value)}
                   placeholder={copy.urlPlaceholder}
-                  disabled={loading}
+                  disabled={submitting}
                   required
                   spellCheck={false}
                 />
@@ -1205,7 +1200,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                     value={sessionid}
                     onChange={(e) => setSessionid(e.target.value)}
                     placeholder={copy.sessionidPlaceholder}
-                    disabled={loading}
+                    disabled={submitting}
                     required={cookiesBlockSubmit}
                   />
                 </label>
@@ -1221,7 +1216,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                 type="file"
                 accept="video/*,audio/*,.mp4,.mov,.mkv,.webm,.m4a,.wav"
                 multiple
-                disabled={loading}
+                disabled={submitting}
                 required={files.length === 0}
                 tabIndex={-1}
                 aria-hidden="true"
@@ -1240,7 +1235,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                       ? "try-dropzone has-files"
                       : "try-dropzone"
                 }
-                disabled={loading}
+                disabled={submitting}
                 aria-label={copy.fileLabel}
                 onClick={() => {
                   if (loading) return;
@@ -1327,7 +1322,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                       <button
                         type="button"
                         className="try-file-chip-remove"
-                        disabled={loading}
+                        disabled={submitting}
                         onClick={() => removeFileAt(i)}
                         aria-label={copy.clipsRemove}
                       >
@@ -1347,7 +1342,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                     <button
                       type="button"
                       className="try-file-clear"
-                      disabled={loading}
+                      disabled={submitting}
                       onClick={clearFiles}
                     >
                       {copy.filesClear}
@@ -1367,7 +1362,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                 <button
                   type="button"
                   className="try-sync-first"
-                  disabled={loading}
+                  disabled={submitting}
                   onClick={syncFirstToAll}
                 >
                   {copy.applyDefaultsAll}
@@ -1432,7 +1427,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                 className={langsOpen ? "try-langs-trigger is-open" : "try-langs-trigger"}
                 aria-expanded={langsOpen}
                 aria-haspopup="dialog"
-                disabled={loading}
+                disabled={submitting}
                 onClick={() => setLangsOpen((v) => !v)}
               >
                 <span className="try-langs-trigger-main">
@@ -1499,7 +1494,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                             <input
                               type="checkbox"
                               checked={on}
-                              disabled={loading}
+                              disabled={submitting}
                               onChange={() => toggleLang(code)}
                             />
                             <span>
