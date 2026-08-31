@@ -7,7 +7,7 @@ import urllib.request
 BASE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(BASE)
 KB_API = "http://127.0.0.1:8910"
-SITE = "http://127.0.0.1:3010"
+SITE = os.environ.get("SITE_URL", "http://127.0.0.1:3011")
 ANYTHINGLLM = "http://127.0.0.1:3005"
 
 lines = []
