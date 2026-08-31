@@ -18,12 +18,14 @@ import {
   type TryIntentKind,
 } from "@/lib/try-intent";
 import { parseUrlLines, type UrlProbeResult } from "@/lib/try-urls";
+import { tryApiBase, tryApiDirect } from "@/lib/api-base";
 import type { Locale } from "@/lib/locales";
 import { localeNames, localePath, locales } from "@/lib/locales";
 
-/** Direct FastAPI. Prefer absolute URL so long yt-dlp probes are not cut by Next rewrites. */
-const API =
-  process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") || "http://127.0.0.1:8900";
+/** Same-origin proxy by default; set NEXT_PUBLIC_API_URL to hit :8900 directly. */
+const API = tryApiBase();
+/** Long yt-dlp probes may need direct :8900 if the Next rewrite times out. */
+const API_PROBE = process.env.NEXT_PUBLIC_API_URL ? API : tryApiDirect();
 
 function isFetchNetworkError(e: unknown): boolean {
   if (!(e instanceof Error)) return false;
@@ -265,6 +267,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
   const [err, setErr] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
   const probeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollFailRef = useRef(0);
   const langsDdRef = useRef<HTMLDivElement | null>(null);
   const batchJobsRef = useRef(batchJobs);
   batchJobsRef.current = batchJobs;
@@ -692,10 +695,17 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
         }
       }
     } catch (e) {
+      pollFailRef.current += 1;
+      if (pollFailRef.current < 3) {
+        return;
+      }
       setErr(isFetchNetworkError(e) ? copy.apiDown : e instanceof Error ? e.message : String(e));
       stopPoll();
       return;
     }
+
+    pollFailRef.current = 0;
+    setErr((prev) => (prev === copy.apiDown ? null : prev));
 
     setBatchJobs((prev) =>
       prev.map((j) => {
@@ -774,7 +784,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     if (probeTimer.current) clearTimeout(probeTimer.current);
     probeTimer.current = setTimeout(async () => {
       try {
-        const r = await fetch(`${API}/api/try/probe`, {
+        const r = await fetch(`${API_PROBE}/api/try/probe`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
