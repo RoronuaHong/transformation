@@ -1,1 +1,1 @@
-"""Vitual MCP server — thin HTTP wrapper around subtitle_pipeline FastAPI (:8800)."""
+"""Vitual MCP server — thin HTTP wrapper around subtitle_pipeline FastAPI (:8900)."""

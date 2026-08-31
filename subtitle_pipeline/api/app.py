@@ -101,7 +101,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Vitual ops (backend)",
     description="Admin/ops API + workbench Try. Public frontend is Next.js `transform/` (port 3000). "
-    "This service is the management backend (port 8800) + scheduler.",
+    "This service is the management backend (port 8900) + scheduler.",
     lifespan=lifespan,
     docs_url="/admin/docs",
     redoc_url=None,

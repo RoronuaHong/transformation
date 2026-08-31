@@ -23,7 +23,7 @@ import { localeNames, localePath, locales } from "@/lib/locales";
 
 /** Direct FastAPI. Prefer absolute URL so long yt-dlp probes are not cut by Next rewrites. */
 const API =
-  process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") || "http://127.0.0.1:8800";
+  process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") || "http://127.0.0.1:8900";
 
 function isFetchNetworkError(e: unknown): boolean {
   if (!(e instanceof Error)) return false;

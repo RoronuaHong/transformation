@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-DEFAULT_BASE = "http://127.0.0.1:8800"
+DEFAULT_BASE = "http://127.0.0.1:8900"
 DEFAULT_TOKEN = "local-admin"
 TERMINAL = frozenset({"done", "failed", "dead", "cancelled"})
 

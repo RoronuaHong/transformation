@@ -89,7 +89,7 @@ export default function AdminHome() {
       <p className="muted">
         前台 SEO：<a href="http://127.0.0.1:3000">:3000</a>
         {" · "}
-        API 文档：<a href="http://127.0.0.1:8800/admin/docs">:8800/admin/docs</a>
+        API 文档：<a href="http://127.0.0.1:8900/admin/docs">:8900/admin/docs</a>
       </p>
       <nav className="tabs">
         {(["status", "links", "logs", "alerts", "run"] as Tab[]).map((t) => (

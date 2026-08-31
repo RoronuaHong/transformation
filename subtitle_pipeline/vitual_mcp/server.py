@@ -1,4 +1,4 @@
-"""Vitual MCP tools (Phase A + admin status)."""
+"""Vitual MCP tools (Phase A–C + admin + batch upload)."""
 
 from __future__ import annotations
 
@@ -57,7 +57,7 @@ class TryWaitInput(BaseModel):
     },
 )
 async def vitual_health() -> str:
-    """Check Vitual FastAPI at :8800. mongo=false is OK for Try-only; start API with yarn api."""
+    """Check Vitual FastAPI at :8900. mongo=false is OK for Try-only; start API with yarn api."""
     try:
         return _json(await _client.health())
     except VitualApiError as e:
@@ -437,7 +437,7 @@ def vitual_resource_article(slug: str) -> str:
 @mcp.resource(
     "vitual://api/health",
     name="api_health",
-    description="Live GET /health snapshot from FastAPI :8800",
+    description="Live GET /health snapshot from FastAPI :8900",
     mime_type="application/json",
 )
 async def vitual_resource_health() -> str:

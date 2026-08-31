@@ -6,4 +6,4 @@ python-multipart>=0.0.12
 pymongo>=4.10.0
 apscheduler>=3.10.4
 pydantic-settings>=2.6.0
-
+# MCP server (optional): pip install -r requirements-mcp.txt

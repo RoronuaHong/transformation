@@ -5,7 +5,7 @@
       "args": ["-m", "vitual_mcp"],
       "cwd": "${workspaceFolder}/subtitle_pipeline",
       "env": {
-        "VITUAL_API_URL": "http://127.0.0.1:8800",
+        "VITUAL_API_URL": "http://127.0.0.1:8900",
         "VITUAL_ADMIN_TOKEN": "local-admin"
       }
     }

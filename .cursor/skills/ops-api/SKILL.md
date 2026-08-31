@@ -1,6 +1,6 @@
 ---
 name: ops-api
-description: Starts FastAPI (:8800), admin UI, and workbench Try (/api/try/*). Use when the user asks for 后台, 管理系统, 告警, 日志, 定时, yarn api, mongod, FastAPI, admin, 工作台, 试一试, try, 贴链接, or to persist original URLs into Mongo. For yarn-only smoke/验收 use main-path.
+description: Starts FastAPI (:8900), admin UI, and workbench Try (/api/try/*). Use when the user asks for 后台, 管理系统, 告警, 日志, 定时, yarn api, mongod, FastAPI, admin, 工作台, 试一试, try, 贴链接, or to persist original URLs into Mongo. For yarn-only smoke/验收 use main-path.
 ---
 
 # Ops API (FastAPI + Mongo + admin + Try)
@@ -41,7 +41,7 @@ Dev (foreground, `--reload`):
 ```powershell
 cd D:\MineWeb\2026\Vitual\subtitle_pipeline
 yarn api
-# http://127.0.0.1:8800/health  → frontend: transform/
+# http://127.0.0.1:8900/health  → frontend: transform/
 ```
 
 Keep-alive with **PM2** (no `--reload`, **one** API process — APScheduler + job lock cannot cluster):
@@ -55,9 +55,11 @@ pm2 status
 pm2 logs vitual-api
 ```
 
-`ecosystem.config.cjs` starts **only** `vitual-api` (:8800, one fork). Reuse the existing mongod on :27018; do not start a second Mongo. Admin UI is still `cd admin && npm run dev` on :3001. Do not use `pm2 start -i max` on the API.
+`ecosystem.config.cjs` starts **only** `vitual-api` (:8900, one fork). Reuse the existing mongod on :27018; do not start a second Mongo. Admin UI is still `cd admin && npm run dev` on :3001. Do not use `pm2 start -i max` on the API.
 
 `GET /health` needs no token. All `/admin/*` need header `X-Admin-Token: local-admin`.
+
+MCP（优先）：Cursor 启用 `.cursor/mcp.json` → `vitual_health` → `vitual_try_submit_urls` → `vitual_try_wait` / `vitual_try_wait_all` → `vitual_admin_export` 或 `yarn export-site`。验收：`yarn mcp:smoke`。
 
 ## Workbench Try (`/api/try/*`)
 
@@ -70,7 +72,7 @@ Agent-facing surface — same contract as `transform/components/TryForm.tsx`. In
 5. Result `path` is like `/topics/{topic}/{slug}` — open in `transform` dev or run `yarn export-site` + build for static feed
 
 ```powershell
-$base = "http://127.0.0.1:8800"
+$base = "http://127.0.0.1:8900"
 
 # Probe (Douyin etc. may need sessionid)
 Invoke-RestMethod -Method POST -Uri "$base/api/try/probe" -ContentType "application/json" `
@@ -95,15 +97,15 @@ MCP：`yarn mcp:smoke` 验收 API+export；tools `vitual_*` + resources `vitual:
 ```powershell
 $h = @{ "X-Admin-Token" = "local-admin"; "Content-Type" = "application/json" }
 
-Invoke-RestMethod -Method POST -Uri http://127.0.0.1:8800/admin/inbox -Headers $h -Body '{"url":"https://youtu.be/kV7RuutRx-s","topic":"ai_monetize"}'
+Invoke-RestMethod -Method POST -Uri http://127.0.0.1:8900/admin/inbox -Headers $h -Body '{"url":"https://youtu.be/kV7RuutRx-s","topic":"ai_monetize"}'
 
-Invoke-RestMethod -Method POST -Uri http://127.0.0.1:8800/admin/discover -Headers $h -Body '{}'
-Invoke-RestMethod -Method POST -Uri http://127.0.0.1:8800/admin/batch -Headers $h -Body '{"fast":true,"limit":1}'
-Invoke-RestMethod -Method POST -Uri http://127.0.0.1:8800/admin/export -Headers $h -Body '{}'
+Invoke-RestMethod -Method POST -Uri http://127.0.0.1:8900/admin/discover -Headers $h -Body '{}'
+Invoke-RestMethod -Method POST -Uri http://127.0.0.1:8900/admin/batch -Headers $h -Body '{"fast":true,"limit":1}'
+Invoke-RestMethod -Method POST -Uri http://127.0.0.1:8900/admin/export -Headers $h -Body '{}'
 
-Invoke-RestMethod -Uri http://127.0.0.1:8800/admin/links -Headers $h
-Invoke-RestMethod -Uri http://127.0.0.1:8800/admin/logs -Headers $h
-Invoke-RestMethod -Uri http://127.0.0.1:8800/admin/alerts -Headers $h
+Invoke-RestMethod -Uri http://127.0.0.1:8900/admin/links -Headers $h
+Invoke-RestMethod -Uri http://127.0.0.1:8900/admin/logs -Headers $h
+Invoke-RestMethod -Uri http://127.0.0.1:8900/admin/alerts -Headers $h
 ```
 
 POSTs return `accepted` and run in a background thread (one lock: no overlapping batch). After inbox/discover, SQLite jobs sync into Mongo `source_links`. Failures write `alerts` (optional webhook `VITUAL_ALERT_WEBHOOK_URL`) — ack via `POST /admin/alerts/{id}/ack`.

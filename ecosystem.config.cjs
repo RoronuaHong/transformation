@@ -8,7 +8,7 @@ module.exports = {
     {
       name: "vitual-api",
       script: path.join(pipeline, ".venv", "Scripts", "python.exe"),
-      args: "-m uvicorn api.app:app --host 127.0.0.1 --port 8800 --log-level info",
+      args: "-m uvicorn api.app:app --host 127.0.0.1 --port 8900 --log-level info",
       interpreter: "none",
       cwd: pipeline,
       instances: 1,

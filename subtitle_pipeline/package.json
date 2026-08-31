@@ -19,8 +19,8 @@
     "batch:fast": ".venv/Scripts/python.exe -m discover.run_batch --langs site --limit 1 --no-multipass --device cpu",
     "batch:cloud": ".venv/Scripts/python.exe -m discover.run_batch --llm-profile tokenhub --langs site --limit 1",
     "export-site": ".venv/Scripts/python.exe -m discover.export_site",
-    "api": ".venv/Scripts/python.exe -m uvicorn api.app:app --host 127.0.0.1 --port 8800 --reload",
-    "api:prod": ".venv/Scripts/python.exe -m uvicorn api.app:app --host 127.0.0.1 --port 8800",
+    "api": ".venv/Scripts/python.exe -m uvicorn api.app:app --host 127.0.0.1 --port 8900 --reload",
+    "api:prod": ".venv/Scripts/python.exe -m uvicorn api.app:app --host 127.0.0.1 --port 8900",
     "mcp": ".venv/Scripts/python.exe -m vitual_mcp",
     "mcp:smoke": ".venv/Scripts/python.exe -m vitual_mcp.smoke"
   }

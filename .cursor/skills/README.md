@@ -15,7 +15,7 @@ MCP A–C：`subtitle_pipeline/vitual_mcp/` · tools + resources `vitual://expor
 
 **命名**：语言包名仍是 `--langs site`（16 codes）；前台目录是 **`transform/`**（旧称 `site/`）。不要新建只包 React UI 的 skill。
 
-端口：工作台 `transform/` :3000；admin :3001；API :8800。详见 `trans/技术栈.md`、`trans/README.md`。
+端口：工作台 `transform/` :3000；admin :3001；API **:8900**（Windows 勿用 8800）。详见 `trans/技术栈.md`。
 
 ## 分流（避免抢触发）
 

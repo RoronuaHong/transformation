@@ -58,16 +58,26 @@ async def run(*, require_mongo: bool, skip_health: bool) -> int:
         print("\n--- FAILED ---", file=sys.stderr)
         for f in failures:
             print(f"  - {f}", file=sys.stderr)
+        for w in warnings:
+            print(f"  hint: {w}", file=sys.stderr)
         return 1
     print("\n--- OK ---")
+    if warnings:
+        for w in warnings:
+            print(f"WARN {w}")
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Vitual MCP/API smoke")
     p.add_argument("--require-mongo", action="store_true", help="Fail if /health mongo=false")
+    p.add_argument(
+        "--skip-health",
+        action="store_true",
+        help="Skip /health (export index + MCP import only)",
+    )
     args = p.parse_args(argv)
-    return asyncio.run(run(require_mongo=args.require_mongo))
+    return asyncio.run(run(require_mongo=args.require_mongo, skip_health=args.skip_health))
 
 
 if __name__ == "__main__":
