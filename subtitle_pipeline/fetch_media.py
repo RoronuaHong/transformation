@@ -8,6 +8,7 @@ keep yt-dlp updated and pass cookies when needed.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -16,6 +17,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 def clear_proxy_env() -> None:
@@ -111,8 +113,30 @@ def detect_douyin_id(url: str) -> str | None:
     return None
 
 
+def is_m3u8_url(url: str) -> bool:
+    u = (url or "").strip().lower()
+    if not u.startswith(("http://", "https://")):
+        return False
+    path = urlparse(u).path.lower()
+    return path.endswith(".m3u8") or ".m3u8?" in u
+
+
+def detect_m3u8_id(url: str) -> str | None:
+    """Stable id for HLS playlist URLs (path hash or sha256 of path)."""
+    if not is_m3u8_url(url):
+        return None
+    m = re.search(r"/(?:hls_mps|hls)/([a-f0-9]{20,64})/", url, re.I)
+    if m:
+        return m.group(1)[:40]
+    p = urlparse(url.strip())
+    base = f"{p.scheme}://{p.netloc}{p.path}"
+    return hashlib.sha256(base.encode()).hexdigest()[:16]
+
+
 def detect_platform(url: str) -> str:
     u = url.lower()
+    if is_m3u8_url(url):
+        return "hls"
     if "bilibili.com" in u or "b23.tv" in u:
         return "bilibili"
     if "douyin.com" in u or "iesdouyin.com" in u:
@@ -122,6 +146,165 @@ def detect_platform(url: str) -> str:
     if "youtube.com" in u or "youtu.be" in u:
         return "youtube"
     return "generic"
+
+
+def hls_referer(url: str) -> str:
+    """Guess Referer for CDN-hosted HLS (img1.example.com → https://www.example.com/)."""
+    override = (os.environ.get("VITUAL_HLS_REFERER") or "").strip()
+    if override:
+        return override
+    host = (urlparse(url).hostname or "").lower()
+    if host.startswith("img") and "." in host:
+        _, rest = host.split(".", 1)
+        return f"https://www.{rest}/"
+    if host.startswith("cdn.") and "." in host:
+        _, rest = host.split(".", 1)
+        return f"https://www.{rest}/"
+    return f"https://{host}/"
+
+
+def _cookie_header_for_url(cookies_file: Path | None, url: str) -> str | None:
+    if cookies_file is None or not cookies_file.is_file():
+        return None
+    host = (urlparse(url).hostname or "").lower()
+    if not host:
+        return None
+    pairs: list[str] = []
+    for ln in cookies_file.read_text(encoding="utf-8", errors="replace").splitlines():
+        parts = ln.split("\t")
+        if len(parts) < 7:
+            continue
+        domain, _, _path, _secure, _exp, name, value = parts[:7]
+        d = domain.lstrip(".").lower()
+        if host == d or host.endswith("." + d) or d in host:
+            pairs.append(f"{name}={value}")
+    return "; ".join(pairs) if pairs else None
+
+
+def build_hls_ffmpeg_headers(url: str, *, cookies_file: Path | None = None) -> str:
+    referer = hls_referer(url)
+    ua = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+    lines = [f"Referer: {referer}", f"User-Agent: {ua}"]
+    cookie = _cookie_header_for_url(cookies_file, url)
+    if cookie:
+        lines.append(f"Cookie: {cookie}")
+    return "\r\n".join(lines) + "\r\n"
+
+
+def _parse_ffmpeg_duration(stderr: str) -> float | None:
+    m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", stderr)
+    if not m:
+        return None
+    h, mi, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
+    return h * 3600 + mi * 60 + s
+
+
+def probe_hls_duration(
+    url: str,
+    *,
+    cookies_file: Path | None = None,
+    timeout: int = 60,
+) -> float | None:
+    """Probe HLS playlist duration via ffmpeg metadata (no full decode)."""
+    ffmpeg = find_ffmpeg()
+    hdr = build_hls_ffmpeg_headers(url, cookies_file=cookies_file)
+    cmd = [
+        ffmpeg,
+        "-hide_banner",
+        "-headers",
+        hdr,
+        "-i",
+        url,
+        "-t",
+        "0.001",
+        "-f",
+        "null",
+        "-",
+    ]
+    try:
+        r = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+        merged = (r.stderr or "") + (r.stdout or "")
+        return _parse_ffmpeg_duration(merged)
+    except subprocess.TimeoutExpired as e:
+        err = e.stderr
+        if isinstance(err, bytes):
+            err = err.decode("utf-8", errors="replace")
+        if isinstance(err, str):
+            dur = _parse_ffmpeg_duration(err)
+            if dur is not None:
+                return dur
+        raise
+
+
+def _fetch_hls_source(
+    url: str,
+    target: Path,
+    *,
+    cookies_file: Path | None = None,
+    copy: bool = True,
+    timeout: int = 1800,
+) -> None:
+    """Download HLS stream to a local file via ffmpeg."""
+    ffmpeg = find_ffmpeg()
+    hdr = build_hls_ffmpeg_headers(url, cookies_file=cookies_file)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-headers", hdr, "-i", url]
+    if copy:
+        cmd += ["-c", "copy"]
+    cmd += ["-bsf:a", "aac_adtstoasc", str(target)]
+    print(f"[fetch-hls] ffmpeg → {target.name}")
+    r = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+    )
+    if r.returncode != 0 or not target.is_file() or target.stat().st_size < 1000:
+        err = (r.stderr or r.stdout or "ffmpeg failed").strip()
+        raise RuntimeError(f"HLS download failed: {err[-1500:]}")
+
+
+def _fetch_hls_to_wav(
+    url: str,
+    media: Path,
+    wav: Path,
+    *,
+    cookies_file: Path | None = None,
+) -> tuple[Path, float | None]:
+    """HLS → intermediate mp4 → 16 kHz mono wav."""
+    src = media / "source.mp4"
+    _fetch_hls_source(url, src, cookies_file=cookies_file, copy=True)
+    dur = probe_hls_duration(url, cookies_file=cookies_file, timeout=60)
+    ffmpeg = find_ffmpeg()
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(src),
+        "-vn",
+        "-acodec",
+        "pcm_s16le",
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        str(wav),
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+    print(f"[fetch-hls] wav -> {wav}")
+    return src, dur
 
 
 def _resolve_js_runtime() -> list[str]:
@@ -327,6 +510,28 @@ def fetch_to_wav(
     bvid = detect_bvid(url)
     print(f"[fetch] platform={platform} url={url}")
 
+    cookie_args, cookies_file, cookies_from_browser = _cookie_cli_args(
+        cookies_from_browser=cookies_from_browser,
+        cookies_file=cookies_file,
+    )
+
+    if platform == "hls":
+        src, dur = _fetch_hls_to_wav(url, media, wav, cookies_file=cookies_file)
+        meta = {
+            "url": url,
+            "platform": platform,
+            "bvid": bvid,
+            "id": detect_m3u8_id(url),
+            "title": f"hls:{detect_m3u8_id(url) or 'stream'}",
+            "duration": dur,
+            "extractor": "ffmpeg-hls",
+            "source_file": str(src),
+            "wav": str(wav),
+        }
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[out] {meta_path}")
+        return meta
+
     # Stage 1: yt-dlp → intermediate audio (m4a/webm/…)
     tmpl = str(media / "source.%(ext)s")
     js_rt = _resolve_js_runtime()
@@ -350,10 +555,6 @@ def fetch_to_wav(
         clear_proxy_env()
         print("[fetch] direct connect (no proxy)")
 
-    cookie_args, cookies_file, cookies_from_browser = _cookie_cli_args(
-        cookies_from_browser=cookies_from_browser,
-        cookies_file=cookies_file,
-    )
     if cookies_file:
         print(f"[fetch] cookies-file={cookies_file}")
     elif cookies_from_browser:
@@ -564,6 +765,18 @@ def ensure_source_video(
 
     platform = detect_platform(url)
     print(f"[fetch-video] platform={platform} url={url} max_height={max_height}")
+
+    cookie_args, cookies_file, cookies_from_browser = _cookie_cli_args(
+        cookies_from_browser=cookies_from_browser,
+        cookies_file=cookies_file,
+    )
+    if platform == "hls":
+        if target.is_file() and target.stat().st_size > 50_000:
+            return target
+        _fetch_hls_source(url, target, cookies_file=cookies_file, copy=True)
+        print(f"[fetch-video] source -> {target.name} ({target.stat().st_size} bytes)")
+        return target
+
     js_rt = _resolve_js_runtime()
     proxy_args: list[str] = []
     if platform == "youtube":
@@ -586,10 +799,6 @@ def ensure_source_video(
         "worstvideo+bestaudio/worst"
     )
     tmpl = str(media / "source_video.%(ext)s")
-    cookie_args, cookies_file, cookies_from_browser = _cookie_cli_args(
-        cookies_from_browser=cookies_from_browser,
-        cookies_file=cookies_file,
-    )
     if cookies_file:
         print(f"[fetch-video] cookies-file={cookies_file}")
     elif cookies_from_browser:

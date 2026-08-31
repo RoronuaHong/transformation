@@ -1,7 +1,10 @@
-export type UrlPlatform = "douyin" | "bilibili" | "youtube";
+export type UrlPlatform = "douyin" | "bilibili" | "youtube" | "hls";
 
 export function detectPlatform(url: string): UrlPlatform | null {
   const u = url.trim().toLowerCase();
+  if (u.includes(".m3u8")) {
+    return "hls";
+  }
   if (u.includes("douyin.com") || u.includes("iesdouyin.com") || u.includes("v.douyin.com")) {
     return "douyin";
   }

@@ -25,6 +25,7 @@ COOKIE_POLICY: dict[str, dict] = {
     "douyin": {"required": True, "label": "Douyin"},
     "bilibili": {"required": False, "label": "Bilibili"},
     "youtube": {"required": False, "soft": True, "label": "YouTube"},
+    "hls": {"required": False, "soft": True, "label": "HLS/m3u8"},
 }
 
 
@@ -816,6 +817,26 @@ def probe_url_duration(url: str) -> dict:
     try:
         import yt_dlp
 
+        if platform == "hls":
+            from fetch_media import probe_hls_duration
+
+            cf = resolve_cookies_file()
+            dur = probe_hls_duration(url, cookies_file=cf)
+            if dur is None or float(dur) <= 0:
+                return {
+                    **base,
+                    "ok": False,
+                    "error": "duration unavailable (check m3u8 URL / auth_key expiry)",
+                    "cookies_ok": True,
+                }
+            return {
+                **base,
+                "ok": True,
+                "duration_sec": float(dur),
+                "source": "ffmpeg-hls",
+                "cookies_ok": True,
+            }
+
         opts: dict = {
             "quiet": True,
             "no_warnings": True,
@@ -825,7 +846,7 @@ def probe_url_duration(url: str) -> dict:
         cf = resolve_cookies_file()
         if cf is not None:
             opts["cookiefile"] = str(cf)
-        probe_url = canonical_url(platform, video_id)
+        probe_url = url if platform == "hls" else canonical_url(platform, video_id, original_url=url)
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(probe_url, download=False)
         dur = info.get("duration") if isinstance(info, dict) else None
@@ -1080,7 +1101,7 @@ def submit_url(
     c = Candidate(
         platform=platform,
         video_id=video_id,
-        url=canonical_url(platform, video_id),
+        url=canonical_url(platform, video_id, original_url=url),
         original_url=url,
         title=f"try:{platform}:{video_id}",
         topic_id=topic,
@@ -1464,7 +1485,7 @@ def run_try_job(job_id: int) -> dict:
                 except (TypeError, ValueError, json.JSONDecodeError):
                     pass
 
-            if platform in ("bilibili", "youtube"):
+            if platform in ("bilibili", "youtube", "hls"):
                 work_dir = WORK_ROOT / f"{platform}_{video_id}"
                 try:
                     ensure_source_video(url, work_dir, cookies_from_browser=None)

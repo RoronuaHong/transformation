@@ -15,7 +15,7 @@ if str(ROOT) not in sys.path:
 from discover.models import Candidate
 from discover.queue_db import QueueDB
 from discover.topics_loader import load_topics
-from fetch_media import detect_bvid, detect_douyin_id, detect_platform
+from fetch_media import detect_bvid, detect_douyin_id, detect_m3u8_id, detect_platform
 
 
 def detect_youtube_id(url: str) -> str | None:
@@ -40,12 +40,21 @@ def parse_url(url: str) -> tuple[str, str]:
         if not did:
             raise ValueError(f"cannot parse douyin id from: {url}")
         return platform, did
+    if platform == "hls":
+        mid = detect_m3u8_id(url)
+        if not mid:
+            raise ValueError(f"cannot parse m3u8 id from: {url}")
+        return platform, mid
     raise ValueError(
-        f"unsupported platform for inbox (use youtube|bilibili|douyin): {platform}"
+        f"unsupported platform for inbox (use youtube|bilibili|douyin|hls): {platform}"
     )
 
 
-def canonical_url(platform: str, video_id: str) -> str:
+def canonical_url(platform: str, video_id: str, *, original_url: str | None = None) -> str:
+    if platform == "hls":
+        if not original_url:
+            raise ValueError("hls canonical_url requires original_url")
+        return original_url.strip()
     if platform == "youtube":
         return f"https://www.youtube.com/watch?v={video_id}"
     if platform == "douyin":
@@ -76,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
     c = Candidate(
         platform=platform,
         video_id=video_id,
-        url=canonical_url(platform, video_id),
+        url=canonical_url(platform, video_id, original_url=original_url),
         original_url=original_url,
         title=args.title or f"inbox:{platform}:{video_id}",
         topic_id=topic_id,
