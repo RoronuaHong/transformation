@@ -106,15 +106,26 @@ kb/ask_out.txt
 kb/smoke_ask_out.txt
 kb/verify_out.txt
 kb/wait_containers.ps1
+kb/*_out.txt
+
+# 知识库自建文档（例外：全局 *.md 被忽略）
+!kb/docs/
+!kb/docs/*.md
 # 一次性辅助脚本（CSS 已并入 globals.css）
 transform/append_ask_css.py
 transform/rebuild.py
-# 排查过程的一次性脚本，仅保留 test_client.py / test_ask.py
+# 排查过程的一次性脚本，仅保留 test_client.py / test_ask.py / verify_all.py
 kb/test_embed.py
 kb/test_insert.py
 kb/test_insert2.py
 kb/test_retrieve.py
 kb/test_search2.py
+kb/smoke_ask_page.py
+kb/browser_check*.py
+kb/browser_check5.py
+kb/test_history.py
+kb/test_newdoc.py
+kb/demo_check.py
 
 # ── trans / subtitle_pipeline 文档与静态页 ──
 trans/*.md

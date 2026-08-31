@@ -15,6 +15,12 @@ sources:
     label: 工具目录
     description: 精选职场工具导航（写作/表格/演示/协作/AI）
 
+  # 2b. 自建文档目录（新增文档放这里即可被索引）
+  - path: kb/docs
+    type: dir-markdown
+    label: 说明文档
+    description: 交付/定制/发票等对外说明
+
   # 3. 调研与计划文档
   - path: findings.md
     type: markdown
