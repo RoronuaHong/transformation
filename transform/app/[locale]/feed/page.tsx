@@ -1,8 +1,9 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { HomeFeed } from "@/components/FeedCard";
+import { FeedTable } from "@/components/FeedTable";
 import { feedArticles, siteOrigin } from "@/lib/content";
 import { t } from "@/lib/copy";
+import { buildFeedRows } from "@/lib/feed-rows";
 import { isLocale, locales, type Locale } from "@/lib/locales";
 
 export const dynamic = "force-dynamic";
@@ -44,7 +45,7 @@ export default async function FeedPage({ params }: { params: Promise<{ locale: s
         <h1 className="hero-line">{copy.headline}</h1>
         <p className="lede">{copy.lede}</p>
       </header>
-      <HomeFeed articles={articles} locale={locale} />
+      <FeedTable rows={buildFeedRows(articles, locale)} copy={copy} />
     </main>
   );
 }

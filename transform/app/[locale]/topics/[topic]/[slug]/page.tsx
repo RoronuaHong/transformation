@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { DownloadCaptions } from "@/components/DownloadCaptions";
+import { ArticleMediaPreview } from "@/components/ArticleMediaPreview";
 import { DownloadClips } from "@/components/DownloadClips";
 import { DownloadNotes } from "@/components/DownloadNotes";
 import { NoteList } from "@/components/NoteList";
@@ -17,6 +18,7 @@ import {
 } from "@/lib/content";
 import { t } from "@/lib/copy";
 import { isLocale, locales, type Locale } from "@/lib/locales";
+import { gifRangeFrames, rangeVideoClips } from "@/lib/note-points";
 
 type Params = { locale: string; topic: string; slug: string };
 
@@ -112,6 +114,8 @@ export default async function TopicArticlePage({ params }: { params: Promise<Par
   );
 
   const downloadPoints = a.keyPoints[locale];
+  const previewGifs = gifRangeFrames(downloadPoints);
+  const previewClips = rangeVideoClips(downloadPoints);
 
   return (
     <main className="article-page">
@@ -125,6 +129,20 @@ export default async function TopicArticlePage({ params }: { params: Promise<Par
         </p>
         <h1 className="hero-line">{a.titles[locale]}</h1>
         {a.summaries[locale] ? <p className="lede">{a.summaries[locale]}</p> : null}
+
+        {previewGifs.length || previewClips.length ? (
+          <ArticleMediaPreview
+            gifs={previewGifs}
+            clips={previewClips}
+            title={chrome.mediaPreview}
+            gifKind={chrome.mediaGifKind}
+            clipTabLabel={chrome.mediaTabClip}
+            clipLabel={chrome.downloadClipItem}
+            gifLabel={chrome.viewFrame}
+            previewLabel={chrome.previewClip}
+            closeLabel={chrome.closeNotes}
+          />
+        ) : null}
 
         <div className="action-bar">
           {showWatch ? (

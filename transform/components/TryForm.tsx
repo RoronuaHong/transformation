@@ -9,7 +9,7 @@ import {
   type ClipRow,
   type SourceMediaState,
 } from "@/components/TrySourceMedia";
-import type { TryCopy } from "@/lib/copy";
+import { fillCopy, type TryCopy } from "@/lib/copy";
 import { DEFAULT_TOPIC } from "@/lib/site-config";
 import {
   composeTryStages,
@@ -17,6 +17,7 @@ import {
   type FrameOptsLike,
   type TryIntentKind,
 } from "@/lib/try-intent";
+import { formatBatchJobLabel } from "@/lib/batch-job-label";
 import { parseUrlLines, type UrlProbeResult } from "@/lib/try-urls";
 import { tryApiBase } from "@/lib/api-base";
 import type { Locale } from "@/lib/locales";
@@ -52,9 +53,22 @@ type Poll = {
   path?: string;
   title?: string;
   busy?: boolean;
+  paused?: boolean;
+  active_job_id?: number | null;
   progress?: Progress;
+  queue_position?: number;
+  queue_ahead?: {
+    job_id: number;
+    title?: string;
+    progress?: Progress;
+  };
   cached?: boolean;
   duration_sec?: number | null;
+  derived?: {
+    enhance?: string;
+    compress?: string;
+    concat?: string;
+  };
   frame_opts?: {
     frames?: string;
     gif_sec?: number;
@@ -152,9 +166,31 @@ const STAGE_KEYS: Record<string, keyof TryCopy> = {
   notes: "stageNotes",
   localize: "stageLocalize",
   gif: "stageGif",
+  enhance: "stageEnhance",
+  compress: "stageCompress",
+  concat: "stageConcat",
   export: "stageExport",
   done: "stageDone",
+  failed: "stageFailed",
+  cancelled: "stageCancelled",
 };
+
+function isTerminalStatus(status?: string) {
+  return (
+    status === "done" ||
+    status === "failed" ||
+    status === "dead" ||
+    status === "cancelled"
+  );
+}
+
+function badgeClass(status?: string) {
+  if (status === "processing") return "is-processing";
+  if (status === "done") return "is-done";
+  if (status === "failed" || status === "dead") return "is-failed";
+  if (status === "cancelled") return "is-cancelled";
+  return "is-pending";
+}
 
 function stageLabel(copy: TryCopy, stage?: string) {
   if (!stage) return copy.statusProcessing;
@@ -162,18 +198,18 @@ function stageLabel(copy: TryCopy, stage?: string) {
   return key ? String(copy[key]) : copy.statusProcessing;
 }
 
+function jobStatusLabel(copy: TryCopy, status?: string) {
+  if (status === "done") return copy.statusDone;
+  if (status === "cancelled") return copy.statusCancelled;
+  if (status === "failed" || status === "dead") return copy.statusFailed;
+  if (status === "processing") return copy.statusProcessing;
+  return copy.statusPending;
+}
+
 /** Client-side: quick hint before server probe. */
 function urlNeedsCookies(raw: string): boolean {
   const u = raw.trim().toLowerCase();
   return u.includes("douyin.com") || u.includes("iesdouyin.com") || u.includes("v.douyin.com");
-}
-
-function fillCopy(template: string, vars: Record<string, string | number>): string {
-  let out = template;
-  for (const [key, val] of Object.entries(vars)) {
-    out = out.replaceAll(`{${key}}`, String(val));
-  }
-  return out;
 }
 
 function platformDisplay(label: string, locale: Locale): string {
@@ -213,7 +249,12 @@ function parseRanges(rows: ClipRow[], segmentMax: number, max: number) {
     .filter((c) => c.end > c.start);
 }
 
-function intentLabel(copy: TryCopy, intent: TryIntentKind, langCount: number) {
+function intentLabel(
+  copy: TryCopy,
+  intent: TryIntentKind,
+  langCount: number,
+  postprocOn = false
+) {
   switch (intent) {
     case "post":
       return copy.intentPost.replace("{n}", String(langCount));
@@ -221,7 +262,7 @@ function intentLabel(copy: TryCopy, intent: TryIntentKind, langCount: number) {
       return copy.intentClips;
     case "media":
     case "frames":
-      return copy.intentMedia;
+      return postprocOn ? copy.intentPostproc : copy.intentMedia;
     case "noop":
       return copy.intentNoop;
     default:
@@ -244,6 +285,14 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
   const [wantTranslate, setWantTranslate] = useState(true);
   const [wantNotes, setWantNotes] = useState(true);
   const [wantClips, setWantClips] = useState(true);
+  const [wantEnhance, setWantEnhance] = useState(false);
+  const [wantCompress, setWantCompress] = useState(false);
+  const [wantConcat, setWantConcat] = useState(false);
+  const [enhanceStrength, setEnhanceStrength] = useState<"light" | "medium" | "strong">(
+    "medium"
+  );
+  const [compressHeight, setCompressHeight] = useState(720);
+  const [compressCrf, setCompressCrf] = useState(28);
   const [videoDur, setVideoDur] = useState<number | null>(null);
   const [cachedDone, setCachedDone] = useState(false);
   const [prevLangs, setPrevLangs] = useState<string | null>(null);
@@ -263,6 +312,8 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     }>
   >([]);
   const [err, setErr] = useState<string | null>(null);
+  const [queuePaused, setQueuePaused] = useState(false);
+  const [jobActionBusy, setJobActionBusy] = useState<number | null>(null);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
   const probeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollFailRef = useRef(0);
@@ -386,11 +437,32 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
         gif_ranges: [],
       };
 
+  const filledClipCount = (key: string) =>
+    (sourceMedia[key]?.clips || []).filter((r) => r.start.trim() && r.end.trim()).length;
+  const concatMissingRanges =
+    wantConcat &&
+    (sourceItems.length === 0 || sourceItems.some(({ key }) => filledClipCount(key) < 2));
+  const hasAnyModule =
+    wantTranslate ||
+    wantNotes ||
+    wantEnhance ||
+    wantCompress ||
+    wantConcat ||
+    (wantClips && (batchHasClips || batchHasGif));
+  const stagesPayload = composeTryStages({
+    wantTranslate,
+    wantNotes,
+    hasMedia: wantClips && (batchHasClips || batchHasGif || batchFrames !== "none"),
+    wantEnhance,
+    wantCompress,
+    wantConcat,
+  });
   const plannedIntent: TryIntentKind =
     sourceItems.length > 1 && !cachedDone
       ? "full"
       : resolveTryIntent({
           jobStatus: cachedDone ? urlProbe?.job_status || "done" : null,
+          stages: stagesPayload,
           frames: batchFrames,
           hasClips: batchHasClips,
           hasGifRanges: batchHasGif,
@@ -399,14 +471,12 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
           newFrameOpts,
           prevFrameOpts,
         }).intent;
-  const plannedIntentText = intentLabel(copy, plannedIntent, targetLangs.length);
-  const hasAnyModule =
-    wantTranslate || wantNotes || (wantClips && (batchHasClips || batchHasGif));
-  const stagesPayload = composeTryStages({
-    wantTranslate,
-    wantNotes,
-    hasMedia: wantClips && (batchHasClips || batchHasGif || batchFrames !== "none"),
-  });
+  const plannedIntentText = intentLabel(
+    copy,
+    plannedIntent,
+    targetLangs.length,
+    wantEnhance || wantCompress || wantConcat
+  );
   const langsSummary = allLangsSelected
     ? copy.langsAllLabel
     : targetLangs.length === 0
@@ -675,6 +745,12 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     setWantTranslate(true);
     setWantNotes(true);
     setWantClips(true);
+    setWantEnhance(false);
+    setWantCompress(false);
+    setWantConcat(false);
+    setEnhanceStrength("medium");
+    setCompressHeight(720);
+    setCompressCrf(28);
     setLangsOpen(false);
     setSubmitting(false);
     setPoll(null);
@@ -684,25 +760,16 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
 
   const refreshJobs = useCallback(async () => {
     const current = batchJobsRef.current;
-    const isTerminal = (s: string) => s === "done" || s === "failed" || s === "dead";
-    const toPoll = current.filter((j) => j.job_id && !isTerminal(j.status));
+    const toPoll = current.filter((j) => j.job_id && !isTerminalStatus(j.status));
     if (!toPoll.length) {
       stopPoll();
       return;
     }
 
     let activePoll: Poll | null = null;
+    let processingPoll: Poll | null = null;
     let lastUpdated: Poll | null = null;
-    const byId = new Map<
-      number,
-      {
-        status: string;
-        path?: string;
-        title?: string;
-        error?: string | null;
-        progress?: Progress;
-      }
-    >();
+    const byId = new Map<number, Partial<Poll> & { status: string }>();
 
     try {
       for (const j of toPoll) {
@@ -715,9 +782,15 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
           title: data.title,
           error: data.error,
           progress: data.progress,
+          queue_ahead: data.queue_ahead,
+          queue_position: data.queue_position,
+          busy: data.busy,
         });
         lastUpdated = data;
-        if (data.status === "processing" || data.status === "pending") {
+        if (data.paused != null) setQueuePaused(Boolean(data.paused));
+        if (data.status === "processing") {
+          processingPoll = data;
+        } else if (data.status === "pending") {
           activePoll = data;
         }
         if (data.duration_sec != null && data.duration_sec > 0) {
@@ -744,17 +817,71 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
       })
     );
 
-    const nextPoll = activePoll || lastUpdated;
+    const nextPoll = processingPoll || activePoll || lastUpdated;
     if (nextPoll) setPoll(nextPoll);
 
     const stillActive = toPoll.some((j) => {
       const u = byId.get(j.job_id);
-      return Boolean(u && !isTerminal(u.status));
+      return Boolean(u && !isTerminalStatus(u.status));
     });
     if (!stillActive) {
       stopPoll();
     }
   }, [stopPoll]);
+
+  const toggleQueuePause = useCallback(async () => {
+    const path = queuePaused ? "/api/try/queue/resume" : "/api/try/queue/pause";
+    try {
+      const r = await fetch(`${API}${path}`, { method: "POST" });
+      if (!r.ok) throw new Error(await r.text());
+      const data = (await r.json()) as { paused?: boolean };
+      setQueuePaused(Boolean(data.paused));
+      if (!data.paused) void refreshJobs();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  }, [queuePaused, refreshJobs]);
+
+  const runJobAction = useCallback(
+    async (jobId: number, action: "cancel" | "retry") => {
+      setJobActionBusy(jobId);
+      try {
+        const r = await fetch(`${API}/api/try/${jobId}/${action}`, { method: "POST" });
+        if (!r.ok) {
+          const body = (await r.json().catch(() => ({}))) as { detail?: string };
+          throw new Error(body.detail || r.statusText);
+        }
+        const data = (await r.json()) as Poll;
+        if (data.paused != null) setQueuePaused(Boolean(data.paused));
+        setBatchJobs((prev) =>
+          prev.map((j) =>
+            j.job_id === jobId
+              ? {
+                  ...j,
+                  status: data.status || j.status,
+                  path: data.path ?? j.path,
+                  title: data.title ?? j.title,
+                  error: data.error ?? null,
+                  progress: data.progress ?? j.progress,
+                }
+              : j
+          )
+        );
+        setPoll((prev) => (prev?.job_id === jobId ? { ...prev, ...data } : prev));
+        if (action === "retry" && !timer.current) {
+          timer.current = setInterval(() => {
+            void refreshJobs();
+          }, 3000);
+        }
+        void refreshJobs();
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : String(e));
+      } finally {
+        setJobActionBusy(null);
+      }
+    },
+    [refreshJobs]
+  );
 
   const resumedRef = useRef(false);
   useEffect(() => {
@@ -767,7 +894,9 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
         if (!r.ok || cancelled) return;
         const data = (await r.json()) as {
           jobs?: Array<Poll & { job_id: number; title?: string }>;
+          paused?: boolean;
         };
+        if (data.paused != null) setQueuePaused(Boolean(data.paused));
         const active = (data.jobs || []).filter(
           (j) => j.status === "pending" || j.status === "processing"
         );
@@ -861,6 +990,10 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
       setErr(tab === "url" ? copy.urlHint : copy.filesNeedOne);
       return;
     }
+    if (concatMissingRanges) {
+      setErr(copy.concatNeedTwo);
+      return;
+    }
     if (!hasAnyModule) {
       setErr(
         locale.startsWith("zh")
@@ -910,6 +1043,14 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
             langs: targetLangs,
             want_translate: wantTranslate,
             want_notes: wantNotes,
+            want_enhance: wantEnhance,
+            want_compress: wantCompress,
+            want_concat: wantConcat,
+            media_opts: {
+              enhance_strength: enhanceStrength,
+              compress_height: compressHeight,
+              compress_crf: compressCrf,
+            },
             stages: stagesPayload,
             ...(sessionid.trim() ? { sessionid: sessionid.trim() } : {}),
           }),
@@ -932,6 +1073,17 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
         fd.append("langs", JSON.stringify(targetLangs));
         fd.append("want_translate", wantTranslate ? "true" : "false");
         fd.append("want_notes", wantNotes ? "true" : "false");
+        fd.append("want_enhance", wantEnhance ? "true" : "false");
+        fd.append("want_compress", wantCompress ? "true" : "false");
+        fd.append("want_concat", wantConcat ? "true" : "false");
+        fd.append(
+          "media_opts",
+          JSON.stringify({
+            enhance_strength: enhanceStrength,
+            compress_height: compressHeight,
+            compress_crf: compressCrf,
+          })
+        );
         fd.append("stages", stagesPayload);
         res = await fetch(`${API}/api/try/uploads`, { method: "POST", body: fd });
       }
@@ -978,7 +1130,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
               )
               .map((j) => ({
                 job_id: j.job_id,
-                label: j.url || j.filename || String(j.job_id),
+                label: j.url || j.filename || j.title || String(j.job_id),
                 status: j.status || (j.ok === false ? "failed" : "pending"),
                 path: j.path,
                 title: j.title,
@@ -1012,15 +1164,10 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
       }
       setPoll(data);
       const allTerminal =
-        mapped.length > 0 &&
-        mapped.every(
-          (j) => j.status === "done" || j.status === "failed" || j.status === "dead"
-        );
+        mapped.length > 0 && mapped.every((j) => isTerminalStatus(j.status));
       const terminal =
         allTerminal ||
-        data.status === "done" ||
-        data.status === "failed" ||
-        data.status === "dead";
+        isTerminalStatus(data.status);
       if (terminal || mapped.length === 0) {
         setSubmitting(false);
       } else {
@@ -1049,17 +1196,39 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
   const statusLabel =
     poll?.status === "done"
       ? copy.statusDone
-      : poll?.status === "failed" || poll?.status === "dead"
-        ? copy.statusFailed
-        : poll?.status === "processing"
-          ? copy.statusProcessing
-          : poll
-            ? copy.statusPending
-            : null;
+      : poll?.status === "cancelled"
+        ? copy.statusCancelled
+        : poll?.status === "failed" || poll?.status === "dead"
+          ? copy.statusFailed
+          : poll?.status === "processing"
+            ? copy.statusProcessing
+            : poll
+              ? copy.statusPending
+              : null;
+
+  const batchCounts = useMemo(() => {
+    const total = batchJobs.length;
+    const running = batchJobs.filter((j) => j.status === "processing").length;
+    const queued = batchJobs.filter((j) => j.status === "pending").length;
+    return { total, running, queued };
+  }, [batchJobs]);
+
+  const hasActiveBatch = batchJobs.some((j) => !isTerminalStatus(j.status));
 
   const progress = poll?.progress;
   const stage = stageLabel(copy, progress?.stage);
   const detail = progressDetail(copy, progress);
+  const pollSourceRaw = poll?.title || batchJobs[0]?.label;
+  const pollSourceLabel = pollSourceRaw
+    ? formatBatchJobLabel(pollSourceRaw, locale)
+    : null;
+  const queueAhead = poll?.queue_ahead;
+  const queueAheadProgress = queueAhead?.progress;
+  const queueAheadStage = stageLabel(copy, queueAheadProgress?.stage);
+  const queueAheadLabel = queueAhead?.title
+    ? formatBatchJobLabel(queueAhead.title, locale)
+    : null;
+  const queueAheadPct = queueAheadProgress?.percent ?? 0;
 
   return (
     <div className="try-panel">
@@ -1094,6 +1263,24 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
               set: setWantClips,
               label: copy.workflowRailClips,
             },
+            {
+              id: "enhance",
+              on: wantEnhance,
+              set: setWantEnhance,
+              label: copy.workflowRailEnhance,
+            },
+            {
+              id: "compress",
+              on: wantCompress,
+              set: setWantCompress,
+              label: copy.workflowRailCompress,
+            },
+            {
+              id: "concat",
+              on: wantConcat,
+              set: setWantConcat,
+              label: copy.workflowRailConcat,
+            },
           ] as const
         ).map((wf) => (
           <li key={wf.id} className={wf.on ? "is-on" : "is-off"}>
@@ -1112,13 +1299,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
           </li>
         ))}
         {(
-          [
-            copy.workflowRailEnhance,
-            copy.workflowRailCompress,
-            copy.workflowRailConcat,
-            copy.workflowRailRemix,
-            copy.workflowRailPublish,
-          ] as const
+          [copy.workflowRailRemix, copy.workflowRailPublish] as const
         ).map((label) => (
           <li key={label} className="is-soon" title={copy.workflowRailSoon}>
             <span className="try-workflow-rail-n" aria-hidden="true">
@@ -1394,7 +1575,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
           )}
         </section>
 
-        {wantClips ? (
+        {wantClips || wantConcat ? (
           <section className="try-section try-outputs">
             <header className="try-section-head">
               <h2 className="try-section-title">{copy.clipsSection}</h2>
@@ -1452,6 +1633,82 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                 })}
               </div>
             )}
+          </section>
+        ) : null}
+
+        {wantEnhance || wantCompress || wantConcat ? (
+          <section className="try-section try-postproc">
+            <header className="try-section-head">
+              <h2 className="try-section-title">
+                {[
+                  wantEnhance ? copy.enhanceSection : null,
+                  wantCompress ? copy.compressSection : null,
+                  wantConcat ? copy.workflowRailConcat : null,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </h2>
+            </header>
+            {wantConcat ? <p className="try-hint">{copy.concatHint}</p> : null}
+            {wantConcat && concatMissingRanges ? (
+              <p className="try-error">{copy.concatNeedTwo}</p>
+            ) : null}
+            {wantEnhance ? (
+              <div className="try-field">
+                <span>{copy.enhanceStrength}</span>
+                <p className="try-hint">{copy.enhanceHint}</p>
+                <div className="try-frames-options try-postproc-options">
+                  {(
+                    [
+                      ["light", copy.enhanceLight],
+                      ["medium", copy.enhanceMedium],
+                      ["strong", copy.enhanceStrong],
+                    ] as const
+                  ).map(([id, label]) => (
+                    <label key={id} className={enhanceStrength === id ? "is-on" : undefined}>
+                      <input
+                        type="radio"
+                        name="enhance-strength"
+                        checked={enhanceStrength === id}
+                        disabled={submitting}
+                        onChange={() => setEnhanceStrength(id)}
+                      />
+                      <span>{label}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            {wantCompress ? (
+              <div className="try-field">
+                <span>{copy.compressSection}</span>
+                <p className="try-hint">{copy.compressHint}</p>
+                <label className="try-select-row">
+                  <span>{copy.compressHeight}</span>
+                  <select
+                    value={compressHeight}
+                    disabled={submitting}
+                    onChange={(e) => setCompressHeight(Number(e.target.value))}
+                  >
+                    <option value={0}>{copy.compressKeep}</option>
+                    <option value={720}>720p</option>
+                    <option value={1080}>1080p</option>
+                  </select>
+                </label>
+                <label className="try-select-row">
+                  <span>{copy.compressCrf}</span>
+                  <input
+                    type="number"
+                    min={18}
+                    max={32}
+                    step={1}
+                    value={compressCrf}
+                    disabled={submitting}
+                    onChange={(e) => setCompressCrf(Number(e.target.value) || 28)}
+                  />
+                </label>
+              </div>
+            ) : null}
           </section>
         ) : null}
 
@@ -1581,6 +1838,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                 sourceItems.length === 0 ||
                 !hasAnyModule ||
                 ((wantTranslate || wantNotes) && targetLangs.length === 0) ||
+                concatMissingRanges ||
                 (plannedIntent === "noop" && sourceItems.length <= 1) ||
                 (tab === "url" && cookiesBlockSubmit)
               }
@@ -1602,7 +1860,12 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
         <div className="try-status" aria-live="polite">
           <p className="try-status-head">
             <strong>{statusLabel}</strong>
-            {poll.title ? ` · ${poll.title}` : null}
+            {pollSourceLabel ? (
+              <span className="try-status-source" title={pollSourceRaw}>
+                {" "}
+                · {pollSourceLabel}
+              </span>
+            ) : null}
           </p>
 
           {progress &&
@@ -1622,7 +1885,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                 />
               </div>
               <p className="try-progress-meta">
-                <span>{stage}</span>
+                <span>{fillCopy(copy.progressNow, { stage })}</span>
                 {detail ? <span>{detail}</span> : null}
                 <span>{progress.percent}%</span>
               </p>
@@ -1632,16 +1895,81 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                 <p className="try-progress-stale">{copy.progressStale}</p>
               ) : poll.status === "pending" ? (
                 <p className="try-progress-wait">{copy.stageQueued}</p>
+              ) : progress.stage === "transcribe" && progress.percent <= 20 ? (
+                <p className="try-progress-wait">{copy.stageTranscribe}</p>
               ) : null}
             </div>
           ) : null}
 
           {poll.busy && poll.status === "pending" ? (
-            <p className="try-hint">{copy.busy}</p>
+            <>
+              {poll.queue_position && poll.queue_position > 1 ? (
+                <p className="try-hint">
+                  {fillCopy(copy.queuePosition, { n: poll.queue_position })}
+                </p>
+              ) : (
+                <p className="try-hint">{copy.busy}</p>
+              )}
+              {queueAhead && queueAheadProgress ? (
+                <div className="try-queue-ahead">
+                  <p className="try-queue-ahead-label">
+                    {fillCopy(copy.queueAhead, {
+                      title: queueAheadLabel || String(queueAhead.job_id),
+                      stage: queueAheadStage,
+                      percent: queueAheadPct,
+                    })}
+                  </p>
+                  <div
+                    className="try-progress-bar try-queue-ahead-bar"
+                    role="progressbar"
+                    aria-valuenow={queueAheadPct}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-label={queueAheadStage}
+                  >
+                    <div
+                      className="try-progress-fill"
+                      style={{ width: `${Math.max(queueAheadPct, 2)}%` }}
+                    />
+                  </div>
+                </div>
+              ) : null}
+            </>
           ) : null}
 
-          {poll.error && (poll.status === "failed" || poll.status === "dead") ? (
+          {poll.error &&
+          (poll.status === "failed" ||
+            poll.status === "dead" ||
+            poll.status === "cancelled") ? (
             <p className="try-error">{poll.error}</p>
+          ) : null}
+          {poll.status === "done" && poll.derived ? (
+            <div className="try-derived">
+              <p className="try-derived-title">{copy.derivedTitle}</p>
+              <ul>
+                {poll.derived.concat ? (
+                  <li>
+                    <a href={poll.derived.concat} download>
+                      {copy.derivedConcat}
+                    </a>
+                  </li>
+                ) : null}
+                {poll.derived.enhance ? (
+                  <li>
+                    <a href={poll.derived.enhance} download>
+                      {copy.derivedEnhance}
+                    </a>
+                  </li>
+                ) : null}
+                {poll.derived.compress ? (
+                  <li>
+                    <a href={poll.derived.compress} download>
+                      {copy.derivedCompress}
+                    </a>
+                  </li>
+                ) : null}
+              </ul>
+            </div>
           ) : null}
           {poll.status === "done" && poll.path && batchJobs.length <= 1 ? (
             <p>
@@ -1657,25 +1985,109 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
       ) : null}
 
       {batchJobs.length > 0 ? (
-        <ul className="try-batch-jobs" aria-label={copy.batchJobsTitle}>
-          {batchJobs.map((j) => (
-            <li key={j.job_id}>
-              <span className="try-batch-jobs-label">{j.label}</span>
-              <span className="try-batch-jobs-status">{j.status}</span>
-              {j.progress &&
-              (j.status === "pending" || j.status === "processing") ? (
-                <span className="try-batch-jobs-progress">
-                  {stageLabel(copy, j.progress.stage)}
-                  {j.progress.percent != null ? ` · ${j.progress.percent}%` : null}
-                </span>
-              ) : null}
-              {j.path && j.status === "done" ? (
-                <Link href={localePath(locale, j.path)}>{copy.openNotes}</Link>
-              ) : null}
-              {j.error ? <span className="try-error">{j.error}</span> : null}
-            </li>
-          ))}
-        </ul>
+        <div className="try-batch-jobs-wrap">
+          <div className="try-batch-jobs-head">
+            <span>{copy.batchJobsTitle}</span>
+            <span className="try-batch-jobs-count">{batchJobs.length}</span>
+            {batchCounts.total > 1 ? (
+              <span className="try-batch-jobs-summary">
+                {fillCopy(copy.batchSummary, batchCounts)}
+              </span>
+            ) : null}
+            {hasActiveBatch ? (
+              <button
+                type="button"
+                className="watch-btn secondary try-batch-queue-btn"
+                onClick={() => void toggleQueuePause()}
+              >
+                {queuePaused ? copy.queueResume : copy.queuePause}
+              </button>
+            ) : null}
+          </div>
+          {queuePaused && hasActiveBatch ? (
+            <p className="try-hint try-queue-paused">{copy.queuePaused}</p>
+          ) : null}
+          <ul className="try-batch-jobs" aria-label={copy.batchJobsTitle}>
+            {batchJobs.map((j) => {
+              const label = formatBatchJobLabel(j.title || j.label, locale);
+              const stage = stageLabel(copy, j.progress?.stage);
+              const detail = progressDetail(copy, j.progress);
+              const pct = j.progress?.percent ?? 0;
+              const showProgress =
+                Boolean(j.progress) &&
+                (j.status === "pending" || j.status === "processing");
+              const canCancel = j.status === "pending" || j.status === "processing";
+              const canRetry =
+                j.status === "failed" ||
+                j.status === "dead" ||
+                j.status === "cancelled";
+              return (
+                <li key={j.job_id} className="try-batch-job">
+                  <div className="try-batch-job-head">
+                    <span className="try-batch-jobs-label" title={j.label}>
+                      {label}
+                    </span>
+                    <span className={`try-batch-jobs-badge ${badgeClass(j.status)}`}>
+                      {jobStatusLabel(copy, j.status)}
+                    </span>
+                    <div className="try-batch-job-actions">
+                      {canCancel ? (
+                        <button
+                          type="button"
+                          className="watch-btn secondary try-batch-job-btn"
+                          disabled={jobActionBusy === j.job_id}
+                          onClick={() => void runJobAction(j.job_id, "cancel")}
+                        >
+                          {copy.jobCancel}
+                        </button>
+                      ) : null}
+                      {canRetry ? (
+                        <button
+                          type="button"
+                          className="watch-btn secondary try-batch-job-btn"
+                          disabled={jobActionBusy === j.job_id}
+                          onClick={() => void runJobAction(j.job_id, "retry")}
+                        >
+                          {copy.jobRetry}
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+                  {showProgress ? (
+                    <div className="try-batch-job-progress">
+                      <div
+                        className="try-progress-bar"
+                        role="progressbar"
+                        aria-valuenow={pct}
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-label={stage}
+                      >
+                        <div
+                          className="try-progress-fill"
+                          style={{ width: `${Math.max(pct, 2)}%` }}
+                        />
+                      </div>
+                      <p className="try-batch-job-progress-meta">
+                        <span>{fillCopy(copy.progressNow, { stage })}</span>
+                        {detail ? <span>{detail}</span> : null}
+                        <span>{pct}%</span>
+                      </p>
+                    </div>
+                  ) : null}
+                  {j.path && j.status === "done" ? (
+                    <p className="try-batch-job-done">
+                      <Link href={localePath(locale, j.path)}>{copy.openNotes}</Link>
+                    </p>
+                  ) : null}
+                  {j.error && (j.status === "failed" || j.status === "dead" || j.status === "cancelled") ? (
+                    <p className="try-error try-batch-job-error">{j.error}</p>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
       ) : null}
     </div>
   );

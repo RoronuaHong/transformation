@@ -1,3 +1,5 @@
+import type { Locale } from "./locales";
+
 export type UrlPlatform = "douyin" | "bilibili" | "youtube" | "hls";
 
 export function detectPlatform(url: string): UrlPlatform | null {

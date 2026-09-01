@@ -19,6 +19,11 @@ export type ArticleCue = {
   text: Record<string, string>;
 };
 
+/** Custom try-form GIF ranges (`/frames/.../gif_range_XX.gif`). */
+export function gifRangeFrames(points: KeyPoint[]): KeyPoint[] {
+  return points.filter((kp) => (kp.image || "").includes("/gif_range_"));
+}
+
 /** Custom try-form ranges only (`/clips/.../range_XX.mp4`), not subtitle-aligned GIFs. */
 export function isRangeVideoClip(kp: KeyPoint): boolean {
   const clip = (kp.clip || "").trim();

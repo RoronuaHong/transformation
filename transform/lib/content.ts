@@ -125,6 +125,8 @@ type ExportedKeyPoint = {
   clip?: string;
   start_sec?: number;
   end_sec?: number;
+  cue_start?: number;
+  cue_end?: number;
 };
 
 type ExportedArticle = {
@@ -211,6 +213,10 @@ function fillNoteItems(
         image:
           (kp.image || mediaSrc[i]?.image || "").trim() || undefined,
         clip: (kp.clip || mediaSrc[i]?.clip || "").trim() || undefined,
+        start_sec: kp.start_sec ?? mediaSrc[i]?.start_sec,
+        end_sec: kp.end_sec ?? mediaSrc[i]?.end_sec,
+        cue_start: kp.cue_start ?? mediaSrc[i]?.cue_start,
+        cue_end: kp.cue_end ?? mediaSrc[i]?.cue_end,
       }))
       .filter((kp) => kp.title);
   }

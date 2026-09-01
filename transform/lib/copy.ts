@@ -6,6 +6,18 @@ export type FeedCopy = {
   lede: string;
   cta: string;
   empty: string;
+  searchPlaceholder: string;
+  colTitle: string;
+  colPlatform: string;
+  colTopic: string;
+  colHighlights: string;
+  colPoints: string;
+  colAction: string;
+  pagePrev: string;
+  pageNext: string;
+  pageStatus: string;
+  perPage: string;
+  noResults: string;
 };
 
 export type ArticleCopy = {
@@ -26,6 +38,12 @@ export type ArticleCopy = {
   downloadClipFile: string;
   previewClip: string;
   viewFrame: string;
+  mediaPreview: string;
+  mediaOpen: string;
+  mediaGifKind: string;
+  mediaTabClip: string;
+  mediaBack: string;
+  mediaCount: string;
   clipsEmpty: string;
   segmentCaptions: string;
   downloadSegmentCaptions: string;
@@ -75,6 +93,13 @@ export type TryCopy = {
   cookiesLocalDetected: string;
   batchQueued: string;
   batchJobsTitle: string;
+  batchSummary: string;
+  progressNow: string;
+  jobCancel: string;
+  jobRetry: string;
+  queuePause: string;
+  queueResume: string;
+  queuePaused: string;
   modulesSection: string;
   moduleTranslate: string;
   moduleNotes: string;
@@ -93,6 +118,7 @@ export type TryCopy = {
   intentPost: string;
   intentClips: string;
   intentMedia: string;
+  intentPostproc: string;
   intentNoop: string;
   intentCached: string;
   mediaSection: string;
@@ -102,10 +128,13 @@ export type TryCopy = {
   submitting: string;
   processing: string;
   busy: string;
+  queueAhead: string;
+  queuePosition: string;
   statusPending: string;
   statusProcessing: string;
   statusDone: string;
   statusFailed: string;
+  statusCancelled: string;
   openNotes: string;
   hint: string;
   apiDown: string;
@@ -120,6 +149,8 @@ export type TryCopy = {
   stageGif: string;
   stageExport: string;
   stageDone: string;
+  stageFailed: string;
+  stageCancelled: string;
   progressLangs: string;
   alreadyDone: string;
   framesLabel: string;
@@ -174,6 +205,26 @@ export type TryCopy = {
   workflowRailLangs: string;
   workflowRailSoon: string;
   workflowRailHint: string;
+  enhanceSection: string;
+  enhanceHint: string;
+  enhanceStrength: string;
+  enhanceLight: string;
+  enhanceMedium: string;
+  enhanceStrong: string;
+  compressSection: string;
+  compressHint: string;
+  compressHeight: string;
+  compressKeep: string;
+  compressCrf: string;
+  concatHint: string;
+  concatNeedTwo: string;
+  derivedTitle: string;
+  derivedEnhance: string;
+  derivedCompress: string;
+  derivedConcat: string;
+  stageEnhance: string;
+  stageCompress: string;
+  stageConcat: string;
   clipsSection: string;
 };
 
@@ -197,6 +248,18 @@ const en: UiCopy = {
     lede: "Browse videos that have been transcribed, translated, and exported.",
     cta: "Open notes",
     empty: "No published notes yet. Process a video on the home page.",
+    searchPlaceholder: "Search title, topic, or key points…",
+    colTitle: "Title",
+    colPlatform: "Platform",
+    colTopic: "Topic",
+    colHighlights: "Highlights",
+    colPoints: "Points",
+    colAction: "Action",
+    pagePrev: "Previous",
+    pageNext: "Next",
+    pageStatus: "{from}–{to} of {total}",
+    perPage: "Per page",
+    noResults: "No notes match your search.",
   },
   article: {
     notes: "Notes",
@@ -216,6 +279,12 @@ const en: UiCopy = {
     downloadClipFile: "Download",
     previewClip: "Preview",
     viewFrame: "Click to view",
+    mediaPreview: "Media",
+    mediaOpen: "View media",
+    mediaGifKind: "GIF",
+    mediaTabClip: "MP4",
+    mediaBack: "Back to list",
+    mediaCount: "{n} items",
     clipsEmpty:
       "No MP4 clips yet. On the home page, fill Block 2 start/end seconds (e.g. 10→20), then generate. Block 1 GIF length does not create downloads here.",
     segmentCaptions: "Captions in this clip",
@@ -265,6 +334,13 @@ const en: UiCopy = {
     cookiesLocalDetected: "Local cookies.txt detected on this machine.",
     batchQueued: "{n} items queued — processing one at a time.",
     batchJobsTitle: "Batch jobs",
+    batchSummary: "{total} jobs · {running} running · {queued} queued",
+    progressNow: "Now: {stage}",
+    jobCancel: "Cancel",
+    jobRetry: "Retry",
+    queuePause: "Pause queue",
+    queueResume: "Resume queue",
+    queuePaused: "Queue paused — current job finishes, then no new jobs start.",
     modulesSection: "Workflows",
     moduleTranslate: "Subtitles",
     moduleNotes: "Notes",
@@ -284,6 +360,7 @@ const en: UiCopy = {
     intentPost: "This run: re-translate {n} languages (reuse transcription).",
     intentClips: "This run: re-cut MP4 only (no ASR).",
     intentMedia: "This run: refresh GIF / MP4 only (no ASR).",
+    intentPostproc: "This run: enhance / compress / concat only (no ASR).",
     intentNoop: "Already done — nothing to change. Open notes below.",
     intentCached: "Notes already exist for this link.",
     mediaSection: "Clips per item",
@@ -293,10 +370,13 @@ const en: UiCopy = {
     submitting: "Queued…",
     processing: "Processing…",
     busy: "Only one try job runs at a time. Yours is queued — please wait.",
+    queueAhead: "Running now: {title} · {stage} {percent}%",
+    queuePosition: "Your job is #{n} in line — starts automatically when the current task finishes.",
     statusPending: "Queued",
     statusProcessing: "Processing",
     statusDone: "Done",
     statusFailed: "Failed",
+    statusCancelled: "Cancelled",
     openNotes: "Open notes",
     hint: "We publish written notes and short clips only — not the full original video.",
     apiDown: "Backend offline. Start subtitle_pipeline with yarn api on port 8901.",
@@ -311,6 +391,8 @@ const en: UiCopy = {
     stageGif: "Extracting step GIFs",
     stageExport: "Publishing to site",
     stageDone: "Complete",
+    stageFailed: "Failed",
+    stageCancelled: "Cancelled",
     progressLangs: "{n}/{total} languages",
     alreadyDone: "Notes already exist for this video.",
     framesBlockTitle: "GIF / stills",
@@ -366,7 +448,27 @@ const en: UiCopy = {
     workflowRailPublish: "Publish",
     workflowRailLangs: "Languages",
     workflowRailSoon: "Soon",
-    workflowRailHint: "Tap to enable workflows for this run. Grey ones are not built yet.",
+    workflowRailHint: "Tap to enable workflows for this run. Remix and publish are not built yet.",
+    enhanceSection: "Enhance",
+    enhanceHint: "Sharpen the working video (concat if you made one, otherwise the source). No AI upscaler in this version.",
+    enhanceStrength: "Strength",
+    enhanceLight: "Light",
+    enhanceMedium: "Medium",
+    enhanceStrong: "Strong (1.5× then cap)",
+    compressSection: "Compress",
+    compressHint: "Re-encode with H.264 for a smaller file. Runs last on the working video.",
+    compressHeight: "Max height",
+    compressKeep: "Keep size",
+    compressCrf: "Quality (CRF, lower = larger)",
+    concatHint: "Joins this item’s MP4 ranges in order. Need at least two ranges.",
+    concatNeedTwo: "Concat needs at least two MP4 ranges on each item.",
+    derivedTitle: "Processed video",
+    derivedEnhance: "Download enhanced MP4",
+    derivedCompress: "Download compressed MP4",
+    derivedConcat: "Download concatenated MP4",
+    stageEnhance: "Enhancing video",
+    stageCompress: "Compressing video",
+    stageConcat: "Concatenating clips",
   },
   ask: {
     lede: "Ask questions about the project knowledge base. Answers are grounded in indexed docs with sources cited.",
@@ -381,6 +483,18 @@ const zh: UiCopy = {
     lede: "浏览已完成转写、翻译并导出的视频笔记。",
     cta: "查看笔记",
     empty: "还没有已发布的笔记。请先在首页处理一条视频。",
+    searchPlaceholder: "搜索标题、主题或要点…",
+    colTitle: "标题",
+    colPlatform: "平台",
+    colTopic: "主题",
+    colHighlights: "要点预览",
+    colPoints: "条数",
+    colAction: "操作",
+    pagePrev: "上一页",
+    pageNext: "下一页",
+    pageStatus: "第 {from}–{to} 条，共 {total} 条",
+    perPage: "每页",
+    noResults: "没有匹配的笔记。",
   },
   article: {
     notes: "总结",
@@ -400,6 +514,12 @@ const zh: UiCopy = {
     downloadClipFile: "下载",
     previewClip: "预览",
     viewFrame: "点击查看",
+    mediaPreview: "画面",
+    mediaOpen: "查看画面",
+    mediaGifKind: "动图",
+    mediaTabClip: "MP4",
+    mediaBack: "返回列表",
+    mediaCount: "{n} 项",
     clipsEmpty:
       "还没有 MP4 片段。请在首页「② MP4 片段」填写开始/结束秒（例如 10→20），再点生成。上方「① GIF 时长」不会出现在这里。",
     segmentCaptions: "该片段对应字幕",
@@ -448,6 +568,13 @@ const zh: UiCopy = {
     cookiesLocalDetected: "已检测到本机 cookies.txt。",
     batchQueued: "已排队 {n} 条 — 将依次处理。",
     batchJobsTitle: "批量任务",
+    batchSummary: "共 {total} 条 · {running} 进行中 · {queued} 排队",
+    progressNow: "当前：{stage}",
+    jobCancel: "取消",
+    jobRetry: "重跑",
+    queuePause: "暂停队列",
+    queueResume: "继续队列",
+    queuePaused: "队列已暂停 — 当前任务完成后不再启动新任务。",
     modulesSection: "本次工作流",
     moduleTranslate: "字幕翻译",
     moduleNotes: "结构化笔记",
@@ -466,6 +593,7 @@ const zh: UiCopy = {
     intentPost: "本次：重翻 {n} 种语言（复用转写，不重跑 Whisper）。",
     intentClips: "本次：只重切 MP4（不跑转写）。",
     intentMedia: "本次：只刷新 GIF / MP4（不跑转写）。",
+    intentPostproc: "本次：只跑增强 / 压缩 / 拼接（不跑转写）。",
     intentNoop: "已完成且无变更 — 可直接查看笔记。",
     intentCached: "该链接已生成过笔记。",
     mediaSection: "逐条裁剪",
@@ -475,10 +603,13 @@ const zh: UiCopy = {
     submitting: "提交中…",
     processing: "处理中…",
     busy: "本机同时只处理一条任务。你的视频已排队，请稍候。",
+    queueAhead: "前方正在处理：{title} · {stage} {percent}%",
+    queuePosition: "你的任务排在第 {n} 位，前方任务完成后会自动开始。",
     statusPending: "排队中",
     statusProcessing: "处理中",
     statusDone: "完成",
     statusFailed: "失败",
+    statusCancelled: "已取消",
     openNotes: "查看笔记",
     hint: "本站只整理文字步骤与短片段，不托管完整原视频。",
     apiDown: "后台未启动。请在 subtitle_pipeline 目录运行 yarn api（8901 端口）。",
@@ -493,6 +624,8 @@ const zh: UiCopy = {
     stageGif: "截取步骤 GIF",
     stageExport: "导出到站点",
     stageDone: "已完成",
+    stageFailed: "失败",
+    stageCancelled: "已取消",
     progressLangs: "{n}/{total} 种语言",
     alreadyDone: "该视频已生成过笔记，可直接查看。",
     framesBlockTitle: "GIF / 静帧",
@@ -549,7 +682,27 @@ const zh: UiCopy = {
     workflowRailPublish: "发布",
     workflowRailLangs: "语言",
     workflowRailSoon: "待上线",
-    workflowRailHint: "点选本轮要跑的工作流；灰色暂未开放。",
+    workflowRailHint: "点选本轮要跑的工作流；二创 / 发布暂未开放。",
+    enhanceSection: "画质增强",
+    enhanceHint: "锐化当前工作视频（有拼接则用拼接结果，否则用源片）。本版不用 AI 超分。",
+    enhanceStrength: "强度",
+    enhanceLight: "轻",
+    enhanceMedium: "中",
+    enhanceStrong: "强（先放大再限高）",
+    compressSection: "缩小体积",
+    compressHint: "H.264 重编码压体积，接在增强或拼接之后。",
+    compressHeight: "高度上限",
+    compressKeep: "保持原分辨率",
+    compressCrf: "质量 CRF（越小越大）",
+    concatHint: "按顺序拼接本条的 MP4 区间，至少两段。",
+    concatNeedTwo: "拼接需要每条至少两段 MP4 区间。",
+    derivedTitle: "处理后的视频",
+    derivedEnhance: "下载增强版 MP4",
+    derivedCompress: "下载压缩版 MP4",
+    derivedConcat: "下载拼接 MP4",
+    stageEnhance: "画质增强",
+    stageCompress: "压缩体积",
+    stageConcat: "拼接片段",
   },
   ask: {
     lede: "基于项目知识库（Milvus 向量库 + 本地大模型）回答问题，答案附引用来源。",
@@ -564,6 +717,18 @@ const zhHant: UiCopy = {
     lede: "瀏覽已完成轉寫、翻譯並匯出的影片筆記。",
     cta: "查看筆記",
     empty: "還沒有已發布的筆記。請先在首頁處理一條影片。",
+    searchPlaceholder: "搜尋標題、主題或要點…",
+    colTitle: "標題",
+    colPlatform: "平台",
+    colTopic: "主題",
+    colHighlights: "要點預覽",
+    colPoints: "條數",
+    colAction: "操作",
+    pagePrev: "上一頁",
+    pageNext: "下一頁",
+    pageStatus: "第 {from}–{to} 條，共 {total} 條",
+    perPage: "每頁",
+    noResults: "沒有匹配的筆記。",
   },
   article: {
     notes: "總結",
@@ -583,6 +748,12 @@ const zhHant: UiCopy = {
     downloadClipFile: "下載",
     previewClip: "預覽",
     viewFrame: "點擊查看",
+    mediaPreview: "畫面",
+    mediaOpen: "查看畫面",
+    mediaGifKind: "動圖",
+    mediaTabClip: "MP4",
+    mediaBack: "返回列表",
+    mediaCount: "{n} 項",
     clipsEmpty:
       "還沒有 MP4 片段。請在首頁「② MP4 片段」填寫開始/結束秒（例如 10→20），再點生成。上方「① GIF 時長」不會出現在這裡。",
     segmentCaptions: "該片段對應字幕",
@@ -619,6 +790,16 @@ const zhHant: UiCopy = {
     reset: "重置",
     openNotes: "查看筆記",
     batchJobsTitle: "批量任務",
+    batchSummary: "共 {total} 條 · {running} 進行中 · {queued} 排隊",
+    progressNow: "當前：{stage}",
+    jobCancel: "取消",
+    jobRetry: "重跑",
+    queuePause: "暫停佇列",
+    queueResume: "繼續佇列",
+    queuePaused: "佇列已暫停 — 當前任務完成後不再啟動新任務。",
+    statusCancelled: "已取消",
+    stageFailed: "失敗",
+    stageCancelled: "已取消",
     modulesSection: "本次工作流",
     moduleTranslate: "字幕翻譯",
     moduleNotes: "結構化筆記",
@@ -634,7 +815,7 @@ const zhHant: UiCopy = {
     workflowRailRemix: "二創",
     workflowRailPublish: "發布",
     workflowRailSoon: "待上線",
-    workflowRailHint: "點選本輪要跑的工作流；灰色暫未開放。",
+    workflowRailHint: "點選本輪要跑的工作流；二創 / 發布暫未開放。",
   },
   ask: {
     lede: "基於專案知識庫（Milvus 向量庫 + 本地大模型）回答問題，答案附引用來源。",
@@ -920,4 +1101,15 @@ export function isRtl(locale: Locale): boolean {
 
 export function interpolate(template: string, n: number): string {
   return template.replace("{n}", String(n));
+}
+
+export function fillCopy(
+  template: string,
+  vars: Record<string, string | number>
+): string {
+  let out = template;
+  for (const [key, val] of Object.entries(vars)) {
+    out = out.replaceAll(`{${key}}`, String(val));
+  }
+  return out;
 }

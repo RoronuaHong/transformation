@@ -112,6 +112,22 @@ export function resolveTryIntent(opts: {
     return { intent: "full", stages: "all", reason: "new_or_retry" };
   }
 
+  const postproc = new Set(
+    explicit
+      .replace(/;/g, ",")
+      .split(",")
+      .map((p) => p.trim())
+      .filter((p) => p === "enhance" || p === "compress" || p === "concat")
+  );
+  if (postproc.size) {
+    const parts: string[] = [];
+    if (postproc.has("concat")) parts.push("clips");
+    for (const name of ["concat", "enhance", "compress"] as const) {
+      if (postproc.has(name)) parts.push(name);
+    }
+    return { intent: "media", stages: parts.join(","), reason: "postproc" };
+  }
+
   if (prevPack === null || !langsEqual(prevPack, newPack)) {
     return { intent: "post", stages: "post", reason: "langs_changed" };
   }
@@ -148,15 +164,37 @@ export function composeTryStages(opts: {
   wantTranslate: boolean;
   wantNotes: boolean;
   hasMedia: boolean;
+  wantEnhance?: boolean;
+  wantCompress?: boolean;
+  wantConcat?: boolean;
 }): string {
-  const { wantTranslate, wantNotes, hasMedia } = opts;
-  if (wantTranslate && wantNotes) return "all";
-  const parts: string[] = ["fetch", "asr"];
+  const {
+    wantTranslate,
+    wantNotes,
+    hasMedia,
+    wantEnhance = false,
+    wantCompress = false,
+    wantConcat = false,
+  } = opts;
+  const post: string[] = [];
+  if (wantConcat) post.push("concat");
+  if (wantEnhance) post.push("enhance");
+  if (wantCompress) post.push("compress");
+  if (wantTranslate && wantNotes) {
+    return post.length ? ["all", ...post].join(",") : "all";
+  }
+  const parts: string[] = [];
+  const text = wantTranslate || wantNotes;
+  const media = hasMedia || wantConcat;
+  if (text || media || post.length) parts.push("fetch");
+  if (text) parts.push("asr");
   if (wantTranslate) parts.push("translate");
   if (wantNotes) parts.push("notes", "localize");
   if (hasMedia) parts.push("frames", "clips");
-  if (!wantTranslate && !wantNotes && !hasMedia) {
-    parts.push("notes", "localize");
+  else if (wantConcat) parts.push("clips");
+  if (!wantTranslate && !wantNotes && !hasMedia && !post.length) {
+    parts.push("fetch", "asr", "notes", "localize");
   }
+  parts.push(...post);
   return [...new Set(parts)].join(",");
 }
