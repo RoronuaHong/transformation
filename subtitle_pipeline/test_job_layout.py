@@ -39,6 +39,27 @@ def test_reorganize_job_dir_classifies_and_drops_dupes(tmp_path: Path) -> None:
     assert stats["deleted"]
 
 
+def test_is_usable_wav_rejects_stub(tmp_path: Path) -> None:
+    from job_layout import is_usable_wav
+
+    stub = tmp_path / "bad.wav"
+    stub.write_bytes(b"RIFF" + b"\x00" * 100)
+    assert not is_usable_wav(stub)
+
+    good = tmp_path / "good.wav"
+    good.write_bytes(b"RIFF" + b"\x00" * 4 + b"WAVE" + b"\x00" * 5000)
+    assert is_usable_wav(good)
+
+
+def test_existing_wav_skips_corrupt(tmp_path: Path) -> None:
+    from job_layout import existing_wav
+
+    media = tmp_path / "media"
+    media.mkdir()
+    (media / "full_16k.wav").write_bytes(b"RIFF" + b"\x00" * 50)
+    assert existing_wav(tmp_path) is None
+
+
 def test_locale_srt_path_prefers_nested(tmp_path: Path) -> None:
     nested = tmp_path / "subs" / "en.srt"
     nested.parent.mkdir(parents=True)

@@ -27,6 +27,48 @@ MEDIA_FLAT: dict[str, str] = {
 
 SOURCE_SUFFIXES = {".m4a", ".webm", ".mp3", ".m4s", ".mp4", ".opus", ".ogg", ".flac", ".mkv"}
 
+MIN_WAV_BYTES = 4096
+
+
+def is_usable_wav(path: Path, *, min_bytes: int = MIN_WAV_BYTES) -> bool:
+    """True when path looks like a non-empty PCM WAV (not a truncated stub)."""
+    p = Path(path)
+    if not p.is_file():
+        return False
+    try:
+        if p.stat().st_size < min_bytes:
+            return False
+        head = p.read_bytes()[:12]
+    except OSError:
+        return False
+    return head[:4] == b"RIFF" and head[8:12] == b"WAVE"
+
+
+def find_source_media(work_dir: Path, *, wav: Path | None = None) -> Path | None:
+    """Best-effort source video/audio file for (re)extracting WAV."""
+    work_dir = Path(work_dir)
+    skip = {Path(wav).resolve()} if wav else set()
+    candidates: list[Path] = []
+    for folder in (work_dir / "media", work_dir):
+        if not folder.is_dir():
+            continue
+        for p in folder.iterdir():
+            if not p.is_file():
+                continue
+            if p.suffix.lower() not in SOURCE_SUFFIXES:
+                continue
+            if p.resolve() in skip:
+                continue
+            if p.name.endswith(".wav") and p.stem == STEM_DEFAULT:
+                continue
+            candidates.append(p)
+    if not candidates:
+        return None
+    for p in candidates:
+        if p.name == "source.mp4":
+            return p
+    return sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)[0]
+
 
 def job_media_dir(work_dir: Path) -> Path:
     d = Path(work_dir) / "media"
@@ -41,10 +83,10 @@ def job_subs_dir(work_dir: Path) -> Path:
 
 
 def existing_wav(work_dir: Path, stem: str = STEM_DEFAULT) -> Path | None:
-    """Return the job WAV if present (nested media/ first, then legacy flat)."""
+    """Return the job WAV if present and usable (nested media/ first, then legacy flat)."""
     work_dir = Path(work_dir)
     for path in (work_dir / "media" / f"{stem}.wav", work_dir / f"{stem}.wav"):
-        if path.is_file():
+        if is_usable_wav(path):
             return path
     return None
 

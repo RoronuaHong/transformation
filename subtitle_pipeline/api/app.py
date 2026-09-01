@@ -320,6 +320,10 @@ class TryUrlBody(BaseModel):
     )
     want_translate: bool = Field(default=True, description="Run subtitle translation")
     want_notes: bool = Field(default=True, description="Run structured notes")
+    want_enhance: bool = Field(default=False, description="WF-04 sharpen / mild upscale")
+    want_compress: bool = Field(default=False, description="WF-05 shrink file size")
+    want_concat: bool = Field(default=False, description="WF-06 concat clip ranges")
+    media_opts: dict | None = Field(default=None, description="enhance_strength / compress_height / compress_crf")
 
 
 class TryProbeBody(BaseModel):
@@ -349,6 +353,10 @@ class TryUrlsBody(BaseModel):
     langs: list[str] | str | None = None
     want_translate: bool = True
     want_notes: bool = True
+    want_enhance: bool = False
+    want_compress: bool = False
+    want_concat: bool = False
+    media_opts: dict | None = None
 
 
 @app.post("/api/try/probe")
@@ -391,6 +399,10 @@ def try_urls(body: TryUrlsBody, background: BackgroundTasks) -> dict:
         want_translate=body.want_translate,
         want_notes=body.want_notes,
         stages=body.stages,
+        want_enhance=body.want_enhance,
+        want_compress=body.want_compress,
+        want_concat=body.want_concat,
+        media_opts=body.media_opts,
     )
     if not out.get("ok"):
         raise HTTPException(status_code=400, detail=out.get("error") or "submit failed")
@@ -574,6 +586,11 @@ async def try_uploads(
     langs: str = Form(""),
     want_translate: str = Form("true"),
     want_notes: str = Form("true"),
+    want_enhance: str = Form("false"),
+    want_compress: str = Form("false"),
+    want_concat: str = Form("false"),
+    media_opts: str = Form("{}"),
+    stages: str = Form(""),
 ) -> dict:
     from api.try_service import job_snapshot, run_try_job, submit_uploads, try_status
 
@@ -632,6 +649,16 @@ async def try_uploads(
 
     wt = str(want_translate or "true").strip().lower() not in ("0", "false", "no", "off")
     wn = str(want_notes or "true").strip().lower() not in ("0", "false", "no", "off")
+    we = str(want_enhance or "false").strip().lower() not in ("0", "false", "no", "off")
+    wc = str(want_compress or "false").strip().lower() not in ("0", "false", "no", "off")
+    wcat = str(want_concat or "false").strip().lower() not in ("0", "false", "no", "off")
+    try:
+        media_opts_dict = json.loads(media_opts or "{}")
+        if not isinstance(media_opts_dict, dict):
+            media_opts_dict = {}
+    except json.JSONDecodeError:
+        media_opts_dict = {}
+    stage_s = (stages or "").strip() or None
 
     out = submit_uploads(
         items,
@@ -643,6 +670,11 @@ async def try_uploads(
         langs=lang_list,
         want_translate=wt,
         want_notes=wn,
+        stages=stage_s,
+        want_enhance=we,
+        want_compress=wc,
+        want_concat=wcat,
+        media_opts=media_opts_dict,
     )
     if not out.get("ok"):
         raise HTTPException(status_code=400, detail=out.get("error") or "submit failed")
@@ -740,12 +772,50 @@ def try_active(limit: int = 10) -> dict:
     return list_active_try_jobs(limit=limit)
 
 
+@app.post("/api/try/queue/pause")
+def try_queue_pause() -> dict:
+    from api.try_service import pause_try_queue
+
+    return pause_try_queue()
+
+
+@app.post("/api/try/queue/resume")
+def try_queue_resume() -> dict:
+    from api.try_service import resume_try_queue
+
+    return resume_try_queue()
+
+
+@app.post("/api/try/{job_id}/cancel")
+def try_cancel(job_id: int) -> dict:
+    from api.try_service import cancel_try_job
+
+    out = cancel_try_job(job_id)
+    if not out.get("ok"):
+        raise HTTPException(status_code=409, detail=out.get("error") or "cancel failed")
+    return out
+
+
+@app.post("/api/try/{job_id}/retry")
+def try_retry(job_id: int, background: BackgroundTasks) -> dict:
+    from api.try_service import job_snapshot, retry_try_job, run_try_job, try_status
+
+    out = retry_try_job(job_id)
+    if not out.get("ok"):
+        raise HTTPException(status_code=409, detail=out.get("error") or "retry failed")
+    if out.get("status") == "pending" and not try_status()["busy"]:
+        background.add_task(run_try_job, job_id)
+        snap = job_snapshot(job_id)
+        if snap.get("ok"):
+            out.update(snap)
+    return out
+
+
 @app.get("/api/try/{job_id}")
 def try_poll(job_id: int) -> dict:
-    from api.try_service import job_snapshot, try_status
+    from api.try_service import job_snapshot
 
     snap = job_snapshot(job_id)
-    snap["busy"] = try_status()["busy"]
     if not snap.get("ok"):
         raise HTTPException(status_code=404, detail=snap.get("error") or "not found")
     return snap

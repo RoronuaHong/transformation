@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 from discover.content_db import ContentDB
 from langs import coalesce_source_lang
 from note_frames import copy_clips_to_site, copy_frames_to_site
+from media_ops import copy_derived_to_site
 from pipeline import parse_srt
 
 
@@ -147,6 +148,9 @@ def export_articles(db: ContentDB, *, site_public: Path | None = None) -> list[d
             nc = copy_clips_to_site(Path(work), str(a["slug"]), site_public)
             if nc:
                 print(f"[export] clips slug={a['slug']} n={nc}")
+            nd = copy_derived_to_site(Path(work), str(a["slug"]), site_public)
+            if nd:
+                print(f"[export] derived slug={a['slug']} n={nd}")
     return out
 
 

@@ -491,7 +491,11 @@ def probe_bilibili_duration(url: str) -> dict[str, Any]:
 
 
 def _ffmpeg_to_wav(src: Path, wav: Path) -> None:
+    from job_layout import is_usable_wav
+
     ffmpeg = find_ffmpeg()
+    if wav.is_file():
+        wav.unlink()
     cmd = [
         ffmpeg,
         "-y",
@@ -507,6 +511,10 @@ def _ffmpeg_to_wav(src: Path, wav: Path) -> None:
         str(wav),
     ]
     subprocess.run(cmd, check=True, capture_output=True)
+    if not is_usable_wav(wav):
+        raise RuntimeError(
+            f"ffmpeg produced invalid wav ({wav.stat().st_size if wav.is_file() else 0} bytes) from {src}"
+        )
 
 
 def _fetch_bilibili_api_to_wav(url: str, media: Path, wav: Path, meta_path: Path) -> dict[str, Any]:
@@ -694,27 +702,50 @@ def fetch_to_wav(
     force: bool = False,
 ) -> dict:
     """Download best audio and convert to full_16k.wav. Returns meta dict."""
-    from job_layout import existing_wav, job_media_dir
+    from job_layout import existing_wav, find_source_media, is_usable_wav, job_media_dir
 
     out_dir = out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     media = job_media_dir(out_dir)
     wav = media / "full_16k.wav"
     meta_path = media / "fetch_meta.json"
+    if wav.is_file() and not is_usable_wav(wav):
+        print(f"[fetch] drop invalid wav ({wav.stat().st_size} bytes)")
+        wav.unlink()
     reused = existing_wav(out_dir)
-    if reused is not None and reused.resolve() != wav.resolve() and not wav.exists():
+    if reused is not None and reused.resolve() != wav.resolve() and not is_usable_wav(wav):
         shutil.move(str(reused), str(wav))
-    reused = wav if wav.exists() else None
     legacy_meta = out_dir / "fetch_meta.json"
     if not meta_path.exists() and legacy_meta.exists():
         shutil.move(str(legacy_meta), str(meta_path))
 
-    if reused is not None and not force:
-        print(f"[fetch] reuse -> {reused}")
+    if is_usable_wav(wav) and not force:
+        print(f"[fetch] reuse -> {wav}")
         meta = {}
         if meta_path.exists():
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        meta["wav"] = str(reused)
+        meta["wav"] = str(wav)
+        return meta
+
+    src_local = find_source_media(out_dir, wav=wav)
+    if src_local and (force or not is_usable_wav(wav)):
+        print(f"[fetch] local source -> {src_local.name}")
+        _ffmpeg_to_wav(src_local, wav)
+        print(f"[fetch] wav -> {wav}")
+        meta = {}
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                meta = {}
+        meta.update(
+            {
+                "source_file": str(src_local),
+                "wav": str(wav),
+            }
+        )
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[out] {meta_path}")
         return meta
 
     ffmpeg = find_ffmpeg()
@@ -930,6 +961,12 @@ def fetch_to_wav(
         str(wav),
     ]
     subprocess.run(cmd, check=True, capture_output=True)
+    from job_layout import is_usable_wav
+
+    if not is_usable_wav(wav):
+        raise RuntimeError(
+            f"ffmpeg produced invalid wav ({wav.stat().st_size if wav.is_file() else 0} bytes) from {src}"
+        )
     print(f"[fetch] wav -> {wav}")
 
     meta = {

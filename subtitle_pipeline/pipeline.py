@@ -22,6 +22,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from job_layout import (
+    find_source_media,
+    is_usable_wav,
     job_media_dir,
     job_subs_dir,
     locale_srt_path,
@@ -139,6 +141,8 @@ def stop_ollama_runners() -> None:
                 [ollama, "stop", name],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=30,
             )
         except Exception:
@@ -1589,11 +1593,26 @@ def transcribe_video(args: argparse.Namespace) -> tuple[list[dict], Path, str, P
         if not wav.exists():
             shutil.move(str(video), str(wav))
         video = wav
-    if args.reuse_audio and wav.exists():
+    if is_usable_wav(wav) and args.reuse_audio:
         print(f"[audio] reuse -> {wav}")
+    elif video.resolve() == wav.resolve():
+        src = find_source_media(out_dir, wav=wav)
+        if src is not None:
+            print(f"[audio] extracting from {src.name} -> {wav}")
+            extract_audio(ffmpeg, src, wav)
+        elif is_usable_wav(wav):
+            print(f"[audio] reuse -> {wav}")
+        else:
+            raise FileNotFoundError(
+                f"no usable wav and no source media to extract from in {out_dir}"
+            )
     else:
         print(f"[audio] extracting -> {wav}")
         extract_audio(ffmpeg, video, wav)
+    if not is_usable_wav(wav):
+        raise RuntimeError(
+            f"invalid wav after extract ({wav.stat().st_size if wav.is_file() else 0} bytes): {wav}"
+        )
 
     hotwords = load_hotwords(args.hotwords, args.hotwords_file)
     danmaku_meta = None

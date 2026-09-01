@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
 from discover.content_db import ContentDB, embed_url_for, public_slug, slugify
 from discover.queue_db import QueueDB
 from langs import coalesce_source_lang, file_tag, normalize_lang, resolve_targets
-from job_layout import existing_wav, job_media_dir, list_locale_srts, locale_srt_path
+from job_layout import existing_wav, is_usable_wav, job_media_dir, list_locale_srts, locale_srt_path
 from pipeline import (
     DEFAULT_CHAT,
     DEFAULT_LANG_WORKERS,
@@ -53,9 +53,25 @@ def _job_work_dir(base: Path, platform: str, video_id: str) -> Path:
     return d
 
 
+def _job_field(job, key: str, default=None):
+    """Read a column from queue job (sqlite3.Row or dict)."""
+    if job is None:
+        return default
+    if hasattr(job, "get"):
+        return job.get(key, default)
+    try:
+        val = job[key]
+        return default if val is None else val
+    except (KeyError, TypeError, IndexError):
+        return default
+
+
 ALL_STAGES = frozenset(
     {"fetch", "asr", "translate", "notes", "localize", "frames", "clips"}
 )
+POSTPROC_STAGES = frozenset({"enhance", "compress", "concat"})
+KNOWN_STAGES = ALL_STAGES | POSTPROC_STAGES
+MEDIA_ONLY_STAGES = frozenset({"frames", "clips"}) | POSTPROC_STAGES
 
 
 def parse_stages(raw: str | None) -> frozenset[str]:
@@ -65,7 +81,8 @@ def parse_stages(raw: str | None) -> frozenset[str]:
       all | media | clips | frames
       llm  = translate,notes,localize (reuse existing SRT)
       post = llm + frames,clips
-    Or comma list: translate,notes,localize
+    Or comma list: translate,notes,localize,enhance,compress,concat
+    ``all`` does **not** include enhance/compress/concat (opt-in).
     """
     s = (raw or "all").strip().lower()
     if s in ("", "all"):
@@ -80,7 +97,12 @@ def parse_stages(raw: str | None) -> frozenset[str]:
         return frozenset({"translate", "notes", "localize"})
     if s in ("post", "from-srt", "from_srt"):
         return frozenset({"translate", "notes", "localize", "frames", "clips"})
+    if s in ("enhance", "compress", "concat"):
+        return frozenset({s})
     parts = {p.strip() for p in s.replace(";", ",").split(",") if p.strip()}
+    if "all" in parts:
+        parts.discard("all")
+        parts |= set(ALL_STAGES)
     if "media" in parts:
         parts.discard("media")
         parts |= {"frames", "clips"}
@@ -90,7 +112,7 @@ def parse_stages(raw: str | None) -> frozenset[str]:
     if "post" in parts:
         parts.discard("post")
         parts |= {"translate", "notes", "localize", "frames", "clips"}
-    unknown = parts - ALL_STAGES
+    unknown = parts - KNOWN_STAGES
     if unknown:
         raise ValueError(f"unknown stages: {', '.join(sorted(unknown))}")
     if not parts:
@@ -106,7 +128,7 @@ def resolve_media_refresh_stages(
 ) -> frozenset[str]:
     """Media-only stage set for already-done try / --stages clips|media|frames."""
     if stages:
-        enabled = parse_stages(stages) & frozenset({"frames", "clips"})
+        enabled = parse_stages(stages) & MEDIA_ONLY_STAGES
         return enabled or frozenset({"frames", "clips"})
     mode = (frames or "auto").strip().lower()
     if mode == "none" and has_clips:
@@ -182,9 +204,10 @@ def _resolve_frame_opts(
     clips = list(frame_clips) if frame_clips is not None else None
     gif_ranges = None
     gif_sec = gif_duration
-    if job.get("meta_json"):
+    meta_json = _job_field(job, "meta_json")
+    if meta_json:
         try:
-            meta = json.loads(job["meta_json"])
+            meta = json.loads(meta_json)
             opts = meta.get("frame_opts") if isinstance(meta, dict) else None
             if isinstance(opts, dict):
                 if mode is None:
@@ -202,6 +225,46 @@ def _resolve_frame_opts(
     return mode, gif_sec, clips, gif_ranges
 
 
+def _job_media_opts(job) -> dict:
+    from media_ops import normalize_media_opts
+
+    meta_json = _job_field(job, "meta_json")
+    if meta_json:
+        try:
+            meta = json.loads(meta_json)
+            if isinstance(meta, dict):
+                raw = meta.get("media_opts")
+                if isinstance(raw, dict):
+                    return normalize_media_opts(raw)
+                return normalize_media_opts(meta)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    return normalize_media_opts()
+
+
+def _run_job_postproc(
+    work_dir: Path,
+    job,
+    enabled: frozenset[str],
+    *,
+    frame_clips: list | None = None,
+) -> None:
+    if not (enabled & POSTPROC_STAGES):
+        return
+    from media_ops import run_postproc
+
+    _mode, _gif, clips, _gif_ranges = _resolve_frame_opts(
+        job, frame_mode=None, gif_duration=None, frame_clips=frame_clips
+    )
+    produced = run_postproc(
+        work_dir,
+        enabled,
+        media_opts=_job_media_opts(job),
+        clip_ranges=clips,
+    )
+    print(f"[postproc] { {k: str(v.name) for k, v in produced.items()} }")
+
+
 def _attach_job_media(
     *,
     work_dir: Path,
@@ -217,7 +280,27 @@ def _attach_job_media(
     if "frames" not in enabled and "clips" not in enabled:
         return summary
     if not summary:
-        print("[frames] skipped — no source notes")
+        if "clips" in enabled:
+            from media_ops import cut_range_clips
+            from note_frames import existing_source_video
+
+            mode, _gif_sec, clips, _gif_ranges = _resolve_frame_opts(
+                job,
+                frame_mode=frame_mode,
+                gif_duration=gif_duration,
+                frame_clips=frame_clips,
+            )
+            video = existing_source_video(work_dir)
+            if clips and video:
+                try:
+                    cut_range_clips(work_dir, clips, video=video)
+                    print("[clips] cut without notes")
+                except Exception as e:
+                    print(f"[clips] FAILED without notes ({type(e).__name__}: {e})")
+            elif "clips" in enabled:
+                print("[clips] skipped — no ranges or source video (and no notes)")
+        else:
+            print("[frames] skipped — no source notes")
         return summary
 
     from frame_policy import decide_frames
@@ -236,11 +319,11 @@ def _attach_job_media(
     )
     force = None if mode == "auto" else mode
     video = existing_source_video(work_dir)
-    video_id = job["video_id"]
-    topic_id = job["topic_id"] or "home_tips"
+    video_id = _job_field(job, "video_id")
+    topic_id = _job_field(job, "topic_id") or "home_tips"
     slug = public_slug(
         video_id,
-        str(summary.get("title") or job["title"] or video_id),
+        str(summary.get("title") or _job_field(job, "title") or video_id),
     )
     print(
         f"[frames] stages={sorted(enabled & frozenset({'frames', 'clips'}))} "
@@ -249,30 +332,34 @@ def _attach_job_media(
     )
 
     if "frames" in enabled and mode != "none" and video:
-        decision = decide_frames(
-            topic_id=topic_id,
-            title=str(summary.get("title") or job["title"] or ""),
-            key_points=list(summary.get("key_points") or []),
-            has_video=bool(video),
-            force_media=force,
-            gif_duration=gif_sec,
-        )
-        print(f"[frames] decision={decision.as_dict()}")
-        if decision.enabled:
-            if gif_ranges:
-                media = decision.media if decision.media in ("gif", "jpg") else "gif"
-                summary = (
-                    attach_gif_ranges(
-                        work_dir,
-                        slug=slug,
-                        source_lang=src_lang,
-                        ranges=gif_ranges,
-                        media=media,
-                        max_dur=float(decision.gif_duration or 20),
-                    )
-                    or summary
+        if gif_ranges:
+            media = force if force in ("gif", "jpg") else "gif"
+            print(
+                f"[frames] custom gif_ranges={len(gif_ranges)} media={media} "
+                "(bypass topic policy)"
+            )
+            summary = (
+                attach_gif_ranges(
+                    work_dir,
+                    slug=slug,
+                    source_lang=src_lang,
+                    ranges=gif_ranges,
+                    media=media,
+                    max_dur=float(gif_sec or 20),
                 )
-            else:
+                or summary
+            )
+        else:
+            decision = decide_frames(
+                topic_id=topic_id,
+                title=str(summary.get("title") or _job_field(job, "title") or ""),
+                key_points=list(summary.get("key_points") or []),
+                has_video=bool(video),
+                force_media=force,
+                gif_duration=gif_sec,
+            )
+            print(f"[frames] decision={decision.as_dict()}")
+            if decision.enabled:
                 summary = (
                     attach_keypoint_frames(
                         work_dir,
@@ -531,43 +618,50 @@ def _process_media_only(
     summary = load_notes_summary(out_dir, "full_16k", "zh")
     if not summary:
         summary = load_notes_summary(out_dir, "full_16k")
-    if not summary:
+    needs_notes = "frames" in enabled
+    if needs_notes and not summary:
         raise FileNotFoundError(
             f"stages={sorted(enabled)} needs existing notes in {work_dir}"
         )
 
-    src_lang = coalesce_source_lang(str(summary.get("source_lang") or "zh"))
-    print(f"[batch] media-only stages={sorted(enabled)}")
-    summary = _attach_job_media(
-        work_dir=out_dir,
-        job=job,
-        summary=summary,
-        src_lang=src_lang,
-        enabled=enabled,
-        frame_mode=frame_mode,
-        gif_duration=gif_duration,
-        frame_clips=frame_clips,
-    ) or summary
-
-    article_id = register_work_dir(
-        content,
-        platform=platform,
-        video_id=video_id,
-        topic_id=topic_id,
-        canonical_url=url,
-        work_dir=out_dir,
-        source_lang=src_lang,
-        title=summary.get("title") or job["title"],
-        author=job["author"],
-        published_at=job["published_at"],
-        views=job["views"],
-        duration_sec=job["duration_sec"],
-        thumb_url=job["thumb_url"],
-        source_wav=str(wav) if wav else job.get("source_wav"),
+    src_lang = coalesce_source_lang(
+        str((summary or {}).get("source_lang") or "zh")
     )
+    print(f"[batch] media-only stages={sorted(enabled)}")
+    if "frames" in enabled or "clips" in enabled:
+        summary = _attach_job_media(
+            work_dir=out_dir,
+            job=job,
+            summary=summary,
+            src_lang=src_lang,
+            enabled=enabled,
+            frame_mode=frame_mode,
+            gif_duration=gif_duration,
+            frame_clips=frame_clips,
+        ) or summary
+    _run_job_postproc(out_dir, job, enabled, frame_clips=frame_clips)
+
+    article_id = None
+    if summary:
+        article_id = register_work_dir(
+            content,
+            platform=platform,
+            video_id=video_id,
+            topic_id=topic_id,
+            canonical_url=url,
+            work_dir=out_dir,
+            source_lang=src_lang,
+            title=summary.get("title") or job["title"],
+            author=job["author"],
+            published_at=job["published_at"],
+            views=job["views"],
+            duration_sec=job["duration_sec"],
+            thumb_url=job["thumb_url"],
+            source_wav=str(wav) if wav else _job_field(job, "source_wav"),
+        )
     queue.mark_done(
         job_id,
-        source_wav=str(wav) if wav else job.get("source_wav"),
+        source_wav=str(wav) if wav else _job_field(job, "source_wav"),
         canonical_url=url,
     )
     print(f"[batch] done job#{job_id} article_id={article_id} (media-only)")
@@ -626,8 +720,8 @@ def process_job(
         queue._conn.commit()
         return
 
-    # Media-only: re-cut GIF/MP4 without ASR/translate (needs existing notes).
-    if enabled <= frozenset({"frames", "clips"}):
+    # Media-only: GIF/MP4/enhance/compress/concat without ASR.
+    if enabled and enabled <= MEDIA_ONLY_STAGES:
         _process_media_only(
             job,
             queue=queue,
@@ -646,7 +740,7 @@ def process_job(
     wav = existing_wav(work_dir)
     if need_wav:
         if skip_fetch or "fetch" not in enabled:
-            if not wav or not wav.is_file():
+            if not wav or not is_usable_wav(wav):
                 raise FileNotFoundError(
                     f"stages need wav but none in {work_dir}"
                     if "fetch" not in enabled
@@ -657,7 +751,7 @@ def process_job(
                 if skip_fetch
                 else f"[fetch] reuse local wav -> {wav}"
             )
-        elif wav and wav.is_file():
+        elif wav and is_usable_wav(wav):
             print(f"[fetch] reuse local wav -> {wav}")
         else:
             meta = fetch_to_wav(
@@ -669,11 +763,11 @@ def process_job(
             wav = Path(meta["wav"])
         queue.set_source_wav(job_id, str(wav))
     else:
-        if wav and wav.is_file():
+        if wav and is_usable_wav(wav):
             print(f"[fetch] optional reuse -> {wav}")
             queue.set_source_wav(job_id, str(wav))
         else:
-            wav = Path(job["source_wav"]) if job.get("source_wav") else work_dir / "media" / "full_16k.wav"
+            wav = Path(_job_field(job, "source_wav")) if _job_field(job, "source_wav") else work_dir / "media" / "full_16k.wav"
             print("[fetch] skipped (stages omit fetch/asr)")
 
     args = SimpleNamespace(
@@ -892,7 +986,15 @@ def process_job(
                 frame_clips=frame_clips,
             )
         except Exception as e:
-            print(f"[frames] skipped ({type(e).__name__}: {e})")
+            print(f"[frames] FAILED ({type(e).__name__}: {e})")
+            traceback.print_exc()
+
+    try:
+        _run_job_postproc(out_dir, job, enabled, frame_clips=frame_clips)
+    except Exception as e:
+        print(f"[postproc] FAILED ({type(e).__name__}: {e})")
+        traceback.print_exc()
+        raise
 
     wav_path = existing_wav(out_dir) or (
         Path(wav) if wav and Path(wav).is_file() else None
@@ -911,12 +1013,12 @@ def process_job(
         views=job["views"],
         duration_sec=job["duration_sec"],
         thumb_url=job["thumb_url"],
-        source_wav=str(wav_path) if wav_path else job.get("source_wav"),
+        source_wav=str(wav_path) if wav_path else _job_field(job, "source_wav"),
         locales=targets or None,
     )
     queue.mark_done(
         job_id,
-        source_wav=str(wav_path) if wav_path else job.get("source_wav"),
+        source_wav=str(wav_path) if wav_path else _job_field(job, "source_wav"),
         canonical_url=url,
     )
     print(f"[batch] done job#{job_id} article_id={article_id}")
@@ -972,7 +1074,9 @@ def main(argv: list[str] | None = None) -> int:
         default="all",
         help=(
             "Pipeline stages: all | llm | post | media | clips | frames | "
-            "or comma list (fetch,asr,translate,notes,localize,frames,clips). "
+            "enhance | compress | concat | "
+            "or comma list (fetch,asr,...,enhance). "
+            "all does not include enhance/compress/concat. "
             "Omit asr → reuse existing SRT; clips/media → re-cut only."
         ),
     )

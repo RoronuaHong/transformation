@@ -102,6 +102,8 @@ def schedule_next_try_job(*, skip_job_id: int | None = None) -> None:
 
     def _runner() -> None:
         time.sleep(0.25)
+        if _queue_paused:
+            return
         q = QueueDB()
         try:
             row = q._conn.execute(
@@ -247,20 +249,38 @@ def compose_try_stages(
     want_translate: bool = True,
     want_notes: bool = True,
     has_media: bool = False,
+    want_enhance: bool = False,
+    want_compress: bool = False,
+    want_concat: bool = False,
 ) -> str:
     """Map workbench module toggles → batch stages string."""
+    post: list[str] = []
+    if want_concat:
+        post.append("concat")
+    if want_enhance:
+        post.append("enhance")
+    if want_compress:
+        post.append("compress")
     if want_translate and want_notes:
-        return "all"
-    parts: list[str] = ["fetch", "asr"]
+        return "all" if not post else ",".join(["all", *post])
+    parts: list[str] = []
+    text = want_translate or want_notes
+    media = has_media or want_concat
+    if text or media or post:
+        parts.append("fetch")
+    if text:
+        parts.append("asr")
     if want_translate:
         parts.append("translate")
     if want_notes:
         parts.extend(["notes", "localize"])
     if has_media:
         parts.extend(["frames", "clips"])
-    if not want_translate and not want_notes and not has_media:
-        parts.extend(["notes", "localize"])
-    # unique, preserve order
+    elif want_concat:
+        parts.append("clips")
+    if not want_translate and not want_notes and not has_media and not post:
+        parts.extend(["fetch", "asr", "notes", "localize"])
+    parts.extend(post)
     out: list[str] = []
     seen: set[str] = set()
     for p in parts:
@@ -268,6 +288,36 @@ def compose_try_stages(
             seen.add(p)
             out.append(p)
     return ",".join(out)
+
+
+def _media_workflow_fields(
+    *,
+    want_translate: bool,
+    want_notes: bool,
+    has_media: bool,
+    stages: str | None = None,
+    want_enhance: bool = False,
+    want_compress: bool = False,
+    want_concat: bool = False,
+    media_opts: dict | None = None,
+) -> dict:
+    from media_ops import normalize_media_opts
+
+    stage_s = (stages or "").strip() or compose_try_stages(
+        want_translate=want_translate,
+        want_notes=want_notes,
+        has_media=has_media,
+        want_enhance=want_enhance,
+        want_compress=want_compress,
+        want_concat=want_concat,
+    )
+    return {
+        "want_enhance": bool(want_enhance),
+        "want_compress": bool(want_compress),
+        "want_concat": bool(want_concat),
+        "media_opts": normalize_media_opts(media_opts),
+        "stages": stage_s,
+    }
 
 
 def resolve_try_intent(
@@ -316,6 +366,25 @@ def resolve_try_intent(
             "stages": "all",
             "langs": new_pack,
             "reason": "new_or_retry",
+        }
+
+    postproc = {
+        p.strip()
+        for p in explicit.replace(";", ",").split(",")
+        if p.strip() in ("enhance", "compress", "concat")
+    }
+    if postproc:
+        parts: list[str] = []
+        if "concat" in postproc:
+            parts.append("clips")
+        for name in ("concat", "enhance", "compress"):
+            if name in postproc:
+                parts.append(name)
+        return {
+            "intent": "media",
+            "stages": ",".join(parts),
+            "langs": new_pack,
+            "reason": "postproc",
         }
 
     if prev_pack is None or not langs_equal(prev_pack, new_pack):
@@ -515,10 +584,14 @@ def clear_keypoint_images(work_dir: Path) -> int:
 
 ROOT = Path(__file__).resolve().parents[1]
 WORK_ROOT = ROOT / "downloads" / "batch"
-SITE_FRAMES = ROOT.parent / "transform" / "public" / "frames"
+SITE_PUBLIC = ROOT.parent / "transform" / "public"
+SITE_FRAMES = SITE_PUBLIC / "frames"
 
 _try_lock = threading.Lock()
 _busy = False
+_queue_paused = False
+_cancel_requested: set[int] = set()
+_active_try_job_id: int | None = None
 _STALE_SEC = 300
 
 
@@ -573,17 +646,19 @@ def infer_try_progress(
     status: str,
     *,
     langs: str = "site",
+    job_id: int | None = None,
 ) -> dict:
     """Best-effort progress from work-dir artifacts (no pipeline hooks needed)."""
     work = _work_dir(platform, video_id)
     now = time.time()
     latest = _latest_mtime(work)
-    active = (
+    updated_sec_ago = int(now - latest) if latest else None
+    stale = (
         status == "processing"
         and latest is not None
-        and (now - latest) < _STALE_SEC
+        and (now - latest) >= _STALE_SEC
     )
-    stale = status == "processing" and latest is not None and (now - latest) >= _STALE_SEC
+    active = status == "processing" and latest is not None and not stale
 
     if status in ("done", "published"):
         return {
@@ -603,11 +678,29 @@ def infer_try_progress(
             "stale": False,
             "updated_sec_ago": int(now - latest) if latest else None,
         }
+    if status == "cancelled":
+        return {
+            "percent": 0,
+            "stage": "cancelled",
+            "detail": None,
+            "active": False,
+            "stale": False,
+            "updated_sec_ago": int(now - latest) if latest else None,
+        }
     if status == "pending":
+        if _busy and job_id is not None and _active_try_job_id is not None and job_id != _active_try_job_id:
+            return {
+                "percent": 0,
+                "stage": "queued",
+                "detail": None,
+                "active": False,
+                "stale": False,
+                "updated_sec_ago": updated_sec_ago,
+            }
         media = work / "media"
         src_mp4 = media / "source.mp4"
         has_activity = latest is not None and (now - latest) < _STALE_SEC
-        if _busy or has_activity or (src_mp4.is_file() and src_mp4.stat().st_size > 0):
+        if has_activity or (src_mp4.is_file() and src_mp4.stat().st_size > 0):
             percent = 8
             if src_mp4.is_file():
                 try:
@@ -675,6 +768,11 @@ def infer_try_progress(
         stage = "translate"
         percent = 38 + int(32 * translate_done / translate_total)
         detail = f"{translate_done}/{translate_total}"
+    # Translate done but summary not written yet — LLM notes can run many minutes silently.
+    if translate_complete and not src_notes.is_file():
+        stage = "notes"
+        percent = max(percent, 71)
+        detail = None
     # Notes often run parallel with translate — advance stage only when captions caught up.
     if src_notes.is_file() and translate_complete:
         percent = max(percent, 72)
@@ -691,6 +789,22 @@ def infer_try_progress(
         stage = "gif"
         detail = None
 
+    concat_mp4 = work / "media" / "concat" / "concat.mp4"
+    enhanced_mp4 = work / "media" / "enhance" / "enhanced.mp4"
+    compressed_mp4 = work / "media" / "compress" / "compressed.mp4"
+    if concat_mp4.is_file():
+        percent = max(percent, 95)
+        stage = "concat"
+        detail = None
+    if enhanced_mp4.is_file():
+        percent = max(percent, 96)
+        stage = "enhance"
+        detail = None
+    if compressed_mp4.is_file():
+        percent = max(percent, 97)
+        stage = "compress"
+        detail = None
+
     if status == "processing" and percent >= 94 and not has_frames and src_notes.is_file():
         stage = "gif"
         percent = max(percent, 92)
@@ -699,14 +813,80 @@ def infer_try_progress(
         "percent": min(percent, 99) if status == "processing" else percent,
         "stage": stage,
         "detail": detail,
-        "active": active or _busy,
-        "stale": stale and not _busy,
-        "updated_sec_ago": int(now - latest) if latest else None,
+        "active": active,
+        "stale": stale,
+        "updated_sec_ago": updated_sec_ago,
     }
 
 
 def try_status() -> dict:
-    return {"busy": _busy}
+    return {
+        "busy": _busy,
+        "paused": _queue_paused,
+        "active_job_id": _active_try_job_id,
+    }
+
+
+def pause_try_queue() -> dict:
+    global _queue_paused
+    _queue_paused = True
+    return {"ok": True, **try_status()}
+
+
+def resume_try_queue() -> dict:
+    global _queue_paused
+    _queue_paused = False
+    schedule_next_try_job()
+    return {"ok": True, **try_status()}
+
+
+def cancel_try_job(job_id: int) -> dict:
+    """Cancel a pending job, or request interrupt on the active worker."""
+    queue = QueueDB()
+    try:
+        job = queue.get_job(job_id)
+        if job is None:
+            return {"ok": False, "error": "job not found", "job_id": job_id}
+        st = str(job["status"] or "")
+        if st in ("done", "published", "cancelled"):
+            return {"ok": False, "error": f"job is {st}", "job_id": job_id}
+        if st == "pending":
+            if not queue.cancel_job(job_id, reason="用户取消"):
+                return {"ok": False, "error": "could not cancel", "job_id": job_id}
+            return {"ok": True, **job_snapshot(job_id)}
+        if st == "processing":
+            _cancel_requested.add(job_id)
+            queue.cancel_job(job_id, reason="用户已取消")
+            snap = job_snapshot(job_id)
+            snap["cancelling"] = True
+            return {"ok": True, **snap}
+        if st in ("failed", "dead"):
+            if not queue.cancel_job(job_id, reason="用户取消"):
+                return {"ok": False, "error": "could not cancel", "job_id": job_id}
+            return {"ok": True, **job_snapshot(job_id)}
+        return {"ok": False, "error": f"unsupported status {st}", "job_id": job_id}
+    finally:
+        queue.close()
+
+
+def retry_try_job(job_id: int) -> dict:
+    """Re-queue a failed/cancelled try job and start when idle."""
+    queue = QueueDB()
+    try:
+        job = queue.get_job(job_id)
+        if job is None:
+            return {"ok": False, "error": "job not found", "job_id": job_id}
+        st = str(job["status"] or "")
+        if st == "processing":
+            return {"ok": False, "error": "job is running", "job_id": job_id}
+        if st in ("done", "published"):
+            return {"ok": False, "error": f"job is {st}", "job_id": job_id}
+        if not queue.requeue_job(job_id):
+            return {"ok": False, "error": "could not requeue", "job_id": job_id}
+        _cancel_requested.discard(job_id)
+    finally:
+        queue.close()
+    return {"ok": True, **job_snapshot(job_id)}
 
 
 def reap_stale_try_jobs(*, stale_sec: int = _STALE_SEC) -> int:
@@ -750,7 +930,7 @@ def list_active_try_jobs(*, limit: int = 10) -> dict:
             """
             SELECT id FROM jobs
             WHERE status IN ('pending', 'processing') AND priority='high'
-            ORDER BY updated_at DESC
+            ORDER BY CASE status WHEN 'processing' THEN 0 ELSE 1 END, updated_at DESC
             LIMIT ?
             """,
             (max(1, min(int(limit), 50)),),
@@ -760,7 +940,12 @@ def list_active_try_jobs(*, limit: int = 10) -> dict:
             snap = job_snapshot(int(row["id"]))
             if snap.get("ok"):
                 jobs.append(snap)
-        return {"ok": True, "jobs": jobs, "count": len(jobs), "busy": _busy}
+        return {
+            "ok": True,
+            "jobs": jobs,
+            "count": len(jobs),
+            **try_status(),
+        }
     finally:
         queue.close()
 
@@ -785,6 +970,71 @@ def _article_for_job(content: ContentDB, platform: str, video_id: str) -> dict |
         "slug": row["slug"],
         "topic": row["topic_id"],
         "status": row["status"],
+    }
+
+
+def _jobs_ahead(queue: QueueDB, job_id: int) -> int:
+    """How many try jobs are ahead of this one (processing + earlier pending)."""
+    row = queue.get_job(job_id)
+    if row is None:
+        return 0
+    created = row["created_at"]
+    proc = queue._conn.execute(
+        """
+        SELECT COUNT(*) FROM jobs
+        WHERE status='processing' AND priority='high' AND id != ?
+        """,
+        (job_id,),
+    ).fetchone()[0]
+    pend = queue._conn.execute(
+        """
+        SELECT COUNT(*) FROM jobs
+        WHERE status='pending' AND priority='high'
+          AND created_at < ? AND id != ?
+        """,
+        (created, job_id),
+    ).fetchone()[0]
+    return int(proc or 0) + int(pend or 0)
+
+
+def _queue_ahead(queue: QueueDB, job_id: int, status: str) -> dict | None:
+    """When pending behind a busy worker, describe the job currently running."""
+    if status != "pending" or not _busy:
+        return None
+    ahead_id = _active_try_job_id
+    if ahead_id is None or ahead_id == job_id:
+        row = queue._conn.execute(
+            """
+            SELECT id FROM jobs
+            WHERE status='processing' AND priority='high' AND id != ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (job_id,),
+        ).fetchone()
+        ahead_id = int(row["id"]) if row else None
+    if ahead_id is None or ahead_id == job_id:
+        return None
+    ahead_job = queue.get_job(ahead_id)
+    if ahead_job is None:
+        return None
+    plat = ahead_job["platform"]
+    vid = ahead_job["video_id"]
+    title = str(ahead_job["title"] or "")
+    meta_path = _work_dir(plat, vid) / "media" / "fetch_meta.json"
+    if meta_path.is_file():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8-sig"))
+            if meta.get("title"):
+                title = str(meta["title"])
+        except (TypeError, ValueError, json.JSONDecodeError, OSError):
+            pass
+    return {
+        "job_id": ahead_id,
+        "title": title,
+        "progress": infer_try_progress(
+            plat, vid, "processing", langs=job_langs(ahead_job), job_id=ahead_id
+        ),
     }
 
 
@@ -824,13 +1074,22 @@ def job_snapshot(job_id: int) -> dict:
                         duration_sec = float(meta["duration"])
                 except (TypeError, ValueError, json.JSONDecodeError, OSError):
                     pass
+        title = str(job["title"] or "")
+        meta_path = _work_dir(platform, video_id) / "media" / "fetch_meta.json"
+        if meta_path.is_file():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8-sig"))
+                if meta.get("title"):
+                    title = str(meta["title"])
+            except (TypeError, ValueError, json.JSONDecodeError, OSError):
+                pass
         out: dict = {
             "ok": True,
             "job_id": job_id,
             "status": st,
             "platform": platform,
             "video_id": video_id,
-            "title": job["title"],
+            "title": title,
             "topic": job["topic_id"],
             "error": job["last_error"],
             "busy": _busy,
@@ -840,10 +1099,28 @@ def job_snapshot(job_id: int) -> dict:
         if article:
             out["article"] = article
             out["path"] = f"/topics/{article['topic']}/{article['slug']}"
-        if st in ("pending", "processing", "done", "failed", "dead"):
+        if st == "done":
+            from discover.content_db import public_slug
+            from media_ops import copy_derived_to_site, derived_public_urls
+
+            work = _work_dir(platform, video_id)
+            slug = str((article or {}).get("slug") or public_slug(video_id, title))
+            copy_derived_to_site(work, slug, SITE_PUBLIC)
+            derived = derived_public_urls(slug, SITE_PUBLIC)
+            if derived:
+                out["derived"] = derived
+        if st in ("pending", "processing", "done", "failed", "dead", "cancelled"):
             out["progress"] = infer_try_progress(
-                platform, video_id, st, langs=job_langs(job)
+                platform, video_id, st, langs=job_langs(job), job_id=job_id
             )
+        out.update(try_status())
+        if st == "pending":
+            ahead = _jobs_ahead(queue, job_id)
+            if ahead:
+                out["queue_position"] = ahead + 1
+            qa = _queue_ahead(queue, job_id, st)
+            if qa:
+                out["queue_ahead"] = qa
         return out
     finally:
         queue.close()
@@ -1096,6 +1373,10 @@ def submit_urls(
     want_translate: bool = True,
     want_notes: bool = True,
     stages: str | None = None,
+    want_enhance: bool = False,
+    want_compress: bool = False,
+    want_concat: bool = False,
+    media_opts: dict | None = None,
 ) -> dict:
     probe = probe_urls(urls, pasted_cookies=sessionid)
     if probe.get("block_submit"):
@@ -1150,6 +1431,10 @@ def submit_urls(
             want_translate=want_translate,
             want_notes=want_notes,
             stages=stages,
+            want_enhance=want_enhance,
+            want_compress=want_compress,
+            want_concat=want_concat,
+            media_opts=media_opts,
         )
         jobs.append({"url": url, **out})
 
@@ -1185,6 +1470,10 @@ def submit_url(
     want_translate: bool = True,
     want_notes: bool = True,
     stages: str | None = None,
+    want_enhance: bool = False,
+    want_compress: bool = False,
+    want_concat: bool = False,
+    media_opts: dict | None = None,
 ) -> dict:
     url = url.strip()
     if len(url) < 8:
@@ -1235,7 +1524,7 @@ def submit_url(
             return {"ok": False, "error": "enqueue failed"}
         if result == "ignored":
             job = queue.get_job(job_id)
-            if job and job["status"] in ("dead", "failed"):
+            if job and job["status"] in ("dead", "failed", "cancelled"):
                 if queue.requeue_job(job_id):
                     result = "requeued"
             elif job and job["status"] == "pending":
@@ -1263,11 +1552,41 @@ def submit_url(
                 or bool(frame_opts.get("clips"))
                 or bool(frame_opts.get("gif_ranges"))
             )
-            meta_patch["stages"] = (stages or "").strip() or compose_try_stages(
+            meta_patch.update(
+                _media_workflow_fields(
+                    want_translate=want_translate,
+                    want_notes=want_notes,
+                    has_media=has_media,
+                    stages=stages,
+                    want_enhance=want_enhance,
+                    want_compress=want_compress,
+                    want_concat=want_concat,
+                    media_opts=media_opts,
+                )
+            )
+        elif want_enhance or want_compress or want_concat:
+            post: list[str] = []
+            if want_concat:
+                post.extend(["clips", "concat"])
+            if want_enhance:
+                post.append("enhance")
+            if want_compress:
+                post.append("compress")
+            post_stages = ",".join(dict.fromkeys(post))
+            wf = _media_workflow_fields(
                 want_translate=want_translate,
                 want_notes=want_notes,
-                has_media=has_media,
+                has_media=False,
+                stages=post_stages,
+                want_enhance=want_enhance,
+                want_compress=want_compress,
+                want_concat=want_concat,
+                media_opts=media_opts,
             )
+            wf["stages"] = post_stages
+            meta_patch.update(wf)
+            if queue.requeue_job(job_id, allow_done=True):
+                result = "requeued"
         queue.set_meta(job_id, meta_patch)
         return {
             "ok": True,
@@ -1352,6 +1671,10 @@ def submit_upload(
     want_translate: bool = True,
     want_notes: bool = True,
     stages: str | None = None,
+    want_enhance: bool = False,
+    want_compress: bool = False,
+    want_concat: bool = False,
+    media_opts: dict | None = None,
 ) -> dict:
     if len(file_bytes) < 10_000:
         return {"ok": False, "error": "file too small"}
@@ -1393,19 +1716,24 @@ def submit_upload(
             or bool(frame_opts.get("clips"))
             or bool(frame_opts.get("gif_ranges"))
         )
-        stage_s = (stages or "").strip() or compose_try_stages(
+        wf = _media_workflow_fields(
             want_translate=want_translate,
             want_notes=want_notes,
             has_media=has_media,
+            stages=stages,
+            want_enhance=want_enhance,
+            want_compress=want_compress,
+            want_concat=want_concat,
+            media_opts=media_opts,
         )
         queue.set_meta(
             job_id,
             {
                 "frame_opts": frame_opts,
                 "langs": langs_pack,
-                "stages": stage_s,
                 "want_translate": bool(want_translate),
                 "want_notes": bool(want_notes),
+                **wf,
             },
         )
         return {
@@ -1434,6 +1762,10 @@ def submit_uploads(
     want_translate: bool = True,
     want_notes: bool = True,
     stages: str | None = None,
+    want_enhance: bool = False,
+    want_compress: bool = False,
+    want_concat: bool = False,
+    media_opts: dict | None = None,
 ) -> dict:
     """Batch upload enqueue; chains like submit_urls."""
     if not items:
@@ -1472,6 +1804,10 @@ def submit_uploads(
             want_translate=want_translate,
             want_notes=want_notes,
             stages=stages,
+            want_enhance=want_enhance,
+            want_compress=want_compress,
+            want_concat=want_concat,
+            media_opts=media_opts,
         )
         jobs.append({"filename": name, **out})
 
@@ -1495,10 +1831,11 @@ def submit_uploads(
 
 def refresh_try_frames(job_id: int, *, stages: str | None = None) -> dict:
     """Re-cut GIF/MP4 on an already-done job (no ASR). Delegates to batch media-only."""
-    global _busy
+    global _busy, _active_try_job_id
     if not _try_lock.acquire(blocking=False):
         return {"ok": False, "error": "another try job is running"}
     _busy = True
+    _active_try_job_id = job_id
     try:
         from discover.run_batch import (
             _process_media_only,
@@ -1556,16 +1893,18 @@ def refresh_try_frames(job_id: int, *, stages: str | None = None) -> dict:
             content.close()
     finally:
         _busy = False
+        _active_try_job_id = None
         _try_lock.release()
         schedule_next_try_job(skip_job_id=job_id)
 
 
 def run_try_job(job_id: int) -> dict:
     """Background: process one queued job, export site."""
-    global _busy
+    global _busy, _active_try_job_id
     if not _try_lock.acquire(blocking=False):
         return {"ok": False, "error": "another try job is running"}
     _busy = True
+    _active_try_job_id = job_id
     try:
         from discover.run_batch import process_job
         from llm.factory import configure_llm
@@ -1620,6 +1959,9 @@ def run_try_job(job_id: int) -> dict:
                     print(f"[try] video prefetch skip ({e})")
 
             try:
+                if job_id in _cancel_requested:
+                    queue.cancel_job(job_id, reason="用户已取消")
+                    return job_snapshot(job_id)
                 print(
                     f"[try] langs={langs_pack} stages={stages} "
                     f"translate={want_translate} notes={want_notes}"
@@ -1649,8 +1991,26 @@ def run_try_job(job_id: int) -> dict:
                     stages=stages,
                 )
             except Exception as e:
+                if job_id in _cancel_requested:
+                    _cancel_requested.discard(job_id)
+                    queue.cancel_job(job_id, reason="用户已取消")
+                    return job_snapshot(job_id)
                 queue.mark_failed(job_id, str(e)[:2000])
                 raise
+
+            if job_id in _cancel_requested:
+                _cancel_requested.discard(job_id)
+                now = time.time()
+                queue._conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status='cancelled', last_error=?, updated_at=?
+                    WHERE id=?
+                    """,
+                    ("用户已取消", now, job_id),
+                )
+                queue._conn.commit()
+                return job_snapshot(job_id)
 
             export_main([])
             return job_snapshot(job_id)
@@ -1659,5 +2019,6 @@ def run_try_job(job_id: int) -> dict:
             content.close()
     finally:
         _busy = False
+        _active_try_job_id = None
         _try_lock.release()
         schedule_next_try_job(skip_job_id=job_id)

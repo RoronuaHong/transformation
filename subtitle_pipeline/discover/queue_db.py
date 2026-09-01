@@ -252,15 +252,29 @@ class QueueDB:
         self._conn.commit()
         return int(cur.rowcount)
 
+    def cancel_job(self, job_id: int, *, reason: str = "用户取消") -> bool:
+        """Mark pending/processing job as cancelled."""
+        now = time.time()
+        cur = self._conn.execute(
+            """
+            UPDATE jobs
+            SET status='cancelled', last_error=?, updated_at=?
+            WHERE id=? AND status IN ('pending', 'processing')
+            """,
+            ((reason or "用户取消")[:2000], now, job_id),
+        )
+        self._conn.commit()
+        return cur.rowcount == 1
+
     def requeue_job(self, job_id: int, *, allow_done: bool = False) -> bool:
         """Reset a failed/dead job to pending (try-page resubmit).
 
         With ``allow_done=True``, also reopens done/published (e.g. change langs).
         """
         now = time.time()
-        allowed = ("failed", "dead")
+        allowed = ("failed", "dead", "cancelled")
         if allow_done:
-            allowed = ("failed", "dead", "done", "published")
+            allowed = ("failed", "dead", "cancelled", "done", "published")
         cur = self._conn.execute(
             f"""
             UPDATE jobs

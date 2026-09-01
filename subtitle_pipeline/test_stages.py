@@ -32,8 +32,8 @@ def test_resolve_media_refresh_stages() -> None:
         stages="media", frames="auto", has_clips=True
     ) == frozenset({"frames", "clips"})
     assert resolve_media_refresh_stages(
-        stages=None, frames="gif", has_clips=False
-    ) == frozenset({"frames"})
+        stages="enhance", frames="auto", has_clips=False
+    ) == frozenset({"enhance"})
 
 
 def test_normalize_try_langs() -> None:
@@ -160,4 +160,17 @@ def test_resolve_try_intent() -> None:
             prev_frame_opts=same,
         )["intent"]
         == "frames"
+    )
+    # finished job + enhance → media postproc, not noop
+    assert (
+        resolve_try_intent(
+            job_status="done",
+            stages="all,enhance",
+            frames="auto",
+            new_langs="site",
+            prev_langs="site",
+            new_frame_opts=same,
+            prev_frame_opts=same,
+        )["stages"]
+        == "enhance"
     )
