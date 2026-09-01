@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     admin_token: str = "local-admin"
     alert_webhook_url: str = ""
     host: str = "127.0.0.1"
-    port: int = 8900
+    port: int = 8901
     cors_origins: str = "http://127.0.0.1:3001,http://localhost:3001,http://127.0.0.1:3000,http://localhost:3000"
     # Asia/Shanghai daily discover then batch (limit 1)
     schedule_discover: str = "0 8 * * *"

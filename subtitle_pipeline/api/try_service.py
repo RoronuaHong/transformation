@@ -709,8 +709,41 @@ def try_status() -> dict:
     return {"busy": _busy}
 
 
+def reap_stale_try_jobs(*, stale_sec: int = _STALE_SEC) -> int:
+    """Mark orphaned processing try jobs as failed after API restart or timeout."""
+    if _busy:
+        return 0
+    queue = QueueDB()
+    reaped = 0
+    try:
+        rows = queue._conn.execute(
+            """
+            SELECT id, platform, video_id FROM jobs
+            WHERE status='processing' AND priority='high'
+            """
+        ).fetchall()
+        now = time.time()
+        for row in rows:
+            jid = int(row["id"])
+            platform = row["platform"]
+            video_id = row["video_id"]
+            latest = _latest_mtime(_work_dir(platform, video_id))
+            if latest is not None and (now - latest) < stale_sec:
+                continue
+            queue.mark_failed(
+                jid,
+                "任务已中断（后台重启或超时）。请重新提交。",
+            )
+            reaped += 1
+            print(f"[try] reaped stale job#{jid} {platform}:{video_id}")
+    finally:
+        queue.close()
+    return reaped
+
+
 def list_active_try_jobs(*, limit: int = 10) -> dict:
     """Pending/processing high-priority try jobs (for workbench resume)."""
+    reap_stale_try_jobs()
     queue = QueueDB()
     try:
         rows = queue._conn.execute(
@@ -766,6 +799,16 @@ def job_snapshot(job_id: int) -> dict:
         video_id = job["video_id"]
         article = _article_for_job(content, platform, video_id)
         st = job["status"]
+        if st == "processing" and not _busy:
+            latest = _latest_mtime(_work_dir(platform, video_id))
+            now = time.time()
+            if latest is None or (now - latest) >= _STALE_SEC:
+                queue.mark_failed(
+                    job_id,
+                    "任务已中断（后台重启或超时）。请重新提交。",
+                )
+                st = "failed"
+                job = queue.get_job(job_id) or job
         duration_sec = None
         try:
             if job["duration_sec"] is not None:
@@ -896,6 +939,22 @@ def probe_url_duration(url: str) -> dict:
                 "source": "ffmpeg-hls",
                 "cookies_ok": True,
             }
+
+        if platform == "bilibili":
+            from fetch_media import probe_bilibili_duration
+
+            try:
+                info = probe_bilibili_duration(url)
+                return {
+                    **base,
+                    "ok": True,
+                    "duration_sec": float(info["duration"]),
+                    "source": "bilibili-api",
+                    "title": info.get("title"),
+                    "cookies_ok": True if not cookies_required else cookies_present,
+                }
+            except Exception as e:
+                print(f"[try] bili duration api fail, yt-dlp next ({e})")
 
         opts: dict = {
             "quiet": True,

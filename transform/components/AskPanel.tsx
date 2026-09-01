@@ -54,7 +54,7 @@ export default function AskPanel({ placeholder }: { placeholder?: string }) {
         ) : (
           messages.map((m, i) => (
             <div key={i} className={`ask-row ${m.role === "user" ? "user" : "bot"}`}>
-              <div>
+              <div className="ask-block">
                 <div className={`ask-bubble ${m.role === "user" ? "user" : "bot"}`}>{m.content}</div>
                 {m.sources && m.sources.length > 0 && (
                   <p className="ask-sources">

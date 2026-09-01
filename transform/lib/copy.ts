@@ -98,6 +98,7 @@ export type TryCopy = {
   mediaSection: string;
   fileLabel: string;
   submit: string;
+  reset: string;
   submitting: string;
   processing: string;
   busy: string;
@@ -288,6 +289,7 @@ const en: UiCopy = {
     mediaSection: "Clips per item",
     fileLabel: "Video files",
     submit: "Start workflow",
+    reset: "Reset",
     submitting: "Queued…",
     processing: "Processing…",
     busy: "Only one try job runs at a time. Yours is queued — please wait.",
@@ -297,7 +299,7 @@ const en: UiCopy = {
     statusFailed: "Failed",
     openNotes: "Open notes",
     hint: "We publish written notes and short clips only — not the full original video.",
-    apiDown: "Backend offline. Start subtitle_pipeline with yarn api on port 8900.",
+    apiDown: "Backend offline. Start subtitle_pipeline with yarn api on port 8901.",
     progressActive: "Running",
     progressStale: "No updates for 5+ minutes — may be stuck",
     stageQueued: "Waiting to start",
@@ -469,6 +471,7 @@ const zh: UiCopy = {
     mediaSection: "逐条裁剪",
     fileLabel: "视频文件",
     submit: "开始工作流",
+    reset: "重置",
     submitting: "提交中…",
     processing: "处理中…",
     busy: "本机同时只处理一条任务。你的视频已排队，请稍候。",
@@ -478,7 +481,7 @@ const zh: UiCopy = {
     statusFailed: "失败",
     openNotes: "查看笔记",
     hint: "本站只整理文字步骤与短片段，不托管完整原视频。",
-    apiDown: "后台未启动。请在 subtitle_pipeline 目录运行 yarn api（8900 端口）。",
+    apiDown: "后台未启动。请在 subtitle_pipeline 目录运行 yarn api（8901 端口）。",
     progressActive: "运行中",
     progressStale: "超过 5 分钟无更新，可能已卡住",
     stageQueued: "排队等待",
@@ -613,6 +616,7 @@ const zhHant: UiCopy = {
     urlLabel: "影片連結",
     fileLabel: "影片檔案",
     submit: "生成筆記",
+    reset: "重置",
     openNotes: "查看筆記",
     batchJobsTitle: "批量任務",
     modulesSection: "本次工作流",

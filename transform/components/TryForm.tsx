@@ -18,14 +18,12 @@ import {
   type TryIntentKind,
 } from "@/lib/try-intent";
 import { parseUrlLines, type UrlProbeResult } from "@/lib/try-urls";
-import { tryApiBase, tryApiDirect } from "@/lib/api-base";
+import { tryApiBase } from "@/lib/api-base";
 import type { Locale } from "@/lib/locales";
 import { localeNames, localePath, locales } from "@/lib/locales";
 
-/** Same-origin proxy by default; set NEXT_PUBLIC_API_URL to hit :8900 directly. */
+/** Same-origin proxy — avoids browser extensions blocking cross-origin :8901 fetch. */
 const API = tryApiBase();
-/** Long yt-dlp probes may need direct :8900 if the Next rewrite times out. */
-const API_PROBE = process.env.NEXT_PUBLIC_API_URL ? API : tryApiDirect();
 
 function isFetchNetworkError(e: unknown): boolean {
   if (!(e instanceof Error)) return false;
@@ -652,6 +650,38 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     }
   }, []);
 
+  const resetForm = useCallback(() => {
+    stopPoll();
+    if (probeTimer.current) {
+      clearTimeout(probeTimer.current);
+      probeTimer.current = null;
+    }
+    pollFailRef.current = 0;
+    batchJobsRef.current = [];
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    setUrlsText("");
+    setSessionid("");
+    setUrlProbe(null);
+    setBatchQueued(0);
+    setSourceMedia({});
+    setSourceDurations({});
+    setFiles([]);
+    setFileDragOver(false);
+    setVideoDur(null);
+    setCachedDone(false);
+    setPrevLangs(null);
+    setPrevFrameOpts(null);
+    setTargetLangs([...locales]);
+    setWantTranslate(true);
+    setWantNotes(true);
+    setWantClips(true);
+    setLangsOpen(false);
+    setSubmitting(false);
+    setPoll(null);
+    setBatchJobs([]);
+    setErr(null);
+  }, [stopPoll]);
+
   const refreshJobs = useCallback(async () => {
     const current = batchJobsRef.current;
     const isTerminal = (s: string) => s === "done" || s === "failed" || s === "dead";
@@ -784,7 +814,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     if (probeTimer.current) clearTimeout(probeTimer.current);
     probeTimer.current = setTimeout(async () => {
       try {
-        const r = await fetch(`${API_PROBE}/api/try/probe`, {
+        const r = await fetch(`${API}/api/try/probe`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -1533,21 +1563,31 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
           <p className="try-intent" role="status">
             {plannedIntentText}
           </p>
-          <button
-            type="submit"
-            className="watch-btn try-submit"
-            disabled={
-              submitting ||
-              Boolean(linkRangeError) ||
-              sourceItems.length === 0 ||
-              !hasAnyModule ||
-              ((wantTranslate || wantNotes) && targetLangs.length === 0) ||
-              (plannedIntent === "noop" && sourceItems.length <= 1) ||
-              (tab === "url" && cookiesBlockSubmit)
-            }
-          >
-            {submitLabel}
-          </button>
+          <div className="try-actions-buttons">
+            <button
+              type="button"
+              className="watch-btn secondary try-reset"
+              onClick={resetForm}
+              disabled={submitting}
+            >
+              {copy.reset}
+            </button>
+            <button
+              type="submit"
+              className="watch-btn try-submit"
+              disabled={
+                submitting ||
+                Boolean(linkRangeError) ||
+                sourceItems.length === 0 ||
+                !hasAnyModule ||
+                ((wantTranslate || wantNotes) && targetLangs.length === 0) ||
+                (plannedIntent === "noop" && sourceItems.length <= 1) ||
+                (tab === "url" && cookiesBlockSubmit)
+              }
+            >
+              {submitLabel}
+            </button>
+          </div>
           {batchQueued > 1 ? (
             <p className="try-hint try-batch-queued" role="status">
               {fillCopy(copy.batchQueued, { n: batchQueued })}

@@ -17,7 +17,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from urllib.parse import urlparse
+from typing import Any
+from urllib.parse import urlencode, urlparse
 
 
 def clear_proxy_env() -> None:
@@ -322,6 +323,217 @@ def _resolve_js_runtime() -> list[str]:
 def _yt_dlp_cmd() -> list[str]:
     # Prefer module in current venv
     return [sys.executable, "-m", "yt_dlp"]
+
+
+BILI_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
+
+def is_bilibili_412(err: str) -> bool:
+    """True when yt-dlp/Bilibili anti-bot returns HTTP 412."""
+    text = err or ""
+    low = text.lower()
+    if "412" not in text:
+        return False
+    return "precondition failed" in low or "blocked by server" in low
+
+
+def bili_browser_headers(cookie: str | None = None) -> dict[str, str]:
+    """Browser-like headers that api.bilibili.com accepts without the HTML 412 gate."""
+    headers = {
+        "User-Agent": BILI_UA,
+        "Referer": "https://www.bilibili.com/",
+        "Origin": "https://www.bilibili.com",
+    }
+    if cookie:
+        headers["Cookie"] = cookie
+    return headers
+
+
+def bili_get_json(url: str, timeout: int = 15) -> dict[str, Any]:
+    """GET JSON from Bilibili APIs. Wrapper so tests can monkeypatch this module."""
+    from discover.adapters.bilibili import bili_get_json as _get
+
+    return _get(url, timeout=timeout)
+
+
+def _first_media_url(item: dict[str, Any] | None) -> str | None:
+    if not item:
+        return None
+    for key in ("url", "baseUrl", "base_url"):
+        raw = item.get(key)
+        if raw:
+            return str(raw)
+    backups = item.get("backup_url") or item.get("backupUrl") or []
+    if backups:
+        return str(backups[0])
+    return None
+
+
+def playurl_media_url(payload: dict[str, Any], *, prefer: str = "html5") -> str:
+    """Pick a direct CDN URL from a playurl JSON payload.
+
+    :param payload: `x/player/playurl` response (or its `data` object)
+    :param prefer: `html5` uses muxed `durl`; `audio` uses highest-bandwidth DASH audio
+    :raises RuntimeError: when the payload has no usable URL
+    """
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    if not isinstance(data, dict):
+        raise RuntimeError("bilibili playurl payload is empty")
+    if prefer == "audio":
+        audios = ((data.get("dash") or {}).get("audio")) or []
+        if not audios:
+            raise RuntimeError("bilibili dash playurl missing audio")
+        best = max(audios, key=lambda a: int((a or {}).get("bandwidth") or 0))
+        url = _first_media_url(best)
+        if not url:
+            raise RuntimeError("bilibili dash audio missing url")
+        return url
+    durl = data.get("durl") or []
+    if not durl:
+        raise RuntimeError("bilibili html5 playurl missing durl")
+    url = _first_media_url(durl[0])
+    if not url:
+        raise RuntimeError("bilibili html5 playurl missing url")
+    return url
+
+
+def resolve_bilibili_api_download(url: str) -> dict[str, Any]:
+    """Resolve title/cid and a muxed mp4 URL via official APIs (skips the 412 HTML gate).
+
+    :param url: watch URL containing a BV id
+    :return: meta with `bvid`, `cid`, `aid`, `title`, `duration`, `media_url`
+    :raises ValueError: URL has no BV id
+    :raises RuntimeError: view/playurl API failed
+    """
+    bvid = detect_bvid(url)
+    if not bvid:
+        raise ValueError(f"not a bilibili url: {url}")
+    view = bili_get_json(
+        f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}",
+        timeout=15,
+    )
+    if view.get("code") != 0:
+        raise RuntimeError(f"bilibili view api failed: {view.get('message')}")
+    data = view.get("data") or {}
+    cid = data.get("cid")
+    if not cid:
+        raise RuntimeError("bilibili view api missing cid")
+    query = urlencode(
+        {
+            "bvid": bvid,
+            "cid": int(cid),
+            "qn": 32,
+            "type": "mp4",
+            "platform": "html5",
+        }
+    )
+    play = bili_get_json(f"https://api.bilibili.com/x/player/playurl?{query}", timeout=15)
+    if play.get("code") != 0:
+        raise RuntimeError(f"bilibili playurl api failed: {play.get('message')}")
+    return {
+        "bvid": str(data.get("bvid") or bvid),
+        "aid": data.get("aid"),
+        "cid": int(cid),
+        "title": data.get("title"),
+        "duration": data.get("duration"),
+        "media_url": playurl_media_url(play, prefer="html5"),
+        "extractor": "bilibili-api",
+    }
+
+
+def _http_download(
+    url: str,
+    dest: Path,
+    *,
+    headers: dict[str, str] | None = None,
+    timeout: int = 180,
+) -> None:
+    """Download a single HTTP file (Bilibili CDN) with browser Referer."""
+    import urllib.request
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    req = urllib.request.Request(url, headers=headers or bili_browser_headers())
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    with urllib.request.urlopen(req, timeout=timeout) as resp, tmp.open("wb") as fh:
+        shutil.copyfileobj(resp, fh)
+    if not tmp.is_file() or tmp.stat().st_size < 1000:
+        if tmp.exists():
+            tmp.unlink()
+        raise RuntimeError(f"download too small: {url}")
+    tmp.replace(dest)
+
+
+def probe_bilibili_duration(url: str) -> dict[str, Any]:
+    """Duration/title via view API (does not hit the 412 HTML page)."""
+    bvid = detect_bvid(url)
+    if not bvid:
+        raise ValueError(f"not a bilibili url: {url}")
+    view = bili_get_json(
+        f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}",
+        timeout=15,
+    )
+    if view.get("code") != 0:
+        raise RuntimeError(f"bilibili view api failed: {view.get('message')}")
+    data = view.get("data") or {}
+    duration = data.get("duration")
+    if duration is None:
+        raise RuntimeError("bilibili view api missing duration")
+    return {
+        "bvid": str(data.get("bvid") or bvid),
+        "title": data.get("title"),
+        "duration": float(duration),
+        "cid": data.get("cid"),
+        "aid": data.get("aid"),
+    }
+
+
+def _ffmpeg_to_wav(src: Path, wav: Path) -> None:
+    ffmpeg = find_ffmpeg()
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(src),
+        "-vn",
+        "-acodec",
+        "pcm_s16le",
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        str(wav),
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+
+
+def _fetch_bilibili_api_to_wav(url: str, media: Path, wav: Path, meta_path: Path) -> dict[str, Any]:
+    """Download muxed mp4 via playurl API, then extract 16 kHz mono WAV."""
+    info = resolve_bilibili_api_download(url)
+    src = media / "source.mp4"
+    print("[fetch] bili 412 fallback → playurl API")
+    _http_download(info["media_url"], src, headers=bili_browser_headers())
+    print(f"[fetch] source -> {src.name} ({src.stat().st_size} bytes)")
+    _ffmpeg_to_wav(src, wav)
+    print(f"[fetch] wav -> {wav}")
+    meta = {
+        "url": url,
+        "platform": "bilibili",
+        "bvid": info["bvid"],
+        "id": info["bvid"],
+        "title": info["title"],
+        "duration": info["duration"],
+        "extractor": "bilibili-api",
+        "source_file": str(src),
+        "wav": str(wav),
+        "cid": info["cid"],
+        "aid": info["aid"],
+    }
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[out] {meta_path}")
+    return meta
 
 
 ROOT = Path(__file__).resolve().parent
@@ -652,6 +864,8 @@ def fetch_to_wav(
                             + err3[-1500:]
                         )
                 else:
+                    if platform == "bilibili" and is_bilibili_412(err2):
+                        return _fetch_bilibili_api_to_wav(url, media, wav, meta_path)
                     raise RuntimeError(
                         "yt-dlp download failed. Update yt-dlp or export cookies.txt.\n"
                         + err2[-1500:]
@@ -671,6 +885,8 @@ def fetch_to_wav(
                     err3 = (result.stderr or result.stdout or "").strip()
                     raise RuntimeError("yt-dlp download failed.\n" + err3[-1500:])
             else:
+                if platform == "bilibili" and is_bilibili_412(err):
+                    return _fetch_bilibili_api_to_wav(url, media, wav, meta_path)
                 hint = (
                     _douyin_cookie_hint()
                     if platform == "douyin"
@@ -849,6 +1065,12 @@ def ensure_source_video(
         result = run_download(cleaned + [url])
     if result.returncode != 0:
         err = (result.stderr or result.stdout or "").strip()
+        if platform == "bilibili" and is_bilibili_412(err):
+            print("[fetch-video] yt-dlp 412, fallback to playurl API")
+            info = resolve_bilibili_api_download(url)
+            _http_download(info["media_url"], target, headers=bili_browser_headers())
+            print(f"[fetch-video] source -> {target.name} ({target.stat().st_size} bytes)")
+            return target
         raise RuntimeError("yt-dlp video download failed.\n" + err[-1500:])
 
     sources = sorted(
