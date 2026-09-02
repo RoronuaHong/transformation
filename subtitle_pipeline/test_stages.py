@@ -174,3 +174,15 @@ def test_resolve_try_intent() -> None:
         )["stages"]
         == "enhance"
     )
+    assert (
+        resolve_try_intent(
+            job_status="done",
+            stages="all,remix",
+            frames="auto",
+            new_langs="site",
+            prev_langs="site",
+            new_frame_opts=same,
+            prev_frame_opts=same,
+        )["stages"]
+        == "remix"
+    )

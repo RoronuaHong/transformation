@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import path from "node:path";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -7,6 +9,7 @@ import { DownloadClips } from "@/components/DownloadClips";
 import { DownloadNotes } from "@/components/DownloadNotes";
 import { NoteList } from "@/components/NoteList";
 import { NotesModal } from "@/components/NotesModal";
+import { RemixPlayer } from "@/components/RemixPlayer";
 import { UnlockNotes } from "@/components/UnlockNotes";
 import {
   NOTES_AD_GATE,
@@ -21,6 +24,16 @@ import { isLocale, locales, type Locale } from "@/lib/locales";
 import { gifRangeFrames, rangeVideoClips } from "@/lib/note-points";
 
 type Params = { locale: string; topic: string; slug: string };
+
+function derivedRemix(slug: string) {
+  const dir = path.join(process.cwd(), "public", "derived", slug);
+  if (!existsSync(path.join(dir, "remix.mp4"))) return null;
+  const cues = path.join(dir, "remix_cues.json");
+  return {
+    video: `/derived/${slug}/remix.mp4`,
+    cues: existsSync(cues) ? `/derived/${slug}/remix_cues.json` : undefined,
+  };
+}
 
 /** Try/export rewrites articles.json often — never bake a stale pack into HTML. */
 export const dynamic = "force-dynamic";
@@ -102,6 +115,16 @@ export default async function TopicArticlePage({ params }: { params: Promise<Par
     }))
     .filter((c) => c.text);
 
+  const notesPayload = {
+    title: a.titles[locale],
+    one_liner: a.summaries[locale],
+    summary: overview,
+    focuses: notes.focuses,
+    key_points: showGate ? notes.lockedPoints : a.keyPoints[locale],
+    hard_points: notes.hardPoints,
+  };
+  const notesFilename = `${slug}-${locale}-notes.md`;
+
   const notesModal = (
     <NotesModal
       chrome={chrome}
@@ -110,12 +133,15 @@ export default async function TopicArticlePage({ params }: { params: Promise<Par
       keyPoints={showGate ? notes.lockedPoints : a.keyPoints[locale]}
       hardPoints={notes.hardPoints}
       clipLabel={chrome.downloadClipItem}
+      downloadFilename={notesFilename}
+      downloadNotes={notesPayload}
     />
   );
 
   const downloadPoints = a.keyPoints[locale];
   const previewGifs = gifRangeFrames(downloadPoints);
   const previewClips = rangeVideoClips(downloadPoints);
+  const remix = derivedRemix(a.slug);
 
   return (
     <main className="article-page">
@@ -129,6 +155,10 @@ export default async function TopicArticlePage({ params }: { params: Promise<Par
         </p>
         <h1 className="hero-line">{a.titles[locale]}</h1>
         {a.summaries[locale] ? <p className="lede">{a.summaries[locale]}</p> : null}
+
+        {remix ? (
+          <RemixPlayer src={remix.video} cuesUrl={remix.cues} label={chrome.remixPlay} />
+        ) : null}
 
         {previewGifs.length || previewClips.length ? (
           <ArticleMediaPreview
@@ -166,14 +196,13 @@ export default async function TopicArticlePage({ params }: { params: Promise<Par
           ) : null}
           <DownloadNotes
             label={chrome.downloadNotes}
-            filename={`${slug}-${locale}-notes.json`}
-            notes={{
-              title: a.titles[locale],
-              one_liner: a.summaries[locale],
-              summary: overview,
-              focuses: notes.focuses,
-              key_points: showGate ? notes.lockedPoints : a.keyPoints[locale],
-              hard_points: notes.hardPoints,
+            filename={notesFilename}
+            notes={notesPayload}
+            headings={{
+              overview: chrome.overview,
+              focuses: chrome.focuses,
+              keyPoints: chrome.keyPoints,
+              hardPoints: chrome.hardPoints,
             }}
           />
           <DownloadClips

@@ -9,6 +9,7 @@ import {
   type ClipRow,
   type SourceMediaState,
 } from "@/components/TrySourceMedia";
+import { RemixPlayer } from "@/components/RemixPlayer";
 import { fillCopy, type TryCopy } from "@/lib/copy";
 import { DEFAULT_TOPIC } from "@/lib/site-config";
 import {
@@ -68,6 +69,10 @@ type Poll = {
     enhance?: string;
     compress?: string;
     concat?: string;
+    remix?: string;
+    remix_cues?: string;
+    remix_vtt?: string;
+    publish?: string;
   };
   frame_opts?: {
     frames?: string;
@@ -169,6 +174,8 @@ const STAGE_KEYS: Record<string, keyof TryCopy> = {
   enhance: "stageEnhance",
   compress: "stageCompress",
   concat: "stageConcat",
+  remix: "stageRemix",
+  publish: "stagePublish",
   export: "stageExport",
   done: "stageDone",
   failed: "stageFailed",
@@ -288,6 +295,22 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
   const [wantEnhance, setWantEnhance] = useState(false);
   const [wantCompress, setWantCompress] = useState(false);
   const [wantConcat, setWantConcat] = useState(false);
+  const [wantRemix, setWantRemix] = useState(false);
+  const [wantPublish, setWantPublish] = useState(false);
+  const [publishPlatforms, setPublishPlatforms] = useState<string[]>([]);
+  const [accountSlots, setAccountSlots] = useState<
+    Array<{
+      platform: string;
+      label: string;
+      account_id: string;
+      status: "valid" | "invalid" | "unbound";
+      bound: boolean;
+    }>
+  >([]);
+  const [accountDrafts, setAccountDrafts] = useState<
+    Record<string, { secret: string; label: string; account_id: string }>
+  >({});
+  const [accountBusy, setAccountBusy] = useState<string | null>(null);
   const [enhanceStrength, setEnhanceStrength] = useState<"light" | "medium" | "strong">(
     "medium"
   );
@@ -320,6 +343,35 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
   const langsDdRef = useRef<HTMLDivElement | null>(null);
   const batchJobsRef = useRef(batchJobs);
   batchJobsRef.current = batchJobs;
+
+  const loadAccounts = useCallback(async () => {
+    try {
+      const r = await fetch(`${API}/api/try/accounts`);
+      if (!r.ok) return;
+      const data = (await r.json()) as {
+        accounts?: Array<{
+          platform: string;
+          label: string;
+          account_id: string;
+          status: "valid" | "invalid" | "unbound";
+          bound: boolean;
+        }>;
+      };
+      const slots = data.accounts || [];
+      setAccountSlots(slots);
+      const valid = slots.filter((s) => s.status === "valid").map((s) => s.platform);
+      setPublishPlatforms((prev) => {
+        const keep = prev.filter((p) => valid.includes(p));
+        return keep.length ? keep : valid;
+      });
+    } catch {
+      /* backend may be down */
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadAccounts();
+  }, [loadAccounts]);
 
   const parsedUrls = useMemo(() => parseUrlLines(urlsText), [urlsText]);
 
@@ -442,12 +494,17 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
   const concatMissingRanges =
     wantConcat &&
     (sourceItems.length === 0 || sourceItems.some(({ key }) => filledClipCount(key) < 2));
+  const validPublish = accountSlots.filter((s) => s.status === "valid");
+  const publishBlocked =
+    wantPublish && (validPublish.length === 0 || publishPlatforms.length === 0);
   const hasAnyModule =
     wantTranslate ||
     wantNotes ||
     wantEnhance ||
     wantCompress ||
     wantConcat ||
+    wantRemix ||
+    wantPublish ||
     (wantClips && (batchHasClips || batchHasGif));
   const stagesPayload = composeTryStages({
     wantTranslate,
@@ -456,6 +513,8 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     wantEnhance,
     wantCompress,
     wantConcat,
+    wantRemix,
+    wantPublish,
   });
   const plannedIntent: TryIntentKind =
     sourceItems.length > 1 && !cachedDone
@@ -475,7 +534,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     copy,
     plannedIntent,
     targetLangs.length,
-    wantEnhance || wantCompress || wantConcat
+    wantEnhance || wantCompress || wantConcat || wantRemix || wantPublish
   );
   const langsSummary = allLangsSelected
     ? copy.langsAllLabel
@@ -1046,10 +1105,13 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
             want_enhance: wantEnhance,
             want_compress: wantCompress,
             want_concat: wantConcat,
+            want_remix: wantRemix,
+            want_publish: wantPublish,
             media_opts: {
               enhance_strength: enhanceStrength,
               compress_height: compressHeight,
               compress_crf: compressCrf,
+              publish_platforms: publishPlatforms,
             },
             stages: stagesPayload,
             ...(sessionid.trim() ? { sessionid: sessionid.trim() } : {}),
@@ -1076,12 +1138,15 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
         fd.append("want_enhance", wantEnhance ? "true" : "false");
         fd.append("want_compress", wantCompress ? "true" : "false");
         fd.append("want_concat", wantConcat ? "true" : "false");
+        fd.append("want_remix", wantRemix ? "true" : "false");
+        fd.append("want_publish", wantPublish ? "true" : "false");
         fd.append(
           "media_opts",
           JSON.stringify({
             enhance_strength: enhanceStrength,
             compress_height: compressHeight,
             compress_crf: compressCrf,
+            publish_platforms: publishPlatforms,
           })
         );
         fd.append("stages", stagesPayload);
@@ -1281,6 +1346,18 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
               set: setWantConcat,
               label: copy.workflowRailConcat,
             },
+            {
+              id: "remix",
+              on: wantRemix,
+              set: setWantRemix,
+              label: copy.workflowRailRemix,
+            },
+            {
+              id: "publish",
+              on: wantPublish,
+              set: setWantPublish,
+              label: copy.workflowRailPublish,
+            },
           ] as const
         ).map((wf) => (
           <li key={wf.id} className={wf.on ? "is-on" : "is-off"}>
@@ -1296,17 +1373,6 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
               </span>
               <span className="try-workflow-rail-label">{wf.label}</span>
             </button>
-          </li>
-        ))}
-        {(
-          [copy.workflowRailRemix, copy.workflowRailPublish] as const
-        ).map((label) => (
-          <li key={label} className="is-soon" title={copy.workflowRailSoon}>
-            <span className="try-workflow-rail-n" aria-hidden="true">
-              ·
-            </span>
-            <span className="try-workflow-rail-label">{label}</span>
-            <span className="try-workflow-rail-soon">{copy.workflowRailSoon}</span>
           </li>
         ))}
       </ol>
@@ -1636,7 +1702,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
           </section>
         ) : null}
 
-        {wantEnhance || wantCompress || wantConcat ? (
+        {wantEnhance || wantCompress || wantConcat || wantRemix || wantPublish ? (
           <section className="try-section try-postproc">
             <header className="try-section-head">
               <h2 className="try-section-title">
@@ -1644,6 +1710,8 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                   wantEnhance ? copy.enhanceSection : null,
                   wantCompress ? copy.compressSection : null,
                   wantConcat ? copy.workflowRailConcat : null,
+                  wantRemix ? copy.workflowRailRemix : null,
+                  wantPublish ? copy.workflowRailPublish : null,
                 ]
                   .filter(Boolean)
                   .join(" · ")}
@@ -1707,6 +1775,50 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                     onChange={(e) => setCompressCrf(Number(e.target.value) || 28)}
                   />
                 </label>
+              </div>
+            ) : null}
+            {wantRemix ? (
+              <div className="try-field">
+                <span>{copy.remixSection}</span>
+                <p className="try-hint">{copy.remixHint}</p>
+              </div>
+            ) : null}
+            {wantPublish ? (
+              <div className="try-field">
+                <span>{copy.publishSection}</span>
+                <p className="try-hint">{copy.publishHint}</p>
+                {validPublish.length === 0 ? (
+                  <p className="try-error">{copy.accountNeedBind}</p>
+                ) : (
+                  <div className="try-frames-options try-postproc-options">
+                    {validPublish.map((slot) => (
+                      <label
+                        key={slot.platform}
+                        className={publishPlatforms.includes(slot.platform) ? "is-on" : undefined}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={publishPlatforms.includes(slot.platform)}
+                          disabled={submitting}
+                          onChange={() =>
+                            setPublishPlatforms((prev) =>
+                              prev.includes(slot.platform)
+                                ? prev.filter((p) => p !== slot.platform)
+                                : [...prev, slot.platform]
+                            )
+                          }
+                        />
+                        <span>
+                          {slot.platform === "douyin"
+                            ? copy.accountDouyin
+                            : slot.platform === "kuaishou"
+                              ? copy.accountKuaishou
+                              : slot.platform}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                )}
               </div>
             ) : null}
           </section>
@@ -1816,6 +1928,157 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
           </section>
         ) : null}
 
+        <section className="try-section try-accounts">
+          <header className="try-section-head">
+            <h2 className="try-section-title">{copy.accountsSection}</h2>
+          </header>
+          <p className="try-hint">{copy.accountsHint}</p>
+          <div className="try-account-grid">
+            {(accountSlots.length
+              ? accountSlots
+              : [
+                  { platform: "douyin", label: "", account_id: "", status: "unbound" as const, bound: false },
+                  { platform: "kuaishou", label: "", account_id: "", status: "unbound" as const, bound: false },
+                ]
+            ).map((slot) => {
+              const draft = accountDrafts[slot.platform] || {
+                secret: "",
+                label: slot.label,
+                account_id: slot.account_id,
+              };
+              const name =
+                slot.platform === "douyin"
+                  ? copy.accountDouyin
+                  : slot.platform === "kuaishou"
+                    ? copy.accountKuaishou
+                    : slot.platform;
+              const statusText =
+                slot.status === "valid"
+                  ? copy.accountValid
+                  : slot.status === "invalid"
+                    ? copy.accountInvalid
+                    : copy.accountUnbound;
+              return (
+                <div key={slot.platform} className="try-account-card">
+                  <div className="try-select-row">
+                    <strong>{name}</strong>
+                    <span className={`try-account-status is-${slot.status}`}>{statusText}</span>
+                  </div>
+                  <label className="try-field">
+                    <span>{copy.accountLabel}</span>
+                    <input
+                      value={draft.label}
+                      disabled={submitting || accountBusy === slot.platform}
+                      onChange={(e) =>
+                        setAccountDrafts((prev) => ({
+                          ...prev,
+                          [slot.platform]: { ...draft, label: e.target.value },
+                        }))
+                      }
+                    />
+                  </label>
+                  <label className="try-field">
+                    <span>{copy.accountId}</span>
+                    <input
+                      value={draft.account_id}
+                      disabled={submitting || accountBusy === slot.platform}
+                      onChange={(e) =>
+                        setAccountDrafts((prev) => ({
+                          ...prev,
+                          [slot.platform]: { ...draft, account_id: e.target.value },
+                        }))
+                      }
+                    />
+                  </label>
+                  <label className="try-field">
+                    <span>{copy.accountSecret}</span>
+                    <textarea
+                      rows={3}
+                      value={draft.secret}
+                      placeholder={slot.bound ? "••••" : ""}
+                      disabled={submitting || accountBusy === slot.platform}
+                      onChange={(e) =>
+                        setAccountDrafts((prev) => ({
+                          ...prev,
+                          [slot.platform]: { ...draft, secret: e.target.value },
+                        }))
+                      }
+                    />
+                  </label>
+                  <div className="try-actions-buttons">
+                    <button
+                      type="button"
+                      className="watch-btn"
+                      disabled={submitting || accountBusy === slot.platform || !draft.secret.trim()}
+                      onClick={async () => {
+                        setAccountBusy(slot.platform);
+                        setErr(null);
+                        try {
+                          const r = await fetch(`${API}/api/try/accounts`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                              platform: slot.platform,
+                              secret: draft.secret,
+                              label: draft.label,
+                              account_id: draft.account_id,
+                            }),
+                          });
+                          if (!r.ok) {
+                            const body = (await r.json().catch(() => ({}))) as { detail?: string };
+                            throw new Error(body.detail || r.statusText);
+                          }
+                          setAccountDrafts((prev) => ({
+                            ...prev,
+                            [slot.platform]: { ...draft, secret: "" },
+                          }));
+                          await loadAccounts();
+                        } catch (e) {
+                          setErr(e instanceof Error ? e.message : String(e));
+                        } finally {
+                          setAccountBusy(null);
+                        }
+                      }}
+                    >
+                      {copy.accountBind}
+                    </button>
+                    {slot.bound ? (
+                      <button
+                        type="button"
+                        className="watch-btn secondary"
+                        disabled={submitting || accountBusy === slot.platform}
+                        onClick={async () => {
+                          setAccountBusy(slot.platform);
+                          setErr(null);
+                          try {
+                            const r = await fetch(
+                              `${API}/api/try/accounts/${encodeURIComponent(slot.platform)}`,
+                              { method: "DELETE" }
+                            );
+                            if (!r.ok) {
+                              const body = (await r.json().catch(() => ({}))) as {
+                                detail?: string;
+                              };
+                              throw new Error(body.detail || r.statusText);
+                            }
+                            await loadAccounts();
+                          } catch (e) {
+                            setErr(e instanceof Error ? e.message : String(e));
+                          } finally {
+                            setAccountBusy(null);
+                          }
+                        }}
+                      >
+                        {copy.accountUnbind}
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
         <div className="try-actions">
           <p className="try-intent" role="status">
             {plannedIntentText}
@@ -1839,6 +2102,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                 !hasAnyModule ||
                 ((wantTranslate || wantNotes) && targetLangs.length === 0) ||
                 concatMissingRanges ||
+                publishBlocked ||
                 (plannedIntent === "noop" && sourceItems.length <= 1) ||
                 (tab === "url" && cookiesBlockSubmit)
               }
@@ -1946,6 +2210,13 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
           {poll.status === "done" && poll.derived ? (
             <div className="try-derived">
               <p className="try-derived-title">{copy.derivedTitle}</p>
+              {poll.derived.remix ? (
+                <RemixPlayer
+                  src={poll.derived.remix}
+                  cuesUrl={poll.derived.remix_cues}
+                  label={copy.remixSection}
+                />
+              ) : null}
               <ul>
                 {poll.derived.concat ? (
                   <li>
@@ -1965,6 +2236,27 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                   <li>
                     <a href={poll.derived.compress} download>
                       {copy.derivedCompress}
+                    </a>
+                  </li>
+                ) : null}
+                {poll.derived.remix ? (
+                  <li>
+                    <a href={poll.derived.remix} download>
+                      {copy.derivedRemix}
+                    </a>
+                  </li>
+                ) : null}
+                {poll.derived.remix_vtt ? (
+                  <li>
+                    <a href={poll.derived.remix_vtt} download>
+                      {copy.derivedRemixVtt}
+                    </a>
+                  </li>
+                ) : null}
+                {poll.derived.publish ? (
+                  <li>
+                    <a href={poll.derived.publish} download>
+                      {copy.derivedPublish}
                     </a>
                   </li>
                 ) : null}

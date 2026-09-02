@@ -38,12 +38,49 @@ def find_cue_range(segs: list[dict], start_sec: float, end_sec: float) -> tuple[
     return first, last
 
 
-def _shift_segments(segs: list[dict], offset: float) -> list[dict]:
+def remap_cues_to_spans(
+    segs: list[dict],
+    spans: list[tuple[float, float]],
+    durations: list[float] | None = None,
+) -> list[dict]:
+    """Map full-timeline cues onto concatenated clip clock (t=0 = first span start).
+
+    ``durations`` is the real length of each encoded clip when known; otherwise
+    ``end - start`` is used. Cue overlap still uses the source-span window.
+    """
     out: list[dict] = []
-    for seg in segs:
-        s = max(0.0, float(seg["start"]) - offset)
-        e = max(s + 0.01, float(seg["end"]) - offset)
-        out.append({"start": s, "end": e, "text": seg.get("text") or ""})
+    cursor = 0.0
+    for i, (start, end) in enumerate(spans):
+        start_f = float(start)
+        end_f = float(end)
+        if end_f <= start_f:
+            continue
+        dur = end_f - start_f
+        if durations is not None and i < len(durations):
+            try:
+                probed = float(durations[i])
+            except (TypeError, ValueError):
+                probed = 0.0
+            if probed > 0.05:
+                dur = probed
+        for seg in segs:
+            text = str(seg.get("text") or "").strip()
+            if not text:
+                continue
+            s = float(seg["start"])
+            e = float(seg["end"])
+            if e <= start_f or s >= end_f:
+                continue
+            cs = max(s, start_f)
+            ce = min(e, end_f)
+            local_s = cursor + (cs - start_f)
+            local_e = cursor + (ce - start_f)
+            cap = cursor + dur
+            local_s = min(max(cursor, local_s), cap)
+            local_e = min(max(local_s, local_e), cap)
+            if local_e > local_s:
+                out.append({"start": local_s, "end": local_e, "text": text})
+        cursor += dur
     return out
 
 
@@ -91,24 +128,22 @@ def enrich_segment_cues(
     if cue_range is None:
         return None
     i0, i1 = cue_range
-    offset = float(primary_segs[i0]["start"])
 
     seg_root = work_dir / "media" / "segments" / segment_id
     subs_dir = seg_root / "subs"
     subs_dir.mkdir(parents=True, exist_ok=True)
     lang_map: dict[str, str] = {}
 
+    span = (float(start_sec), float(end_sec))
     for lang, path in srts.items():
         segs = parse_srt(path)
         if not segs:
             continue
-        slice_end = min(i1, len(segs) - 1)
-        slice_start = min(i0, slice_end)
-        chunk = segs[slice_start : slice_end + 1]
+        chunk = remap_cues_to_spans(segs, [span])
         if not chunk:
             continue
         rel = f"subs/{lang}.srt"
-        _write_srt(subs_dir / f"{lang}.srt", _shift_segments(chunk, offset))
+        _write_srt(subs_dir / f"{lang}.srt", chunk)
         lang_map[lang] = rel
 
     meta = {

@@ -1122,7 +1122,7 @@ a:hover {
 .notes-modal-body {
   overflow: auto;
   overscroll-behavior: contain;
-  padding: 0.85rem 1rem calc(1.25rem + env(safe-area-inset-bottom));
+  padding: 0.85rem 1rem 1rem;
   scrollbar-width: thin;
   scrollbar-color: var(--primary) color-mix(in srgb, var(--ink) 8%, transparent);
   -webkit-overflow-scrolling: touch;
@@ -1148,6 +1148,17 @@ a:hover {
   background: linear-gradient(180deg, #6fb094, var(--primary));
   background-clip: padding-box;
   border: 2px solid transparent;
+}
+
+.notes-modal-foot {
+  flex-shrink: 0;
+  padding: 0.7rem 1rem calc(0.85rem + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.notes-modal-download {
+  width: 100%;
 }
 
 .notes-overview {
@@ -1472,7 +1483,11 @@ a:hover {
   }
 
   .notes-modal-body {
-    padding: 0.9rem 1.15rem calc(1.4rem + env(safe-area-inset-bottom));
+    padding: 0.9rem 1.15rem 1rem;
+  }
+
+  .notes-modal-foot {
+    padding: 0.75rem 1.15rem calc(0.95rem + env(safe-area-inset-bottom));
   }
 
   .notes-overview-text {
@@ -3256,6 +3271,63 @@ html[data-theme="dark"] .theme-toggle-track {
   font-size: 0.88rem;
 }
 
+.remix-player {
+  margin: 1rem 0 1.25rem;
+}
+
+.remix-player-label {
+  margin: 0 0 0.45rem;
+  font-size: 0.82rem;
+  font-weight: 650;
+  color: var(--muted);
+}
+
+.remix-stage {
+  position: relative;
+  width: min(100%, 22rem);
+  margin: 0 auto;
+  aspect-ratio: 9 / 16;
+  overflow: hidden;
+  border-radius: 1.1rem;
+  background: #111;
+  box-shadow: var(--shadow-card);
+}
+
+.remix-stage-video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #111;
+}
+
+.remix-overlay {
+  position: absolute;
+  left: 1.05rem;
+  right: 1.05rem;
+  pointer-events: none;
+  text-align: center;
+  color: #fff;
+  text-wrap: pretty;
+  text-shadow:
+    0 1px 1px #000,
+    0 0 14px rgb(0 0 0 / 0.55);
+}
+
+.remix-overlay.is-title {
+  top: 38%;
+  font-size: 1.02rem;
+  font-weight: 650;
+  line-height: 1.45;
+}
+
+.remix-overlay.is-caption {
+  bottom: 14%;
+  font-size: 0.92rem;
+  font-weight: 550;
+  line-height: 1.4;
+}
+
 .try-select-row {
   display: grid;
   grid-template-columns: minmax(7rem, 11rem) minmax(0, 1fr);
@@ -3282,6 +3354,50 @@ html[data-theme="dark"] .theme-toggle-track {
 
 .try-postproc-options {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.try-account-grid {
+  display: grid;
+  gap: 0.85rem;
+  margin-top: 0.65rem;
+}
+
+@media (min-width: 720px) {
+  .try-account-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.try-account-card {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--tile) 40%, var(--paper));
+}
+
+.try-account-status {
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.try-account-status.is-valid {
+  color: #2d6a4f;
+}
+
+.try-account-status.is-invalid {
+  color: #8b2e2e;
+}
+
+.try-account-status.is-unbound {
+  color: var(--muted);
+}
+
+.try-account-card textarea {
+  width: 100%;
+  min-height: 4.5rem;
+  resize: vertical;
 }
 
 .try-status-head {

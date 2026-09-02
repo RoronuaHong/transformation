@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from segment_subs import enrich_segment_cues, find_cue_range, stamp_row_cues
+import pytest
+
+from segment_subs import (
+    enrich_segment_cues,
+    find_cue_range,
+    remap_cues_to_spans,
+    stamp_row_cues,
+)
 
 
 def _write_srt(path: Path, lines: list[tuple[float, float, str]]) -> None:
@@ -14,6 +21,37 @@ def _write_srt(path: Path, lines: list[tuple[float, float, str]]) -> None:
         body.append("")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(body), encoding="utf-8")
+
+
+def test_remap_cues_to_spans_two_clips() -> None:
+    segs = [
+        {"start": 0.31, "end": 1.65, "text": "大家好"},
+        {"start": 10.13, "end": 12.83, "text": "因为他们往里面加了几种特别的东西"},
+        {"start": 50.0, "end": 52.0, "text": "淘洗大米也是非常有讲究的"},
+        {"start": 19.5, "end": 21.0, "text": "跨过第一段结尾"},
+    ]
+    out = remap_cues_to_spans(segs, [(10.0, 20.0), (50.0, 60.0)])
+    by_text = {row["text"]: row for row in out}
+    assert "大家好" not in by_text
+    assert by_text["因为他们往里面加了几种特别的东西"]["start"] == pytest.approx(0.13)
+    assert by_text["因为他们往里面加了几种特别的东西"]["end"] == pytest.approx(2.83)
+    assert by_text["淘洗大米也是非常有讲究的"]["start"] == pytest.approx(10.0)
+    assert by_text["淘洗大米也是非常有讲究的"]["end"] == pytest.approx(12.0)
+    assert by_text["跨过第一段结尾"]["start"] == pytest.approx(9.5)
+    assert by_text["跨过第一段结尾"]["end"] == pytest.approx(10.0)
+
+
+def test_remap_cues_uses_probed_clip_durations() -> None:
+    segs = [
+        {"start": 50.0, "end": 52.0, "text": "第二段"},
+    ]
+    out = remap_cues_to_spans(
+        segs,
+        [(10.0, 20.0), (50.0, 60.0)],
+        durations=[10.06, 10.04],
+    )
+    assert out[0]["start"] == pytest.approx(10.06)
+    assert out[0]["end"] == pytest.approx(12.06)
 
 
 def test_find_cue_range_overlaps() -> None:
@@ -55,6 +93,9 @@ def test_enrich_segment_cues_writes_multilingual_subs(tmp_path: Path) -> None:
     assert "你好" in zh_text
     assert "世界" in zh_text
     assert "再见" in zh_text
+    assert "00:00:00,000 --> 00:00:00,500" in zh_text
+    assert "00:00:00,500 --> 00:00:03,500" in zh_text
+    assert "00:00:03,500 --> 00:00:04,500" in zh_text
 
     row = stamp_row_cues({"title": "片段 1"}, meta)
     assert row["cue_start"] == 0

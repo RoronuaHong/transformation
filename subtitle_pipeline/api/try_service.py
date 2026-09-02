@@ -252,6 +252,8 @@ def compose_try_stages(
     want_enhance: bool = False,
     want_compress: bool = False,
     want_concat: bool = False,
+    want_remix: bool = False,
+    want_publish: bool = False,
 ) -> str:
     """Map workbench module toggles → batch stages string."""
     post: list[str] = []
@@ -261,6 +263,10 @@ def compose_try_stages(
         post.append("enhance")
     if want_compress:
         post.append("compress")
+    if want_remix:
+        post.append("remix")
+    if want_publish:
+        post.append("publish")
     if want_translate and want_notes:
         return "all" if not post else ",".join(["all", *post])
     parts: list[str] = []
@@ -299,6 +305,8 @@ def _media_workflow_fields(
     want_enhance: bool = False,
     want_compress: bool = False,
     want_concat: bool = False,
+    want_remix: bool = False,
+    want_publish: bool = False,
     media_opts: dict | None = None,
 ) -> dict:
     from media_ops import normalize_media_opts
@@ -310,11 +318,15 @@ def _media_workflow_fields(
         want_enhance=want_enhance,
         want_compress=want_compress,
         want_concat=want_concat,
+        want_remix=want_remix,
+        want_publish=want_publish,
     )
     return {
         "want_enhance": bool(want_enhance),
         "want_compress": bool(want_compress),
         "want_concat": bool(want_concat),
+        "want_remix": bool(want_remix),
+        "want_publish": bool(want_publish),
         "media_opts": normalize_media_opts(media_opts),
         "stages": stage_s,
     }
@@ -371,13 +383,13 @@ def resolve_try_intent(
     postproc = {
         p.strip()
         for p in explicit.replace(";", ",").split(",")
-        if p.strip() in ("enhance", "compress", "concat")
+        if p.strip() in ("enhance", "compress", "concat", "remix", "publish")
     }
     if postproc:
         parts: list[str] = []
         if "concat" in postproc:
             parts.append("clips")
-        for name in ("concat", "enhance", "compress"):
+        for name in ("concat", "enhance", "compress", "remix", "publish"):
             if name in postproc:
                 parts.append(name)
         return {
@@ -792,6 +804,7 @@ def infer_try_progress(
     concat_mp4 = work / "media" / "concat" / "concat.mp4"
     enhanced_mp4 = work / "media" / "enhance" / "enhanced.mp4"
     compressed_mp4 = work / "media" / "compress" / "compressed.mp4"
+    remix_mp4 = work / "media" / "remix" / "remix.mp4"
     if concat_mp4.is_file():
         percent = max(percent, 95)
         stage = "concat"
@@ -803,6 +816,15 @@ def infer_try_progress(
     if compressed_mp4.is_file():
         percent = max(percent, 97)
         stage = "compress"
+        detail = None
+    if remix_mp4.is_file():
+        percent = max(percent, 98)
+        stage = "remix"
+        detail = None
+    publish_report = work / "media" / "publish" / "report.json"
+    if publish_report.is_file():
+        percent = max(percent, 99)
+        stage = "publish"
         detail = None
 
     if status == "processing" and percent >= 94 and not has_frames and src_notes.is_file():
@@ -1376,6 +1398,8 @@ def submit_urls(
     want_enhance: bool = False,
     want_compress: bool = False,
     want_concat: bool = False,
+    want_remix: bool = False,
+    want_publish: bool = False,
     media_opts: dict | None = None,
 ) -> dict:
     probe = probe_urls(urls, pasted_cookies=sessionid)
@@ -1434,6 +1458,8 @@ def submit_urls(
             want_enhance=want_enhance,
             want_compress=want_compress,
             want_concat=want_concat,
+            want_remix=want_remix,
+            want_publish=want_publish,
             media_opts=media_opts,
         )
         jobs.append({"url": url, **out})
@@ -1473,6 +1499,8 @@ def submit_url(
     want_enhance: bool = False,
     want_compress: bool = False,
     want_concat: bool = False,
+    want_remix: bool = False,
+    want_publish: bool = False,
     media_opts: dict | None = None,
 ) -> dict:
     url = url.strip()
@@ -1561,10 +1589,12 @@ def submit_url(
                     want_enhance=want_enhance,
                     want_compress=want_compress,
                     want_concat=want_concat,
+                    want_remix=want_remix,
+                    want_publish=want_publish,
                     media_opts=media_opts,
                 )
             )
-        elif want_enhance or want_compress or want_concat:
+        elif want_enhance or want_compress or want_concat or want_remix or want_publish:
             post: list[str] = []
             if want_concat:
                 post.extend(["clips", "concat"])
@@ -1572,6 +1602,10 @@ def submit_url(
                 post.append("enhance")
             if want_compress:
                 post.append("compress")
+            if want_remix:
+                post.append("remix")
+            if want_publish:
+                post.append("publish")
             post_stages = ",".join(dict.fromkeys(post))
             wf = _media_workflow_fields(
                 want_translate=want_translate,
@@ -1581,6 +1615,8 @@ def submit_url(
                 want_enhance=want_enhance,
                 want_compress=want_compress,
                 want_concat=want_concat,
+                want_remix=want_remix,
+                want_publish=want_publish,
                 media_opts=media_opts,
             )
             wf["stages"] = post_stages
@@ -1674,6 +1710,8 @@ def submit_upload(
     want_enhance: bool = False,
     want_compress: bool = False,
     want_concat: bool = False,
+    want_remix: bool = False,
+    want_publish: bool = False,
     media_opts: dict | None = None,
 ) -> dict:
     if len(file_bytes) < 10_000:
@@ -1724,6 +1762,8 @@ def submit_upload(
             want_enhance=want_enhance,
             want_compress=want_compress,
             want_concat=want_concat,
+            want_remix=want_remix,
+            want_publish=want_publish,
             media_opts=media_opts,
         )
         queue.set_meta(
@@ -1765,6 +1805,8 @@ def submit_uploads(
     want_enhance: bool = False,
     want_compress: bool = False,
     want_concat: bool = False,
+    want_remix: bool = False,
+    want_publish: bool = False,
     media_opts: dict | None = None,
 ) -> dict:
     """Batch upload enqueue; chains like submit_urls."""
@@ -1807,6 +1849,8 @@ def submit_uploads(
             want_enhance=want_enhance,
             want_compress=want_compress,
             want_concat=want_concat,
+            want_remix=want_remix,
+            want_publish=want_publish,
             media_opts=media_opts,
         )
         jobs.append({"filename": name, **out})

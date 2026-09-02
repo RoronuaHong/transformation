@@ -117,12 +117,19 @@ export function resolveTryIntent(opts: {
       .replace(/;/g, ",")
       .split(",")
       .map((p) => p.trim())
-      .filter((p) => p === "enhance" || p === "compress" || p === "concat")
+      .filter(
+        (p) =>
+          p === "enhance" ||
+          p === "compress" ||
+          p === "concat" ||
+          p === "remix" ||
+          p === "publish"
+      )
   );
   if (postproc.size) {
     const parts: string[] = [];
     if (postproc.has("concat")) parts.push("clips");
-    for (const name of ["concat", "enhance", "compress"] as const) {
+    for (const name of ["concat", "enhance", "compress", "remix", "publish"] as const) {
       if (postproc.has(name)) parts.push(name);
     }
     return { intent: "media", stages: parts.join(","), reason: "postproc" };
@@ -167,6 +174,8 @@ export function composeTryStages(opts: {
   wantEnhance?: boolean;
   wantCompress?: boolean;
   wantConcat?: boolean;
+  wantRemix?: boolean;
+  wantPublish?: boolean;
 }): string {
   const {
     wantTranslate,
@@ -175,11 +184,15 @@ export function composeTryStages(opts: {
     wantEnhance = false,
     wantCompress = false,
     wantConcat = false,
+    wantRemix = false,
+    wantPublish = false,
   } = opts;
   const post: string[] = [];
   if (wantConcat) post.push("concat");
   if (wantEnhance) post.push("enhance");
   if (wantCompress) post.push("compress");
+  if (wantRemix) post.push("remix");
+  if (wantPublish) post.push("publish");
   if (wantTranslate && wantNotes) {
     return post.length ? ["all", ...post].join(",") : "all";
   }

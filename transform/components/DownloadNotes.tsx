@@ -1,5 +1,6 @@
 "use client";
 
+import type { ArticleCopy } from "@/lib/copy";
 import type { KeyPoint } from "@/lib/note-points";
 
 export type NotesDownloadPayload = {
@@ -11,6 +12,20 @@ export type NotesDownloadPayload = {
   hard_points?: KeyPoint[];
 };
 
+export type NotesDownloadHeadings = {
+  overview: string;
+  focuses: string;
+  keyPoints: string;
+  hardPoints: string;
+};
+
+const DEFAULT_HEADINGS: NotesDownloadHeadings = {
+  overview: "Overview",
+  focuses: "Core points",
+  keyPoints: "Key points",
+  hardPoints: "Watch-outs",
+};
+
 function stripMedia(points: KeyPoint[] | undefined): { title: string; detail: string }[] {
   return (points || [])
     .map((p) => ({
@@ -20,48 +35,93 @@ function stripMedia(points: KeyPoint[] | undefined): { title: string; detail: st
     .filter((p) => p.title);
 }
 
+function appendPointSection(
+  lines: string[],
+  heading: string,
+  points: { title: string; detail: string }[]
+) {
+  if (!points.length) return;
+  lines.push(`## ${heading}`, "");
+  for (const p of points) {
+    lines.push(p.detail ? `- **${p.title}** — ${p.detail}` : `- **${p.title}**`);
+  }
+  lines.push("");
+}
+
+export function formatNotesMarkdown(
+  notes: NotesDownloadPayload,
+  headings: NotesDownloadHeadings = DEFAULT_HEADINGS
+): string {
+  const lines: string[] = [];
+  const title = (notes.title || "").trim();
+  if (title) lines.push(`# ${title}`, "");
+
+  const oneLiner = (notes.one_liner || "").trim();
+  if (oneLiner) lines.push(`**${oneLiner}**`, "");
+
+  const summary = (notes.summary || "").trim();
+  if (summary) lines.push(`## ${headings.overview}`, "", summary, "");
+
+  appendPointSection(lines, headings.focuses, stripMedia(notes.focuses));
+  appendPointSection(lines, headings.keyPoints, stripMedia(notes.key_points));
+  appendPointSection(lines, headings.hardPoints, stripMedia(notes.hard_points));
+
+  return `${lines.join("\n").trim()}\n`;
+}
+
+export function hasNotesDownload(notes: NotesDownloadPayload): boolean {
+  const oneLiner = (notes.one_liner || "").trim();
+  const summary = (notes.summary || "").trim();
+  return (
+    Boolean(oneLiner || summary) ||
+    stripMedia(notes.focuses).length > 0 ||
+    stripMedia(notes.key_points).length > 0 ||
+    stripMedia(notes.hard_points).length > 0
+  );
+}
+
+function notesFilename(filename: string): string {
+  if (filename.endsWith(".md")) return filename;
+  if (filename.endsWith(".json")) return `${filename.slice(0, -5)}.md`;
+  return `${filename}.md`;
+}
+
+export function downloadNotesFile(
+  filename: string,
+  notes: NotesDownloadPayload,
+  headings?: NotesDownloadHeadings
+): void {
+  const body = formatNotesMarkdown(notes, headings);
+  const blob = new Blob([body], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = notesFilename(filename);
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 export function DownloadNotes({
   label,
   filename,
   notes,
+  headings,
+  className = "watch-btn secondary captions-dl-btn",
 }: {
   label: string;
   filename: string;
   notes: NotesDownloadPayload;
+  headings?: NotesDownloadHeadings;
+  className?: string;
 }) {
-  const focuses = stripMedia(notes.focuses);
-  const keyPoints = stripMedia(notes.key_points);
-  const hardPoints = stripMedia(notes.hard_points);
-  const oneLiner = (notes.one_liner || "").trim();
-  const summary = (notes.summary || "").trim();
-  const hasBody =
-    Boolean(oneLiner || summary) ||
-    focuses.length > 0 ||
-    keyPoints.length > 0 ||
-    hardPoints.length > 0;
-  if (!hasBody) return null;
-
-  function onDownload() {
-    const payload = {
-      title: (notes.title || "").trim() || undefined,
-      one_liner: oneLiner || undefined,
-      summary: summary || undefined,
-      focuses: focuses.length ? focuses : undefined,
-      key_points: keyPoints.length ? keyPoints : undefined,
-      hard_points: hardPoints.length ? hardPoints : undefined,
-    };
-    const body = `${JSON.stringify(payload, null, 2)}\n`;
-    const blob = new Blob([body], { type: "application/json;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename.endsWith(".json") ? filename : `${filename}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }
+  if (!hasNotesDownload(notes)) return null;
 
   return (
-    <button type="button" className="watch-btn secondary captions-dl-btn" onClick={onDownload}>
+    <button
+      type="button"
+      className={className}
+      onClick={() => downloadNotesFile(filename, notes, headings)}
+    >
       {label}
     </button>
   );

@@ -69,7 +69,7 @@ def _job_field(job, key: str, default=None):
 ALL_STAGES = frozenset(
     {"fetch", "asr", "translate", "notes", "localize", "frames", "clips"}
 )
-POSTPROC_STAGES = frozenset({"enhance", "compress", "concat"})
+POSTPROC_STAGES = frozenset({"enhance", "compress", "concat", "remix", "publish"})
 KNOWN_STAGES = ALL_STAGES | POSTPROC_STAGES
 MEDIA_ONLY_STAGES = frozenset({"frames", "clips"}) | POSTPROC_STAGES
 
@@ -81,8 +81,8 @@ def parse_stages(raw: str | None) -> frozenset[str]:
       all | media | clips | frames
       llm  = translate,notes,localize (reuse existing SRT)
       post = llm + frames,clips
-    Or comma list: translate,notes,localize,enhance,compress,concat
-    ``all`` does **not** include enhance/compress/concat (opt-in).
+      Or comma list: translate,notes,localize,enhance,compress,concat,remix,publish
+    ``all`` does **not** include enhance/compress/concat/remix/publish (opt-in).
     """
     s = (raw or "all").strip().lower()
     if s in ("", "all"):
@@ -97,7 +97,7 @@ def parse_stages(raw: str | None) -> frozenset[str]:
         return frozenset({"translate", "notes", "localize"})
     if s in ("post", "from-srt", "from_srt"):
         return frozenset({"translate", "notes", "localize", "frames", "clips"})
-    if s in ("enhance", "compress", "concat"):
+    if s in ("enhance", "compress", "concat", "remix", "publish"):
         return frozenset({s})
     parts = {p.strip() for p in s.replace(";", ",").split(",") if p.strip()}
     if "all" in parts:
@@ -262,6 +262,16 @@ def _run_job_postproc(
         media_opts=_job_media_opts(job),
         clip_ranges=clips,
     )
+    if "publish" in enabled:
+        from publish_ops import run_publish
+
+        opts = _job_media_opts(job)
+        plats = opts.get("publish_platforms") or []
+        pub = run_publish(
+            work_dir,
+            platforms=list(plats) if plats else None,
+        )
+        produced["publish"] = Path(pub["report"])
     print(f"[postproc] { {k: str(v.name) for k, v in produced.items()} }")
 
 

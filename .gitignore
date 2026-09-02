@@ -8,6 +8,8 @@ node_modules/
 
 # 浏览器自动化 profile（含登录态，敏感且体积大）
 pw_profile_52pojie/
+.codebuddy/
+.pytest_cache/
 
 # 凭证 / 环境变量
 *.env
@@ -74,6 +76,7 @@ __pycache__/
 下沉市场/
 国内电商平台/
 职场付费桌面软件/
+职场付费桌面软件清单/
 阿里嘎多与空泥基蛙/
 热门视频周报/
 
@@ -85,6 +88,7 @@ findings.md
 progress.md
 task_plan.md
 generate-report.js
+crawl_52pojie_green_tools.py
 虚拟资产*.docx
 
 # ── transform 运行时媒体 ──

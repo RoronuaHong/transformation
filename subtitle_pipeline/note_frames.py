@@ -853,6 +853,7 @@ def attach_video_range_clips(
         if clips_dir.is_dir():
             for old in clips_dir.glob("range_*.mp4"):
                 old.unlink(missing_ok=True)
+            (clips_dir / "clips_meta.json").unlink(missing_ok=True)
         summary["key_points"] = base_points
         notes_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
         _propagate_media_fields(work_dir, src, base_points)
@@ -916,6 +917,14 @@ def attach_video_range_clips(
                 if row:
                     by_i[i] = row
         range_rows = [by_i[i] for i in sorted(by_i)]
+
+    if range_rows:
+        from media_ops import write_clips_meta
+
+        write_clips_meta(
+            work_dir,
+            [(float(row["start_sec"]), float(row["end_sec"])) for row in range_rows],
+        )
 
     enriched_rows: list[dict] = []
     for i, row in enumerate(range_rows):

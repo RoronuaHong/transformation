@@ -2,6 +2,7 @@
 
 import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { DownloadNotes, hasNotesDownload, type NotesDownloadPayload } from "@/components/DownloadNotes";
 import { NoteList } from "@/components/NoteList";
 import type { ArticleCopy } from "@/lib/copy";
 import type { KeyPoint } from "@/lib/note-points";
@@ -13,6 +14,8 @@ export function NotesModal({
   keyPoints,
   hardPoints,
   clipLabel,
+  downloadFilename,
+  downloadNotes,
 }: {
   chrome: ArticleCopy;
   overview: string;
@@ -20,6 +23,8 @@ export function NotesModal({
   keyPoints: KeyPoint[];
   hardPoints: KeyPoint[];
   clipLabel?: string;
+  downloadFilename?: string;
+  downloadNotes?: NotesDownloadPayload;
 }) {
   const [open, setOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
@@ -51,6 +56,8 @@ export function NotesModal({
   }, [open]);
 
   if (!hasBody) return null;
+
+  const canDownload = Boolean(downloadFilename && downloadNotes && hasNotesDownload(downloadNotes));
 
   const dialog =
     open && mounted
@@ -113,6 +120,22 @@ export function NotesModal({
                   closeLabel={chrome.closeNotes}
                 />
               </div>
+              {canDownload && downloadFilename && downloadNotes ? (
+                <div className="notes-modal-foot">
+                  <DownloadNotes
+                    label={chrome.downloadNotes}
+                    filename={downloadFilename}
+                    notes={downloadNotes}
+                    headings={{
+                      overview: chrome.overview,
+                      focuses: chrome.focuses,
+                      keyPoints: chrome.keyPoints,
+                      hardPoints: chrome.hardPoints,
+                    }}
+                    className="watch-btn secondary notes-modal-download"
+                  />
+                </div>
+              ) : null}
             </div>
           </div>,
           document.body,

@@ -323,6 +323,8 @@ class TryUrlBody(BaseModel):
     want_enhance: bool = Field(default=False, description="WF-04 sharpen / mild upscale")
     want_compress: bool = Field(default=False, description="WF-05 shrink file size")
     want_concat: bool = Field(default=False, description="WF-06 concat clip ranges")
+    want_remix: bool = Field(default=False, description="WF-07 9:16 vertical_notes remix")
+    want_publish: bool = Field(default=False, description="WF-08 publish to bound accounts")
     media_opts: dict | None = Field(default=None, description="enhance_strength / compress_height / compress_crf")
 
 
@@ -356,6 +358,8 @@ class TryUrlsBody(BaseModel):
     want_enhance: bool = False
     want_compress: bool = False
     want_concat: bool = False
+    want_remix: bool = False
+    want_publish: bool = False
     media_opts: dict | None = None
 
 
@@ -365,6 +369,48 @@ def try_probe(body: TryProbeBody) -> dict:
 
     urls = [u.strip() for u in body.urls if (u or "").strip()]
     return probe_urls(urls, pasted_cookies=body.sessionid)
+
+
+class PublishBindBody(BaseModel):
+    platform: str
+    secret: str = Field(..., min_length=8)
+    label: str = ""
+    account_id: str = ""
+
+
+@app.get("/api/try/accounts")
+def try_accounts() -> dict:
+    from publish_accounts import list_slots, valid_bound
+
+    slots = list_slots()
+    return {"ok": True, "accounts": slots, "valid": valid_bound()}
+
+
+@app.post("/api/try/accounts")
+def try_accounts_bind(body: PublishBindBody) -> dict:
+    from publish_accounts import PublishAccountError, bind_account, list_slots
+
+    try:
+        rec = bind_account(
+            body.platform,
+            body.secret,
+            label=body.label,
+            account_id=body.account_id,
+        )
+    except PublishAccountError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"ok": True, "account": rec, "accounts": list_slots()}
+
+
+@app.delete("/api/try/accounts/{platform}")
+def try_accounts_unbind(platform: str) -> dict:
+    from publish_accounts import PublishAccountError, list_slots, unbind_account
+
+    try:
+        rec = unbind_account(platform)
+    except PublishAccountError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"ok": True, "account": rec, "accounts": list_slots()}
 
 
 @app.post("/api/try/urls")
@@ -402,6 +448,8 @@ def try_urls(body: TryUrlsBody, background: BackgroundTasks) -> dict:
         want_enhance=body.want_enhance,
         want_compress=body.want_compress,
         want_concat=body.want_concat,
+        want_remix=body.want_remix,
+        want_publish=body.want_publish,
         media_opts=body.media_opts,
     )
     if not out.get("ok"):
@@ -458,6 +506,15 @@ def try_url(body: TryUrlBody, background: BackgroundTasks) -> dict:
         gif_ranges=gif_dicts,
         sessionid=body.sessionid,
         langs=body.langs,
+        want_translate=body.want_translate,
+        want_notes=body.want_notes,
+        stages=body.stages,
+        want_enhance=body.want_enhance,
+        want_compress=body.want_compress,
+        want_concat=body.want_concat,
+        want_remix=body.want_remix,
+        want_publish=body.want_publish,
+        media_opts=body.media_opts,
     )
     if not out.get("ok"):
         raise HTTPException(status_code=400, detail=out.get("error") or "submit failed")
@@ -589,6 +646,8 @@ async def try_uploads(
     want_enhance: str = Form("false"),
     want_compress: str = Form("false"),
     want_concat: str = Form("false"),
+    want_remix: str = Form("false"),
+    want_publish: str = Form("false"),
     media_opts: str = Form("{}"),
     stages: str = Form(""),
 ) -> dict:
@@ -652,6 +711,8 @@ async def try_uploads(
     we = str(want_enhance or "false").strip().lower() not in ("0", "false", "no", "off")
     wc = str(want_compress or "false").strip().lower() not in ("0", "false", "no", "off")
     wcat = str(want_concat or "false").strip().lower() not in ("0", "false", "no", "off")
+    wrx = str(want_remix or "false").strip().lower() not in ("0", "false", "no", "off")
+    wp = str(want_publish or "false").strip().lower() not in ("0", "false", "no", "off")
     try:
         media_opts_dict = json.loads(media_opts or "{}")
         if not isinstance(media_opts_dict, dict):
@@ -674,6 +735,8 @@ async def try_uploads(
         want_enhance=we,
         want_compress=wc,
         want_concat=wcat,
+        want_remix=wrx,
+        want_publish=wp,
         media_opts=media_opts_dict,
     )
     if not out.get("ok"):

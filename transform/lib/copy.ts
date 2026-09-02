@@ -39,11 +39,8 @@ export type ArticleCopy = {
   previewClip: string;
   viewFrame: string;
   mediaPreview: string;
-  mediaOpen: string;
   mediaGifKind: string;
   mediaTabClip: string;
-  mediaBack: string;
-  mediaCount: string;
   clipsEmpty: string;
   segmentCaptions: string;
   downloadSegmentCaptions: string;
@@ -55,6 +52,7 @@ export type ArticleCopy = {
   unlocking: string;
   lockedHint: string;
   morePoints: string;
+  remixPlay: string;
 };
 
 export type NavCopy = {
@@ -218,14 +216,36 @@ export type TryCopy = {
   compressCrf: string;
   concatHint: string;
   concatNeedTwo: string;
+  remixSection: string;
+  remixHint: string;
   derivedTitle: string;
   derivedEnhance: string;
   derivedCompress: string;
   derivedConcat: string;
+  derivedRemix: string;
+  derivedRemixVtt: string;
   stageEnhance: string;
   stageCompress: string;
   stageConcat: string;
+  stageRemix: string;
+  stagePublish: string;
   clipsSection: string;
+  accountsSection: string;
+  accountsHint: string;
+  accountBind: string;
+  accountUnbind: string;
+  accountValid: string;
+  accountInvalid: string;
+  accountUnbound: string;
+  accountSecret: string;
+  accountLabel: string;
+  accountId: string;
+  accountDouyin: string;
+  accountKuaishou: string;
+  accountNeedBind: string;
+  publishSection: string;
+  publishHint: string;
+  derivedPublish: string;
 };
 
 export type AskCopy = {
@@ -273,7 +293,7 @@ const en: UiCopy = {
     feed: "Library",
     captions: "Line-by-line captions",
     downloadCaptions: "Download captions (.srt)",
-    downloadNotes: "Download notes (.json)",
+    downloadNotes: "Download notes",
     downloadClips: "Download MP4 clips",
     downloadClipItem: "Clip",
     downloadClipFile: "Download",
@@ -298,6 +318,7 @@ const en: UiCopy = {
     unlocking: "Ad playing",
     lockedHint: "Core points and watch-outs unlock after the ad.",
     morePoints: "{n} more points",
+    remixPlay: "9:16 remix (captions overlay, not burned in)",
   },
   nav: {
     language: "Language",
@@ -360,7 +381,7 @@ const en: UiCopy = {
     intentPost: "This run: re-translate {n} languages (reuse transcription).",
     intentClips: "This run: re-cut MP4 only (no ASR).",
     intentMedia: "This run: refresh GIF / MP4 only (no ASR).",
-    intentPostproc: "This run: enhance / compress / concat only (no ASR).",
+    intentPostproc: "This run: enhance / compress / concat / remix / publish only (no ASR).",
     intentNoop: "Already done — nothing to change. Open notes below.",
     intentCached: "Notes already exist for this link.",
     mediaSection: "Clips per item",
@@ -448,7 +469,7 @@ const en: UiCopy = {
     workflowRailPublish: "Publish",
     workflowRailLangs: "Languages",
     workflowRailSoon: "Soon",
-    workflowRailHint: "Tap to enable workflows for this run. Remix and publish are not built yet.",
+    workflowRailHint: "Tap to enable workflows for this run.",
     enhanceSection: "Enhance",
     enhanceHint: "Sharpen the working video (concat if you made one, otherwise the source). No AI upscaler in this version.",
     enhanceStrength: "Strength",
@@ -456,19 +477,44 @@ const en: UiCopy = {
     enhanceMedium: "Medium",
     enhanceStrong: "Strong (1.5× then cap)",
     compressSection: "Compress",
-    compressHint: "Re-encode with H.264 for a smaller file. Runs last on the working video.",
+    compressHint: "Re-encode with H.264 for a smaller file. Runs after concat/enhance, before remix.",
     compressHeight: "Max height",
     compressKeep: "Keep size",
     compressCrf: "Quality (CRF, lower = larger)",
     concatHint: "Joins this item’s MP4 ranges in order. Need at least two ranges.",
     concatNeedTwo: "Concat needs at least two MP4 ranges on each item.",
+    remixSection: "Remix",
+    remixHint:
+      "Makes a 9:16 vertical cut (1080×1920): notes one-liner as an overlay title, then the working clip. Captions follow the player clock — they are not burned into the file. No TTS.",
     derivedTitle: "Processed video",
     derivedEnhance: "Download enhanced MP4",
     derivedCompress: "Download compressed MP4",
     derivedConcat: "Download concatenated MP4",
+    derivedRemix: "Download 9:16 remix MP4",
+    derivedRemixVtt: "Download overlay captions (.vtt)",
     stageEnhance: "Enhancing video",
     stageCompress: "Compressing video",
     stageConcat: "Concatenating clips",
+    stageRemix: "Making 9:16 remix",
+    stagePublish: "Publishing",
+    accountsSection: "Publish accounts",
+    accountsHint:
+      "Separate from download cookies. Stored only on this machine; never exported to the site.",
+    accountBind: "Bind",
+    accountUnbind: "Unbind",
+    accountValid: "Valid",
+    accountInvalid: "Invalid",
+    accountUnbound: "Not bound",
+    accountSecret: "Creator cookies / session",
+    accountLabel: "Label",
+    accountId: "Account id",
+    accountDouyin: "Douyin",
+    accountKuaishou: "Kuaishou",
+    accountNeedBind: "Bind at least one valid Douyin or Kuaishou account before publishing.",
+    publishSection: "Publish",
+    publishHint:
+      "Writes a per-platform ledger from the remix (or working video). v1 stages files locally — Douyin/Kuaishou have no official third-party upload API.",
+    derivedPublish: "Download publish report",
   },
   ask: {
     lede: "Ask questions about the project knowledge base. Answers are grounded in indexed docs with sources cited.",
@@ -508,7 +554,7 @@ const zh: UiCopy = {
     feed: "列表",
     captions: "逐句字幕",
     downloadCaptions: "下载字幕（.srt）",
-    downloadNotes: "下载笔记（.json）",
+    downloadNotes: "下载笔记",
     downloadClips: "下载 MP4 片段",
     downloadClipItem: "片段",
     downloadClipFile: "下载",
@@ -532,6 +578,7 @@ const zh: UiCopy = {
     unlocking: "广告播放中",
     lockedHint: "重点和难点在广告后开放。",
     morePoints: "还有 {n} 条",
+    remixPlay: "9:16 二创（字幕叠在画面上，不烧进视频）",
   },
   nav: {
     language: "语言",
@@ -579,7 +626,7 @@ const zh: UiCopy = {
     moduleTranslate: "字幕翻译",
     moduleNotes: "结构化笔记",
     moduleClips: "切片",
-    modulesHint: "点顶部开关选择本轮要跑的工作流；灰色为未上线。",
+    modulesHint: "点顶部开关选择本轮工作流；灰色为未上线。",
     sourceSection: "来源",
     langsSection: "翻译语言",
     langsHint: "勾选字幕/笔记目标语。口播源语言会自动保留，即使这里没勾也保留源字幕与源笔记。",
@@ -593,7 +640,7 @@ const zh: UiCopy = {
     intentPost: "本次：重翻 {n} 种语言（复用转写，不重跑 Whisper）。",
     intentClips: "本次：只重切 MP4（不跑转写）。",
     intentMedia: "本次：只刷新 GIF / MP4（不跑转写）。",
-    intentPostproc: "本次：只跑增强 / 压缩 / 拼接（不跑转写）。",
+    intentPostproc: "本次：只跑增强 / 压缩 / 拼接 / 二创 / 发布（不跑转写）。",
     intentNoop: "已完成且无变更 — 可直接查看笔记。",
     intentCached: "该链接已生成过笔记。",
     mediaSection: "逐条裁剪",
@@ -682,7 +729,7 @@ const zh: UiCopy = {
     workflowRailPublish: "发布",
     workflowRailLangs: "语言",
     workflowRailSoon: "待上线",
-    workflowRailHint: "点选本轮要跑的工作流；二创 / 发布暂未开放。",
+    workflowRailHint: "点选本轮要跑的工作流。",
     enhanceSection: "画质增强",
     enhanceHint: "锐化当前工作视频（有拼接则用拼接结果，否则用源片）。本版不用 AI 超分。",
     enhanceStrength: "强度",
@@ -690,19 +737,43 @@ const zh: UiCopy = {
     enhanceMedium: "中",
     enhanceStrong: "强（先放大再限高）",
     compressSection: "缩小体积",
-    compressHint: "H.264 重编码压体积，接在增强或拼接之后。",
+    compressHint: "H.264 重编码压体积，接在增强或拼接之后、二创之前。",
     compressHeight: "高度上限",
     compressKeep: "保持原分辨率",
     compressCrf: "质量 CRF（越小越大）",
     concatHint: "按顺序拼接本条的 MP4 区间，至少两段。",
     concatNeedTwo: "拼接需要每条至少两段 MP4 区间。",
+    remixSection: "竖屏二创",
+    remixHint:
+      "做成 9:16（1080×1920）成片：片头用笔记一句话叠在画面上，正片为当前工作视频。字幕跟播放时钟走，不烧进文件。不做配音。",
     derivedTitle: "处理后的视频",
     derivedEnhance: "下载增强版 MP4",
     derivedCompress: "下载压缩版 MP4",
     derivedConcat: "下载拼接 MP4",
+    derivedRemix: "下载 9:16 二创 MP4",
+    derivedRemixVtt: "下载叠加字幕（.vtt）",
     stageEnhance: "画质增强",
     stageCompress: "压缩体积",
     stageConcat: "拼接片段",
+    stageRemix: "竖屏二创",
+    stagePublish: "发布台账",
+    accountsSection: "发布账号",
+    accountsHint: "与下载 cookies 分开。只存在本机，不会进站点导出。",
+    accountBind: "绑定",
+    accountUnbind: "解绑",
+    accountValid: "有效",
+    accountInvalid: "失效",
+    accountUnbound: "未绑定",
+    accountSecret: "创作者 cookies / 登录态",
+    accountLabel: "备注名",
+    accountId: "账号 id",
+    accountDouyin: "抖音",
+    accountKuaishou: "快手",
+    accountNeedBind: "发布前请先绑定至少一个有效的抖音或快手账号。",
+    publishSection: "一键发布",
+    publishHint:
+      "把二创（或当前工作视频）写入已绑定且有效的平台台账。v1 只做本机分发记录，不向抖音/快手服务器投稿（没有官方第三方上传接口）。",
+    derivedPublish: "下载发布报告",
   },
   ask: {
     lede: "基于项目知识库（Milvus 向量库 + 本地大模型）回答问题，答案附引用来源。",
@@ -742,7 +813,7 @@ const zhHant: UiCopy = {
     feed: "列表",
     captions: "逐句字幕",
     downloadCaptions: "下載字幕（.srt）",
-    downloadNotes: "下載筆記（.json）",
+    downloadNotes: "下載筆記",
     downloadClips: "下載 MP4 片段",
     downloadClipItem: "片段",
     downloadClipFile: "下載",
@@ -766,6 +837,7 @@ const zhHant: UiCopy = {
     unlocking: "廣告播放中",
     lockedHint: "重點和難點在廣告後開放。",
     morePoints: "還有 {n} 條",
+    remixPlay: "9:16 二創（字幕疊在畫面上，不燒進影片）",
   },
   nav: {
     language: "語言",
@@ -815,7 +887,7 @@ const zhHant: UiCopy = {
     workflowRailRemix: "二創",
     workflowRailPublish: "發布",
     workflowRailSoon: "待上線",
-    workflowRailHint: "點選本輪要跑的工作流；二創 / 發布暫未開放。",
+    workflowRailHint: "點選本輪要跑的工作流。",
   },
   ask: {
     lede: "基於專案知識庫（Milvus 向量庫 + 本地大模型）回答問題，答案附引用來源。",
