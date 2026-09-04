@@ -10,6 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from pathlib import Path
 from typing import Any
 
 from ..models import Candidate, TopicConfig
@@ -24,12 +25,41 @@ _UA = (
 
 def _cookie_header() -> str:
     env = (os.environ.get("BILI_COOKIE") or "").strip()
-    buvid = f"{uuid.uuid4()}".upper() + "infoc"
     if env:
         if "buvid3=" in env.lower():
             return env
+        buvid = f"{uuid.uuid4()}".upper() + "infoc"
         return f"buvid3={buvid}; {env}"
+    # Prefer logged-in Netscape cookies.txt (SESSDATA) for high-qn playurl.
+    header = _cookie_header_from_netscape()
+    if header:
+        return header
+    buvid = f"{uuid.uuid4()}".upper() + "infoc"
     return f"buvid3={buvid}"
+
+
+def _cookie_header_from_netscape() -> str:
+    """Load .bilibili.com cookies from subtitle_pipeline/cookies.txt if present."""
+    root = Path(__file__).resolve().parents[2]
+    path = Path(os.environ.get("VITUAL_COOKIES") or os.environ.get("YTDLP_COOKIES") or root / "cookies.txt")
+    if not path.is_file():
+        return ""
+    pairs: list[str] = []
+    try:
+        for ln in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not ln.strip() or ln.startswith("#"):
+                continue
+            parts = ln.split("\t")
+            if len(parts) < 7:
+                continue
+            domain, _flag, _path, _secure, _exp, name, value = parts[:7]
+            if "bilibili" not in domain.lower():
+                continue
+            if name and value:
+                pairs.append(f"{name}={value}")
+    except OSError:
+        return ""
+    return "; ".join(pairs)
 
 
 def bili_get_json(url: str, timeout: int = 10) -> dict[str, Any]:

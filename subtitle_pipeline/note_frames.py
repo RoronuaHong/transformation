@@ -188,7 +188,7 @@ def extract_video_clip(
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
     start = max(0.0, float(start_sec))
     end = max(start + 0.4, float(end_sec))
-    cap = max(1.0, min(30.0, float(max_dur)))
+    cap = max(1.0, min(60.0, float(max_dur)))
     if end - start > cap:
         end = start + cap
     dur = max(0.4, end - start)
@@ -867,6 +867,9 @@ def attach_video_range_clips(
     video = video or existing_source_video(work_dir)
     if video is None:
         raise FileNotFoundError(f"no source video in {work_dir}")
+    from media_ops import ensure_video_has_audio
+
+    video = ensure_video_has_audio(work_dir, video)
     clips_dir.mkdir(parents=True, exist_ok=True)
 
     range_rows: list[dict] = []

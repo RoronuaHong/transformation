@@ -29,9 +29,11 @@ function derivedRemix(slug: string) {
   const dir = path.join(process.cwd(), "public", "derived", slug);
   if (!existsSync(path.join(dir, "remix.mp4"))) return null;
   const cues = path.join(dir, "remix_cues.json");
+  const vtt = path.join(dir, "remix.vtt");
   return {
     video: `/derived/${slug}/remix.mp4`,
     cues: existsSync(cues) ? `/derived/${slug}/remix_cues.json` : undefined,
+    vtt: existsSync(vtt) ? `/derived/${slug}/remix.vtt` : undefined,
   };
 }
 
@@ -157,7 +159,12 @@ export default async function TopicArticlePage({ params }: { params: Promise<Par
         {a.summaries[locale] ? <p className="lede">{a.summaries[locale]}</p> : null}
 
         {remix ? (
-          <RemixPlayer src={remix.video} cuesUrl={remix.cues} label={chrome.remixPlay} />
+          <RemixPlayer
+            src={remix.video}
+            cuesUrl={remix.cues}
+            vttUrl={remix.vtt}
+            label={chrome.remixPlay}
+          />
         ) : null}
 
         {previewGifs.length || previewClips.length ? (

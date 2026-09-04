@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type OverlayCue = {
   start: number;
@@ -16,19 +16,57 @@ function activeCue(cues: OverlayCue[], t: number): OverlayCue | null {
   return null;
 }
 
+function cueKey(cue: OverlayCue | null): string {
+  if (!cue) return "";
+  return `${cue.kind}:${cue.start}:${cue.text}`;
+}
+
+function kindFromTrackCue(cue: TextTrackCue): "title" | "caption" {
+  const id = String(cue.id || "").toLowerCase();
+  return id.includes("title") ? "title" : "caption";
+}
+
+function fromActiveCues(track: TextTrack): OverlayCue | null {
+  const list = track.activeCues;
+  if (!list || list.length === 0) return null;
+  let chosen: OverlayCue | null = null;
+  for (let i = 0; i < list.length; i += 1) {
+    const row = list[i];
+    const text = "text" in row ? String((row as VTTCue).text || "").trim() : "";
+    if (!text) continue;
+    const next: OverlayCue = {
+      start: row.startTime,
+      end: row.endTime,
+      kind: kindFromTrackCue(row),
+      text,
+    };
+    if (next.kind === "caption") return next;
+    chosen = next;
+  }
+  return chosen;
+}
+
 export function RemixPlayer({
   src,
   cuesUrl,
+  vttUrl,
   label,
 }: {
   src: string;
   cuesUrl?: string;
+  vttUrl?: string;
   label: string;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const cuesRef = useRef<OverlayCue[]>([]);
+  const paintedRef = useRef("");
   const [cues, setCues] = useState<OverlayCue[]>([]);
-  const [now, setNow] = useState(0);
-  const cue = activeCue(cues, now);
+  const [cue, setCue] = useState<OverlayCue | null>(null);
+
+  useEffect(() => {
+    cuesRef.current = cues;
+    paintedRef.current = "";
+  }, [cues]);
 
   useEffect(() => {
     if (!cuesUrl) {
@@ -59,29 +97,76 @@ export function RemixPlayer({
     };
   }, [cuesUrl]);
 
-  const syncTime = useCallback(() => {
-    const el = videoRef.current;
-    if (!el) return;
-    setNow(el.currentTime || 0);
-  }, []);
-
   useEffect(() => {
     const el = videoRef.current;
     if (!el) return;
+
+    const paintCue = (next: OverlayCue | null) => {
+      const key = cueKey(next);
+      if (key === paintedRef.current) return;
+      paintedRef.current = key;
+      setCue(next);
+    };
+
+    const paintFromTrack = (track: TextTrack) => {
+      paintCue(fromActiveCues(track));
+    };
+
+    const paintFromJson = () => {
+      paintCue(activeCue(cuesRef.current, el.currentTime || 0));
+    };
+
+    const bindTrack = (track: TextTrack) => {
+      track.mode = "hidden";
+      const onCue = () => paintFromTrack(track);
+      track.addEventListener("cuechange", onCue);
+      onCue();
+      return () => track.removeEventListener("cuechange", onCue);
+    };
+
+    let unbindTrack: (() => void) | undefined;
+    const attach = () => {
+      const track = el.textTracks[0];
+      if (!track) return;
+      unbindTrack?.();
+      unbindTrack = bindTrack(track);
+    };
+
+    el.textTracks.addEventListener("addtrack", attach);
+    attach();
+
+    const onTime = () => {
+      const track = el.textTracks[0];
+      if (vttUrl && track && track.cues && track.cues.length > 0) {
+        paintFromTrack(track);
+        return;
+      }
+      paintFromJson();
+    };
+
     let raf = 0;
     const tick = () => {
-      if (!el.paused && !el.ended) setNow(el.currentTime || 0);
+      if (!el.paused && !el.ended) onTime();
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
-    el.addEventListener("timeupdate", syncTime);
-    el.addEventListener("seeked", syncTime);
+
+    el.addEventListener("timeupdate", onTime);
+    el.addEventListener("seeked", onTime);
+    el.addEventListener("pause", onTime);
+    el.addEventListener("play", onTime);
+    onTime();
+
     return () => {
-      cancelAnimationFrame(raf);
-      el.removeEventListener("timeupdate", syncTime);
-      el.removeEventListener("seeked", syncTime);
+      if (raf) cancelAnimationFrame(raf);
+      unbindTrack?.();
+      el.textTracks.removeEventListener("addtrack", attach);
+      el.removeEventListener("timeupdate", onTime);
+      el.removeEventListener("seeked", onTime);
+      el.removeEventListener("pause", onTime);
+      el.removeEventListener("play", onTime);
     };
-  }, [syncTime, src]);
+  }, [src, cues, vttUrl]);
 
   return (
     <figure className="remix-player">
@@ -94,7 +179,11 @@ export function RemixPlayer({
           controls
           playsInline
           preload="metadata"
-        />
+        >
+          {vttUrl ? (
+            <track kind="captions" src={vttUrl} srcLang="zh" default />
+          ) : null}
+        </video>
         {cue ? (
           <div
             className={

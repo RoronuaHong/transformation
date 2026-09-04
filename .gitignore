@@ -25,7 +25,11 @@ subtitle_pipeline/llm.yaml
 .tmp-bili2/
 .tmp-bili3/
 .tmp-v2ray-*.py
+subtitle_pipeline/_tmp*.py
 .planning/
+
+# 导出旁路产物（export-site 生成，勿提交 smoke 样例）
+transform/public/derived/
 
 # 发现队列 / 本机数据库
 subtitle_pipeline/data/
@@ -34,6 +38,8 @@ subtitle_pipeline/downloads/
 
 # 运行时产物
 output/
+subtitle_pipeline/models/*.pth
+*.pth
 
 # 系统 / 编辑器
 .DS_Store

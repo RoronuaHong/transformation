@@ -39,8 +39,11 @@ export type ArticleCopy = {
   previewClip: string;
   viewFrame: string;
   mediaPreview: string;
+  mediaOpen: string;
   mediaGifKind: string;
   mediaTabClip: string;
+  mediaBack: string;
+  mediaCount: string;
   clipsEmpty: string;
   segmentCaptions: string;
   downloadSegmentCaptions: string;
@@ -195,6 +198,7 @@ export type TryCopy = {
   workflowRailTranslate: string;
   workflowRailNotes: string;
   workflowRailClips: string;
+  workflowRailDehardsub: string;
   workflowRailEnhance: string;
   workflowRailCompress: string;
   workflowRailConcat: string;
@@ -462,6 +466,7 @@ const en: UiCopy = {
     workflowRailTranslate: "Translate",
     workflowRailNotes: "Notes",
     workflowRailClips: "Clips",
+    workflowRailDehardsub: "Unburn captions",
     workflowRailEnhance: "Enhance",
     workflowRailCompress: "Compress",
     workflowRailConcat: "Concat",
@@ -722,6 +727,7 @@ const zh: UiCopy = {
     workflowRailTranslate: "翻译",
     workflowRailNotes: "笔记",
     workflowRailClips: "切片",
+    workflowRailDehardsub: "去烧录字幕",
     workflowRailEnhance: "增强",
     workflowRailCompress: "压缩",
     workflowRailConcat: "拼接",
@@ -881,6 +887,7 @@ const zhHant: UiCopy = {
     workflowRailTranslate: "翻譯",
     workflowRailNotes: "筆記",
     workflowRailClips: "切片",
+    workflowRailDehardsub: "去燒錄字幕",
     workflowRailEnhance: "增強",
     workflowRailCompress: "壓縮",
     workflowRailConcat: "拼接",

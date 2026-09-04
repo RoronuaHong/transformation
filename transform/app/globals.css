@@ -3301,6 +3301,11 @@ html[data-theme="dark"] .theme-toggle-track {
   background: #111;
 }
 
+.remix-stage-video::cue {
+  visibility: hidden;
+  opacity: 0;
+}
+
 .remix-overlay {
   position: absolute;
   left: 1.05rem;

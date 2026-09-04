@@ -93,6 +93,27 @@ def find_ffmpeg() -> str:
     return _find()
 
 
+def _file_has_video_stream(path: Path) -> bool:
+    """True when ffmpeg reports a video stream (audio-only .webm must not count)."""
+    try:
+        ffmpeg = find_ffmpeg()
+    except FileNotFoundError:
+        return False
+    try:
+        r = subprocess.run(
+            [ffmpeg, "-hide_banner", "-i", str(path)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+    except Exception:
+        return False
+    blob = f"{r.stderr or ''}\n{r.stdout or ''}"
+    return bool(re.search(r"Stream #.*Video:", blob))
+
+
 def detect_bvid(url: str) -> str | None:
     m = re.search(r"(BV[\w]+)", url, re.I)
     return m.group(1) if m else None
@@ -400,13 +421,127 @@ def playurl_media_url(payload: dict[str, Any], *, prefer: str = "html5") -> str:
     return url
 
 
-def resolve_bilibili_api_download(url: str) -> dict[str, Any]:
-    """Resolve title/cid and a muxed mp4 URL via official APIs (skips the 412 HTML gate).
+# Prefer highest available H.264 + AAC (yt-dlp + Bilibili API fallback).
+# Ceiling 2160 keeps 4K in play; still prefer AVC+AAC over HEVC when tied.
+DEFAULT_VIDEO_MAX_HEIGHT = 2160
+# Bilibili qn: 127=8K … 120=4K, 116=1080P60, 112=1080P+, 80=1080P, 64=720P, …
+BILI_QN_PREFER = (127, 126, 125, 120, 116, 112, 80, 74, 64, 32, 16)
+BILI_QN_HEIGHT = {
+    16: 360,
+    32: 480,
+    64: 720,
+    74: 720,
+    80: 1080,
+    112: 1080,
+    116: 1080,
+    120: 2160,
+    125: 2160,
+    126: 2160,
+    127: 4320,
+}
 
-    :param url: watch URL containing a BV id
-    :return: meta with `bvid`, `cid`, `aid`, `title`, `duration`, `media_url`
-    :raises ValueError: URL has no BV id
-    :raises RuntimeError: view/playurl API failed
+
+def yt_dlp_video_format(max_height: int = DEFAULT_VIDEO_MAX_HEIGHT) -> str:
+    """yt-dlp -f string: prefer ≤max_height H.264 + AAC, then degrade gracefully."""
+    h = max(360, int(max_height))
+    # Portrait: also allow width<=h (e.g. 1080x1920). Prefer AVC + m4a/AAC.
+    return (
+        f"bv*[height<={h}][vcodec^=avc1]+ba[acodec^=mp4a]/"
+        f"bv*[height<={h}][vcodec^=avc]+ba[ext=m4a]/"
+        f"bv*[width<={h}][vcodec^=avc1]+ba[acodec^=mp4a]/"
+        f"bv*[height<={h}][vcodec^=avc]+ba/"
+        f"bv*[height<={h}]+ba[ext=m4a]/"
+        f"bv*[height<={h}]+ba/"
+        f"b[height<={h}][vcodec^=avc][acodec^=mp4a]/"
+        f"b[height<={h}]/"
+        f"bv*+ba/b"
+    )
+
+
+def _pick_dash_avc_aac(
+    dash: dict[str, Any],
+    *,
+    max_height: int = DEFAULT_VIDEO_MAX_HEIGHT,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Pick best H.264 video ≤ max_height and best AAC audio from a dash object."""
+    videos = list(dash.get("video") or [])
+    audios = list(dash.get("audio") or [])
+    if not videos or not audios:
+        return None
+    avc = [
+        v
+        for v in videos
+        if str(v.get("codecs") or "").lower().startswith(("avc", "avc1"))
+        and int(v.get("height") or 0) <= int(max_height)
+        and int(v.get("height") or 0) > 0
+    ]
+    if not avc:
+        avc = [
+            v
+            for v in videos
+            if int(v.get("height") or 0) <= int(max_height) and int(v.get("height") or 0) > 0
+        ]
+    if not avc:
+        return None
+    best_v = max(
+        avc,
+        key=lambda v: (int(v.get("height") or 0), int(v.get("bandwidth") or 0)),
+    )
+    aac = [
+        a
+        for a in audios
+        if "mp4a" in str(a.get("codecs") or "").lower()
+        or str(a.get("mimeType") or a.get("mime_type") or "").lower().find("mp4") >= 0
+    ]
+    pool = aac or audios
+    best_a = max(pool, key=lambda a: int(a.get("bandwidth") or 0))
+    if not _first_media_url(best_v) or not _first_media_url(best_a):
+        return None
+    return best_v, best_a
+
+
+def _ffmpeg_mux_copy(video: Path, audio: Path, dest: Path) -> None:
+    """Mux video+audio streams into mp4 without re-encode when possible."""
+    ffmpeg = find_ffmpeg()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".mux.mp4")
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(video),
+        "-i",
+        str(audio),
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-c",
+        "copy",
+        "-shortest",
+        "-movflags",
+        "+faststart",
+        str(tmp),
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+    if not tmp.is_file() or tmp.stat().st_size < 1000:
+        raise RuntimeError(f"ffmpeg mux produced empty file: {tmp}")
+    tmp.replace(dest)
+
+
+def resolve_bilibili_api_download(
+    url: str,
+    *,
+    max_height: int = DEFAULT_VIDEO_MAX_HEIGHT,
+) -> dict[str, Any]:
+    """Resolve title/cid and best playable media via official APIs (skips 412 HTML gate).
+
+    Prefers ≤max_height H.264 + AAC. Tries html5 muxed qn (80→16), then DASH AVC+AAC.
+
+    :return: meta with either ``media_url`` (muxed) or ``video_url``+``audio_url`` (dash)
     """
     bvid = detect_bvid(url)
     if not bvid:
@@ -421,27 +556,154 @@ def resolve_bilibili_api_download(url: str) -> dict[str, Any]:
     cid = data.get("cid")
     if not cid:
         raise RuntimeError("bilibili view api missing cid")
-    query = urlencode(
-        {
-            "bvid": bvid,
-            "cid": int(cid),
-            "qn": 32,
-            "type": "mp4",
-            "platform": "html5",
-        }
-    )
-    play = bili_get_json(f"https://api.bilibili.com/x/player/playurl?{query}", timeout=15)
-    if play.get("code") != 0:
-        raise RuntimeError(f"bilibili playurl api failed: {play.get('message')}")
-    return {
+    dim = data.get("dimension") or {}
+    base = {
         "bvid": str(data.get("bvid") or bvid),
         "aid": data.get("aid"),
         "cid": int(cid),
         "title": data.get("title"),
         "duration": data.get("duration"),
-        "media_url": playurl_media_url(play, prefer="html5"),
         "extractor": "bilibili-api",
+        "source_dimension": dim,
     }
+
+    best_mux: dict[str, Any] | None = None
+    for qn in BILI_QN_PREFER:
+        query = urlencode(
+            {
+                "bvid": bvid,
+                "cid": int(cid),
+                "qn": int(qn),
+                "type": "mp4",
+                "platform": "html5",
+                "high_quality": 1,
+            }
+        )
+        play = bili_get_json(f"https://api.bilibili.com/x/player/playurl?{query}", timeout=15)
+        if play.get("code") != 0:
+            continue
+        pdata = play.get("data") or {}
+        try:
+            media_url = playurl_media_url(play, prefer="html5")
+        except RuntimeError:
+            continue
+        quality = int(pdata.get("quality") or 0)
+        size = int(((pdata.get("durl") or [{}])[0] or {}).get("size") or 0)
+        cand = {
+            "mode": "muxed",
+            "media_url": media_url,
+            "quality": quality,
+            "qn_requested": qn,
+            "size": size,
+            "format": pdata.get("format"),
+        }
+        if best_mux is None or quality > int(best_mux["quality"]) or (
+            quality == int(best_mux["quality"]) and size > int(best_mux.get("size") or 0)
+        ):
+            best_mux = cand
+        if quality >= 116:
+            break
+
+    best_dash: dict[str, Any] | None = None
+    # fnval=4048 unlocks dash + 4K/HDR streams when login allows.
+    query = urlencode(
+        {
+            "bvid": bvid,
+            "cid": int(cid),
+            "qn": 127,
+            "fnval": 4048,
+            "fourk": 1,
+        }
+    )
+    play = bili_get_json(f"https://api.bilibili.com/x/player/playurl?{query}", timeout=15)
+    if play.get("code") == 0:
+        pdata = play.get("data") or {}
+        picked = _pick_dash_avc_aac(pdata.get("dash") or {}, max_height=max_height)
+        if picked:
+            vv, aa = picked
+            best_dash = {
+                "mode": "dash",
+                "video_url": _first_media_url(vv),
+                "audio_url": _first_media_url(aa),
+                "quality": int(vv.get("id") or 0),
+                "width": int(vv.get("width") or 0),
+                "height": int(vv.get("height") or 0),
+                "vcodec": vv.get("codecs"),
+                "acodec": aa.get("codecs"),
+                "bandwidth": int(vv.get("bandwidth") or 0),
+            }
+
+    # Prefer whichever yields higher vertical resolution / qn.
+    use_dash = False
+    if best_dash and best_mux:
+        dash_h = int(best_dash.get("height") or 0)
+        mux_h = BILI_QN_HEIGHT.get(int(best_mux["quality"]), 0)
+        use_dash = dash_h > mux_h
+    elif best_dash and not best_mux:
+        use_dash = True
+
+    if use_dash and best_dash:
+        out = {**base, **best_dash}
+        print(
+            f"[fetch] bili playurl dash "
+            f"{out.get('width')}x{out.get('height')} {out.get('vcodec')}+{out.get('acodec')}"
+        )
+        return out
+    if best_mux:
+        out = {**base, **best_mux}
+        print(
+            f"[fetch] bili playurl muxed qn={out.get('quality')} "
+            f"format={out.get('format')} size={out.get('size')}"
+        )
+        return out
+    raise RuntimeError("bilibili playurl returned no muxed or dash streams")
+
+
+def download_bilibili_api_source(
+    url: str,
+    dest: Path,
+    *,
+    max_height: int = DEFAULT_VIDEO_MAX_HEIGHT,
+) -> dict[str, Any]:
+    """Download best Bilibili source into ``dest`` (H.264+AAC preferred)."""
+    info = resolve_bilibili_api_download(url, max_height=max_height)
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if info.get("mode") == "dash":
+        v_part = dest.with_suffix(".v.part")
+        a_part = dest.with_suffix(".a.part")
+        try:
+            print("[fetch] bili dash video …")
+            _http_download(str(info["video_url"]), v_part, headers=bili_browser_headers())
+            print("[fetch] bili dash audio …")
+            _http_download(str(info["audio_url"]), a_part, headers=bili_browser_headers())
+            _ffmpeg_mux_copy(v_part, a_part, dest)
+        finally:
+            for p in (v_part, a_part):
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
+    else:
+        _http_download(str(info["media_url"]), dest, headers=bili_browser_headers())
+    info["source_file"] = str(dest)
+    info["bytes"] = dest.stat().st_size if dest.is_file() else 0
+    if not info.get("height"):
+        try:
+            ffmpeg = find_ffmpeg()
+            r = subprocess.run(
+                [ffmpeg, "-hide_banner", "-i", str(dest)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            m = re.search(r"(\d{2,5})x(\d{2,5})", (r.stderr or "") + (r.stdout or ""))
+            if m:
+                info["width"], info["height"] = int(m.group(1)), int(m.group(2))
+        except Exception:
+            pass
+    return info
 
 
 def _http_download(
@@ -518,11 +780,10 @@ def _ffmpeg_to_wav(src: Path, wav: Path) -> None:
 
 
 def _fetch_bilibili_api_to_wav(url: str, media: Path, wav: Path, meta_path: Path) -> dict[str, Any]:
-    """Download muxed mp4 via playurl API, then extract 16 kHz mono WAV."""
-    info = resolve_bilibili_api_download(url)
+    """Download best playable mp4 via playurl API, then extract 16 kHz mono WAV."""
     src = media / "source.mp4"
-    print("[fetch] bili 412 fallback → playurl API")
-    _http_download(info["media_url"], src, headers=bili_browser_headers())
+    print("[fetch] bili 412 fallback → playurl API (prefer ≤1080p H.264+AAC)")
+    info = download_bilibili_api_source(url, src, max_height=DEFAULT_VIDEO_MAX_HEIGHT)
     print(f"[fetch] source -> {src.name} ({src.stat().st_size} bytes)")
     _ffmpeg_to_wav(src, wav)
     print(f"[fetch] wav -> {wav}")
@@ -538,6 +799,13 @@ def _fetch_bilibili_api_to_wav(url: str, media: Path, wav: Path, meta_path: Path
         "wav": str(wav),
         "cid": info["cid"],
         "aid": info["aid"],
+        "quality": info.get("quality"),
+        "mode": info.get("mode"),
+        "width": info.get("width"),
+        "height": info.get("height"),
+        "format": info.get("format"),
+        "vcodec": info.get("vcodec"),
+        "acodec": info.get("acodec"),
     }
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[out] {meta_path}")
@@ -599,11 +867,37 @@ def _looks_like_netscape(text: str) -> bool:
     return False
 
 
+def _looks_like_cookie_header(text: str) -> bool:
+    """Detect browser Cookie header: ``a=b; c=d; …`` (multi-pair)."""
+    if "\t" in text or text.lstrip().startswith("#"):
+        return False
+    if ";" not in text or "=" not in text:
+        return False
+    parts = [p.strip() for p in text.split(";") if p.strip()]
+    if len(parts) < 2:
+        return False
+    return sum(1 for p in parts if "=" in p) >= 2
+
+
+def _parse_cookie_header(text: str) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    for part in text.split(";"):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        name, _, value = part.partition("=")
+        name = name.strip()
+        value = value.strip()
+        if name:
+            pairs.append((name, value))
+    return pairs
+
+
 def upsert_try_cookies(raw: str, *, platform: str, url: str = "") -> Path:
     """Merge user-pasted cookies into local Netscape cookies.txt.
 
-    Accepts either a full Netscape cookie dump, or a single session cookie value
-    (written as sessionid for the URL's platform domain).
+    Accepts Netscape dump, Cookie header (``a=b; c=d``), or a single name=value /
+    session cookie for the URL's platform domain.
     """
     text = (raw or "").strip()
     if not text:
@@ -627,6 +921,35 @@ def upsert_try_cookies(raw: str, *, platform: str, url: str = "") -> Path:
         print(f"[cookies] merged Netscape paste → {path.name} (+{len(pasted)} lines)")
         return path
 
+    domain = cookie_domain_for(platform, url)
+    host = domain if domain.startswith(".") else f".{domain}"
+    exp = int(time.time()) + 365 * 24 * 3600
+
+    if _looks_like_cookie_header(text):
+        pairs = _parse_cookie_header(text)
+        if not pairs:
+            raise ValueError("cookie header parsed empty")
+        replace_names = {n for n, _ in pairs}
+        lines: list[str] = []
+        if path.is_file():
+            for ln in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                parts = ln.split("\t")
+                if len(parts) >= 7 and parts[5] in replace_names and parts[0] == host:
+                    continue
+                lines.append(ln)
+        if not lines or not lines[0].startswith("#"):
+            lines = [
+                "# Netscape HTTP Cookie File",
+                "# https://curl.se/docs/http-cookies.html",
+                "",
+                *lines,
+            ]
+        for name, value in pairs:
+            lines.append(f"{host}\tTRUE\t/\tTRUE\t{exp}\t{name}\t{value}")
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        print(f"[cookies] upserted Cookie header ({len(pairs)} pairs)@{host} → {path.name}")
+        return path
+
     name = "sessionid"
     value = text
     if "\n" not in text and "\t" not in text and "=" in text and not text.startswith("#"):
@@ -637,13 +960,11 @@ def upsert_try_cookies(raw: str, *, platform: str, url: str = "") -> Path:
     if len(value) < 8:
         raise ValueError("cookie value looks too short")
 
-    domain = cookie_domain_for(platform, url)
-    host = domain if domain.startswith(".") else f".{domain}"
     replace_names = {name}
     if name == "sessionid":
         replace_names.add("sessionid_ss")
 
-    lines: list[str] = []
+    lines = []
     if path.is_file():
         for ln in path.read_text(encoding="utf-8", errors="replace").splitlines():
             parts = ln.split("\t")
@@ -657,7 +978,6 @@ def upsert_try_cookies(raw: str, *, platform: str, url: str = "") -> Path:
             "",
             *lines,
         ]
-    exp = int(time.time()) + 365 * 24 * 3600
     for n in sorted(replace_names):
         lines.append(f"{host}\tTRUE\t/\tTRUE\t{exp}\t{n}\t{value}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -993,13 +1313,14 @@ def ensure_source_video(
     cookies_from_browser: str | None = "chrome",
     cookies_file: Path | None = None,
     force: bool = False,
-    max_height: int = 480,
+    max_height: int = DEFAULT_VIDEO_MAX_HEIGHT,
 ) -> Path:
-    """Download a low-res muxed video for keyframe stills (does not replace wav)."""
+    """Download a muxed video (prefer ≤1080p H.264+AAC) into media/source.mp4."""
     out_dir = Path(out_dir)
     media = out_dir / "media"
     media.mkdir(parents=True, exist_ok=True)
     target = media / "source.mp4"
+    max_height = max(360, int(max_height or DEFAULT_VIDEO_MAX_HEIGHT))
 
     if target.is_file() and target.stat().st_size > 50_000 and not force:
         print(f"[fetch-video] reuse -> {target}")
@@ -1013,8 +1334,9 @@ def ensure_source_video(
             for p in sorted(folder.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
                 if p.is_file() and p.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov"}:
                     if p.resolve() != target.resolve() and p.stat().st_size > 50_000:
-                        print(f"[fetch-video] found -> {p}")
-                        return p
+                        if _file_has_video_stream(p):
+                            print(f"[fetch-video] found -> {p}")
+                            return p
 
     platform = detect_platform(url)
     print(f"[fetch-video] platform={platform} url={url} max_height={max_height}")
@@ -1043,19 +1365,13 @@ def ensure_source_video(
         clear_proxy_env()
         print("[fetch-video] direct connect (no proxy)")
 
-    # Bilibili: separate video/audio; portrait makes height filters miss 360p (360x640).
-    # Prefer explicit low-res AVC + m4a, then generic worst video + best audio.
-    fmt = (
-        "bv*[width<=480][vcodec^=avc]+ba[ext=m4a]/"
-        "bv*[width<=540]+ba/"
-        "wv*[vcodec^=avc]+ba/wv*+ba/"
-        "worstvideo+bestaudio/worst"
-    )
+    fmt = yt_dlp_video_format(max_height)
     tmpl = str(media / "source_video.%(ext)s")
     if cookies_file:
         print(f"[fetch-video] cookies-file={cookies_file}")
     elif cookies_from_browser:
         print(f"[fetch-video] cookies-from-browser={cookies_from_browser}")
+    print(f"[fetch-video] format={fmt}")
     base = _yt_dlp_cmd() + js_rt + proxy_args + [
         "--no-playlist",
         "--newline",
@@ -1104,8 +1420,7 @@ def ensure_source_video(
         err = (result.stderr or result.stdout or "").strip()
         if platform == "bilibili" and is_bilibili_412(err):
             print("[fetch-video] yt-dlp 412, fallback to playurl API")
-            info = resolve_bilibili_api_download(url)
-            _http_download(info["media_url"], target, headers=bili_browser_headers())
+            download_bilibili_api_source(url, target, max_height=max_height)
             print(f"[fetch-video] source -> {target.name} ({target.stat().st_size} bytes)")
             return target
         raise RuntimeError("yt-dlp video download failed.\n" + err[-1500:])

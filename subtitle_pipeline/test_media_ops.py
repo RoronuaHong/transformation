@@ -236,6 +236,158 @@ def test_remix_vertical_ffmpeg(tmp_path: Path) -> None:
     assert f"{REMIX_W}x{REMIX_H}" in blob
 
 
+def test_write_clips_meta_stores_probed_duration(tmp_path: Path, monkeypatch) -> None:
+    from media_ops import clips_meta_path, write_clips_meta
+
+    clips = tmp_path / "media" / "clips"
+    clips.mkdir(parents=True)
+    (clips / "range_00.mp4").write_bytes(b"x" * 900)
+    (clips / "range_01.mp4").write_bytes(b"x" * 900)
+
+    def fake_probe(path: Path) -> float | None:
+        if path.name == "range_00.mp4":
+            return 10.062
+        if path.name == "range_01.mp4":
+            return 10.041
+        return None
+
+    monkeypatch.setattr("media_ops.probe_duration_sec", fake_probe)
+    write_clips_meta(tmp_path, [(10.0, 20.0), (50.0, 60.0)])
+    meta = json.loads(clips_meta_path(tmp_path).read_text(encoding="utf-8"))
+    assert meta["spans"][0]["duration"] == 10.062
+    assert meta["spans"][1]["duration"] == 10.041
+
+
+def test_clip_span_durations_prefers_meta(tmp_path: Path) -> None:
+    from media_ops import clip_span_durations, write_clips_meta
+
+    write_clips_meta(tmp_path, [(10.0, 20.0), (50.0, 60.0)])
+    meta_path = tmp_path / "media" / "clips" / "clips_meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["spans"][0]["duration"] = 10.06
+    meta["spans"][1]["duration"] = 10.04
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    durs = clip_span_durations(tmp_path, [(10.0, 20.0), (50.0, 60.0)])
+    assert durs == [10.06, 10.04]
+
+
+def test_caption_events_use_meta_durations_at_stitch(tmp_path: Path) -> None:
+    from media_ops import caption_events_for_body, write_clips_meta
+
+    media = tmp_path / "media"
+    clips = media / "clips"
+    clips.mkdir(parents=True)
+    srt = tmp_path / "subs" / "zh.srt"
+    srt.parent.mkdir(parents=True)
+    srt.write_text(
+        "1\n00:00:50,000 --> 00:00:52,000\n淘洗大米也是非常有讲究的\n",
+        encoding="utf-8",
+    )
+    write_clips_meta(tmp_path, [(10.0, 20.0), (50.0, 60.0)])
+    meta_path = clips / "clips_meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["spans"][0]["duration"] = 10.06
+    meta["spans"][1]["duration"] = 10.04
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    events = caption_events_for_body(tmp_path, srt, body=media / "concat" / "concat.mp4")
+    assert len(events) == 1
+    assert events[0][0] == pytest.approx(10.06)
+    assert events[0][1] == pytest.approx(12.06)
+
+
+def test_scale_span_durations_fits_body() -> None:
+    from media_ops import scale_span_durations
+
+    assert scale_span_durations([10.0, 10.0], None) == [10.0, 10.0]
+    assert scale_span_durations([10.0, 10.0], 20.0) == [10.0, 10.0]
+    out = scale_span_durations([10.06, 10.04], 20.2)
+    assert sum(out) == pytest.approx(20.2)
+    assert out[0] == pytest.approx(10.06 * (20.2 / 20.1))
+
+
+def test_intro_duration_in_remix_uses_concat_clock(tmp_path: Path, monkeypatch) -> None:
+    from media_ops import intro_duration_in_remix
+
+    remix = tmp_path / "remix.mp4"
+    body = tmp_path / "body.mp4"
+    remix.write_bytes(b"x")
+    body.write_bytes(b"x")
+
+    def fake_probe(path):
+        return 22.64 if path.name == "remix.mp4" else 20.01
+
+    monkeypatch.setattr("media_ops.probe_duration_sec", fake_probe)
+    assert intro_duration_in_remix(remix, body, 2.53) == pytest.approx(2.63)
+
+
+def test_parse_leading_silence_starts_at_zero() -> None:
+    from media_ops import parse_leading_silence_sec
+
+    log = (
+        "[silencedetect @ 0x1] silence_start: 0\n"
+        "[silencedetect @ 0x1] silence_end: 2.512 | silence_duration: 2.512\n"
+    )
+    assert parse_leading_silence_sec(log) == pytest.approx(2.512)
+    assert parse_leading_silence_sec("silence_start: 1.2\nsilence_end: 3.0\n") is None
+    assert parse_leading_silence_sec("") is None
+
+
+def test_overlay_intro_prefers_leading_silence(tmp_path: Path, monkeypatch) -> None:
+    from media_ops import overlay_intro_sec
+
+    remix = tmp_path / "remix.mp4"
+    body = tmp_path / "body.mp4"
+    remix.write_bytes(b"x")
+    body.write_bytes(b"x")
+    monkeypatch.setattr("media_ops.probe_leading_silence_sec", lambda _p: 2.512)
+    monkeypatch.setattr("media_ops.probe_stream_duration_sec", lambda _p, stream="a:0": 22.6)
+    monkeypatch.setattr("media_ops.probe_duration_sec", lambda _p: 22.6)
+    assert overlay_intro_sec(remix, body, 2.53, requested=2.5) == pytest.approx(2.512)
+
+
+def test_overlay_intro_rejects_whole_file_silence(tmp_path: Path, monkeypatch) -> None:
+    from media_ops import overlay_intro_sec
+
+    remix = tmp_path / "remix.mp4"
+    body = tmp_path / "body.mp4"
+    remix.write_bytes(b"x")
+    body.write_bytes(b"x")
+    monkeypatch.setattr("media_ops.probe_leading_silence_sec", lambda _p: 22.6)
+    monkeypatch.setattr("media_ops.probe_stream_duration_sec", lambda p, stream="a:0": 22.6 if p.name == "remix.mp4" else 20.1)
+    monkeypatch.setattr("media_ops.probe_duration_sec", lambda p: 22.6 if p.name == "remix.mp4" else 20.1)
+    assert overlay_intro_sec(remix, body, 2.53, requested=2.5) == pytest.approx(2.5)
+
+
+def test_caption_events_scale_to_encoded_body(tmp_path: Path) -> None:
+    from media_ops import caption_events_for_body, write_clips_meta
+
+    media = tmp_path / "media"
+    clips = media / "clips"
+    clips.mkdir(parents=True)
+    srt = tmp_path / "subs" / "zh.srt"
+    srt.parent.mkdir(parents=True)
+    srt.write_text(
+        "1\n00:00:50,000 --> 00:00:52,000\n淘洗大米也是非常有讲究的\n",
+        encoding="utf-8",
+    )
+    write_clips_meta(tmp_path, [(10.0, 20.0), (50.0, 60.0)])
+    meta_path = clips / "clips_meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["spans"][0]["duration"] = 10.06
+    meta["spans"][1]["duration"] = 10.04
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    events = caption_events_for_body(
+        tmp_path,
+        srt,
+        body=media / "concat" / "concat.mp4",
+        timeline_dur=20.2,
+    )
+    scale = 20.2 / 20.1
+    assert events[0][0] == pytest.approx(10.06 * scale)
+
+
 def test_caption_events_follow_clip_clock_not_intro(tmp_path: Path) -> None:
     from media_ops import caption_events_for_body, write_clips_meta
 
@@ -259,6 +411,63 @@ def test_caption_events_follow_clip_clock_not_intro(tmp_path: Path) -> None:
     assert events[1][1] == pytest.approx(12.0)
     full = caption_events_for_body(tmp_path, srt, body=media / "source.mp4")
     assert full[0][0] == pytest.approx(10.13)
+
+
+def test_caption_events_honor_explicit_clips_clock(tmp_path: Path) -> None:
+    from media_ops import caption_events_for_body, write_clips_meta
+
+    media = tmp_path / "media"
+    clips = media / "clips"
+    clips.mkdir(parents=True)
+    write_clips_meta(tmp_path, [(0.0, 10.0), (10.0, 20.0)])
+    srt = tmp_path / "subs" / "en.srt"
+    srt.parent.mkdir(parents=True)
+    srt.write_text(
+        "1\n00:00:00,100 --> 00:00:02,000\nA\n\n"
+        "2\n00:00:15,000 --> 00:00:16,000\nB\n\n"
+        "3\n00:01:10,000 --> 00:01:12,000\nC\n",
+        encoding="utf-8",
+    )
+    # Remuxed name would look like source clock; explicit clock=clips must win.
+    remux = media / "remix" / "_src_av.mp4"
+    remux.parent.mkdir(parents=True)
+    remux.write_bytes(b"0" * 900)
+    events = caption_events_for_body(
+        tmp_path, srt, body=remux, shift=2.5, clock="clips"
+    )
+    assert len(events) == 2
+    assert events[0][0] == pytest.approx(2.6)
+    assert events[1][0] == pytest.approx(2.5 + 15.0)
+    assert all(e[3] != "C" for e in events)
+
+
+def test_clamp_overlay_cues_drops_past_end() -> None:
+    from media_ops import clamp_overlay_cues
+
+    cues = [
+        {"start": 0.0, "end": 2.0, "kind": "title", "text": "T"},
+        {"start": 2.0, "end": 5.0, "kind": "caption", "text": "A"},
+        {"start": 9.5, "end": 12.0, "kind": "caption", "text": "B"},
+        {"start": 10.2, "end": 11.0, "kind": "caption", "text": "late"},
+    ]
+    out = clamp_overlay_cues(cues, 10.0)
+    assert [c["text"] for c in out] == ["T", "A", "B"]
+    assert out[-1]["end"] == pytest.approx(10.12)
+
+
+def test_src_av_sidecar_keeps_clips_clock(tmp_path: Path) -> None:
+    from media_ops import caption_clock_for_body, write_clips_meta
+
+    media = tmp_path / "media"
+    remix = media / "remix"
+    remix.mkdir(parents=True)
+    write_clips_meta(tmp_path, [(0.0, 5.0), (5.0, 10.0)])
+    remux = remix / "_src_av.mp4"
+    remux.write_bytes(b"0" * 64)
+    (remix / "_src_av_meta.json").write_text(
+        '{"clock":"clips","src":"_clips.mp4"}', encoding="utf-8"
+    )
+    assert caption_clock_for_body(tmp_path, remux) == "clips"
 
 
 def test_hardsub_crop_vf() -> None:
@@ -299,7 +508,11 @@ def test_remix_burns_body_clock_then_prepends_intro(tmp_path: Path) -> None:
     assert kinds["title"]["start"] == pytest.approx(0.0, abs=0.05)
     hello = next(row for row in cues["cues"] if row["kind"] == "caption")
     assert hello["text"] == "hello-cue"
-    assert hello["start"] == pytest.approx(2.6, abs=0.08)
+    intro = float(cues["intro_sec"])
+    assert cues.get("audio_clock") is True
+    assert intro == pytest.approx(2.5, abs=0.25)
+    assert intro == pytest.approx(float(kinds["title"]["end"]), abs=0.02)
+    assert hello["start"] == pytest.approx(intro + 0.1, abs=0.05)
     vtt = (media / "remix" / "remix.vtt").read_text(encoding="utf-8")
     assert "hello-cue" in vtt
     meta = (media / "remix" / "remix_meta.json").read_text(encoding="utf-8")
@@ -317,3 +530,182 @@ def test_run_postproc_remix(tmp_path: Path) -> None:
     out = run_postproc(tmp_path, frozenset({"remix"}))
     assert "remix" in out and out["remix"].is_file()
     assert (media / "remix" / "remix_meta.json").is_file()
+
+
+def _tiny_mp4_with_bottom_bar(path: Path, *, seconds: float = 1.0) -> None:
+    from media_ops import _run_ffmpeg, find_ffmpeg
+
+    ffmpeg = find_ffmpeg()
+    _run_ffmpeg(
+        [
+            ffmpeg,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=0x224466:s=640x360:d={seconds}:r=25,"
+            f"drawbox=x=0:y=ih*0.82:w=iw:h=ih*0.18:color=white:t=fill",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=f=440:d={seconds}",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
+            str(path),
+        ]
+    )
+
+
+def test_detect_and_strip_hardsubs(tmp_path: Path) -> None:
+    from media_ops import detect_hardsubs, locate_hardsub_box_band, probe_video_wh, strip_hardsubs
+
+    media = tmp_path / "media"
+    media.mkdir()
+    src = media / "source.mp4"
+    _tiny_mp4_with_bottom_bar(src, seconds=1.2)
+    report = detect_hardsubs(src, samples=4)
+    assert report["samples"] >= 1
+    assert report["detected"] is True
+    src_wh = probe_video_wh(src)
+    located = locate_hardsub_box_band(src, src_wh[0], src_wh[1])
+    assert located is not None
+    assert located["box"]["y"] > src_wh[1] * 0.65
+    cleaned, meta = strip_hardsubs(
+        tmp_path, video=src, force=False, ratio=0.14, mode="band", engine="opencv"
+    )
+    assert str(meta["action"]).startswith(("delogo_", "inpaint_", "multipass"))
+    assert cleaned.name == "clean.mp4"
+    assert cleaned.is_file()
+    out_wh = probe_video_wh(cleaned)
+    assert src_wh is not None and out_wh is not None
+    assert out_wh == src_wh
+    assert meta.get("out_size") == f"{src_wh[0]}x{src_wh[1]}"
+    _skipped, meta2 = strip_hardsubs(
+        tmp_path, video=cleaned, force=False, ratio=0.14, mode="band", engine="opencv"
+    )
+    assert meta2["action"] == "skip" or str(meta2["action"]).startswith(
+        ("delogo_", "inpaint_", "multipass")
+    )
+    assert _skipped.is_file()
+
+
+def test_hardsub_fill_keeps_frame(tmp_path: Path) -> None:
+    from media_ops import hardsub_delogo_vf, hardsub_fill_filter, probe_video_wh, strip_hardsubs
+
+    assert "delogo=" in hardsub_delogo_vf(480, 360, 0.14)
+    assert "overlay=" in hardsub_fill_filter(480, 360, 0.14)
+    media = tmp_path / "media"
+    media.mkdir()
+    src = media / "source.mp4"
+    _tiny_mp4_with_bottom_bar(src, seconds=0.8)
+    src_wh = probe_video_wh(src)
+    cleaned, meta = strip_hardsubs(
+        tmp_path, video=src, force=True, mode="band", ratio=0.14, engine="opencv"
+    )
+    assert str(meta["action"]).startswith(("delogo_", "inpaint_", "multipass"))
+    assert probe_video_wh(cleaned) == src_wh
+    assert meta["box"]["w"] < src_wh[0]
+
+
+def test_run_postproc_dehardsub(tmp_path: Path) -> None:
+    from media_ops import probe_video_wh, run_postproc
+
+    media = tmp_path / "media"
+    media.mkdir()
+    src = media / "source.mp4"
+    _tiny_mp4_with_bottom_bar(src, seconds=1.0)
+    src_wh = probe_video_wh(src)
+    out = run_postproc(
+        tmp_path,
+        frozenset({"dehardsub"}),
+        media_opts={"dehardsub_mode": "band", "dehardsub_engine": "opencv"},
+    )
+    assert "dehardsub" in out
+    meta_path = media / "dehardsub" / "dehardsub_meta.json"
+    assert meta_path.is_file()
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert str(meta["action"]).startswith(("delogo_", "inpaint_", "multipass"))
+    assert probe_video_wh(out["dehardsub"]) == src_wh
+
+
+def test_multipass_cleanup_hardsub_and_mosaic(tmp_path: Path) -> None:
+    import cv2
+    import numpy as np
+    from media_ops import probe_video_wh, strip_hardsubs
+    from visual_cleanup import mosaic_block_score, run_multipass_cleanup
+
+    media = tmp_path / "media"
+    media.mkdir()
+    src = media / "source.mp4"
+    # Synthetic: white hardsub bar + mosaic block.
+    w, h, fps, n = 320, 240, 10, 12
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(src), fourcc, fps, (w, h))
+    assert writer.isOpened()
+    for i in range(n):
+        frame = np.full((h, w, 3), 40, dtype=np.uint8)
+        frame[40:140, 40:200] = (30, 90, 40)
+        # mosaic 16px tiles
+        for y in range(150, 214, 16):
+            for x in range(40, 168, 16):
+                c = 80 + ((x // 16 + y // 16) % 2) * 70
+                frame[y : y + 16, x : x + 16] = (c, c, c)
+        # hardsub glyphs
+        cv2.putText(
+            frame,
+            "HELLO SUB",
+            (60, 210),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        writer.write(frame)
+    writer.release()
+
+    # score a real mosaic patch
+    patch = np.zeros((64, 64), dtype=np.uint8)
+    for y in range(0, 64, 16):
+        for x in range(0, 64, 16):
+            patch[y : y + 16, x : x + 16] = 60 + ((x + y) // 16 % 2) * 90
+    assert mosaic_block_score(patch, block=16) > 0.15
+
+    dest = media / "dehardsub" / "clean.mp4"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    meta = run_multipass_cleanup(
+        src,
+        dest,
+        work_dir=tmp_path,
+        locate_mode="band",
+        max_passes=2,
+        demosaic=True,
+        dehardsub=True,
+        residual_ok=0.05,
+        engine="opencv",
+    )
+    assert meta["action"] == "multipass_cleanup"
+    assert meta["pass_count"] >= 1
+    assert dest.is_file()
+    assert probe_video_wh(dest) == probe_video_wh(src)
+
+    cleaned, report = strip_hardsubs(
+        tmp_path,
+        video=src,
+        force=True,
+        mode="auto",
+        passes=2,
+        demosaic=True,
+        engine="opencv",
+    )
+    assert report["action"] == "multipass_cleanup"
+    assert cleaned.is_file()
+    assert int(report.get("pass_count") or 0) >= 1

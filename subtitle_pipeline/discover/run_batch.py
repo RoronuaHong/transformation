@@ -69,7 +69,9 @@ def _job_field(job, key: str, default=None):
 ALL_STAGES = frozenset(
     {"fetch", "asr", "translate", "notes", "localize", "frames", "clips"}
 )
-POSTPROC_STAGES = frozenset({"enhance", "compress", "concat", "remix", "publish"})
+POSTPROC_STAGES = frozenset(
+    {"dehardsub", "enhance", "compress", "concat", "remix", "publish"}
+)
 KNOWN_STAGES = ALL_STAGES | POSTPROC_STAGES
 MEDIA_ONLY_STAGES = frozenset({"frames", "clips"}) | POSTPROC_STAGES
 
@@ -81,8 +83,8 @@ def parse_stages(raw: str | None) -> frozenset[str]:
       all | media | clips | frames
       llm  = translate,notes,localize (reuse existing SRT)
       post = llm + frames,clips
-      Or comma list: translate,notes,localize,enhance,compress,concat,remix,publish
-    ``all`` does **not** include enhance/compress/concat/remix/publish (opt-in).
+      Or comma list: translate,notes,localize,dehardsub,enhance,compress,concat,remix,publish
+    ``all`` does **not** include dehardsub/enhance/compress/concat/remix/publish (opt-in).
     """
     s = (raw or "all").strip().lower()
     if s in ("", "all"):
@@ -97,9 +99,17 @@ def parse_stages(raw: str | None) -> frozenset[str]:
         return frozenset({"translate", "notes", "localize"})
     if s in ("post", "from-srt", "from_srt"):
         return frozenset({"translate", "notes", "localize", "frames", "clips"})
+    if s in ("dehardsub", "strip_hardsubs", "hardsub", "unburn"):
+        return frozenset({"dehardsub"})
     if s in ("enhance", "compress", "concat", "remix", "publish"):
         return frozenset({s})
     parts = {p.strip() for p in s.replace(";", ",").split(",") if p.strip()}
+    # Aliases → canonical stage name
+    if "strip_hardsubs" in parts or "hardsub" in parts or "unburn" in parts:
+        parts.discard("strip_hardsubs")
+        parts.discard("hardsub")
+        parts.discard("unburn")
+        parts.add("dehardsub")
     if "all" in parts:
         parts.discard("all")
         parts |= set(ALL_STAGES)
@@ -638,6 +648,20 @@ def _process_media_only(
         str((summary or {}).get("source_lang") or "zh")
     )
     print(f"[batch] media-only stages={sorted(enabled)}")
+    if "dehardsub" in enabled:
+        from media_ops import strip_hardsubs
+
+        opts = _job_media_opts(job)
+        strip_hardsubs(
+            out_dir,
+            force=bool(opts.get("dehardsub_force")),
+            ratio=float(opts.get("dehardsub_ratio") or 0.14),
+            mode=str(opts.get("dehardsub_mode") or "auto"),
+            vlm_model=str(opts.get("dehardsub_vlm_model") or ""),
+            passes=int(opts.get("dehardsub_passes") or 2),
+            demosaic=bool(opts.get("dehardsub_demosaic", True)),
+            engine=str(opts.get("dehardsub_engine") or "sttn"),
+        )
     if "frames" in enabled or "clips" in enabled:
         summary = _attach_job_media(
             work_dir=out_dir,
@@ -1004,7 +1028,6 @@ def process_job(
     except Exception as e:
         print(f"[postproc] FAILED ({type(e).__name__}: {e})")
         traceback.print_exc()
-        raise
 
     wav_path = existing_wav(out_dir) or (
         Path(wav) if wav and Path(wav).is_file() else None

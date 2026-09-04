@@ -171,6 +171,7 @@ export function composeTryStages(opts: {
   wantTranslate: boolean;
   wantNotes: boolean;
   hasMedia: boolean;
+  wantDehardsub?: boolean;
   wantEnhance?: boolean;
   wantCompress?: boolean;
   wantConcat?: boolean;
@@ -181,6 +182,7 @@ export function composeTryStages(opts: {
     wantTranslate,
     wantNotes,
     hasMedia,
+    wantDehardsub = false,
     wantEnhance = false,
     wantCompress = false,
     wantConcat = false,
@@ -188,6 +190,7 @@ export function composeTryStages(opts: {
     wantPublish = false,
   } = opts;
   const post: string[] = [];
+  if (wantDehardsub) post.push("dehardsub");
   if (wantConcat) post.push("concat");
   if (wantEnhance) post.push("enhance");
   if (wantCompress) post.push("compress");

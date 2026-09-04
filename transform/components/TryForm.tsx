@@ -293,6 +293,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
   const [wantNotes, setWantNotes] = useState(true);
   const [wantClips, setWantClips] = useState(true);
   const [wantEnhance, setWantEnhance] = useState(false);
+  const [wantDehardsub, setWantDehardsub] = useState(false);
   const [wantCompress, setWantCompress] = useState(false);
   const [wantConcat, setWantConcat] = useState(false);
   const [wantRemix, setWantRemix] = useState(false);
@@ -500,6 +501,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
   const hasAnyModule =
     wantTranslate ||
     wantNotes ||
+    wantDehardsub ||
     wantEnhance ||
     wantCompress ||
     wantConcat ||
@@ -510,6 +512,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     wantTranslate,
     wantNotes,
     hasMedia: wantClips && (batchHasClips || batchHasGif || batchFrames !== "none"),
+    wantDehardsub,
     wantEnhance,
     wantCompress,
     wantConcat,
@@ -534,7 +537,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     copy,
     plannedIntent,
     targetLangs.length,
-    wantEnhance || wantCompress || wantConcat || wantRemix || wantPublish
+    wantDehardsub || wantEnhance || wantCompress || wantConcat || wantRemix || wantPublish
   );
   const langsSummary = allLangsSelected
     ? copy.langsAllLabel
@@ -804,6 +807,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     setWantTranslate(true);
     setWantNotes(true);
     setWantClips(true);
+    setWantDehardsub(false);
     setWantEnhance(false);
     setWantCompress(false);
     setWantConcat(false);
@@ -1102,6 +1106,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
             langs: targetLangs,
             want_translate: wantTranslate,
             want_notes: wantNotes,
+            want_dehardsub: wantDehardsub,
             want_enhance: wantEnhance,
             want_compress: wantCompress,
             want_concat: wantConcat,
@@ -1135,6 +1140,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
         fd.append("langs", JSON.stringify(targetLangs));
         fd.append("want_translate", wantTranslate ? "true" : "false");
         fd.append("want_notes", wantNotes ? "true" : "false");
+        fd.append("want_dehardsub", wantDehardsub ? "true" : "false");
         fd.append("want_enhance", wantEnhance ? "true" : "false");
         fd.append("want_compress", wantCompress ? "true" : "false");
         fd.append("want_concat", wantConcat ? "true" : "false");
@@ -1327,6 +1333,12 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
               on: wantClips,
               set: setWantClips,
               label: copy.workflowRailClips,
+            },
+            {
+              id: "dehardsub",
+              on: wantDehardsub,
+              set: setWantDehardsub,
+              label: copy.workflowRailDehardsub,
             },
             {
               id: "enhance",
@@ -2214,6 +2226,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                 <RemixPlayer
                   src={poll.derived.remix}
                   cuesUrl={poll.derived.remix_cues}
+                  vttUrl={poll.derived.remix_vtt}
                   label={copy.remixSection}
                 />
               ) : null}
