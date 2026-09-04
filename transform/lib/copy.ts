@@ -114,6 +114,8 @@ export type TryCopy = {
   langsNeedOne: string;
   langsPick: string;
   langsDone: string;
+  langsSearch: string;
+  langsEmpty: string;
   langsAllLabel: string;
   intentFull: string;
   intentPost: string;
@@ -199,6 +201,7 @@ export type TryCopy = {
   workflowRailNotes: string;
   workflowRailClips: string;
   workflowRailDehardsub: string;
+  workflowRailDeblur: string;
   workflowRailEnhance: string;
   workflowRailCompress: string;
   workflowRailConcat: string;
@@ -207,6 +210,9 @@ export type TryCopy = {
   workflowRailLangs: string;
   workflowRailSoon: string;
   workflowRailHint: string;
+  inputFromLabel: string;
+  inputFromAuto: string;
+  inputFromSource: string;
   enhanceSection: string;
   enhanceHint: string;
   enhanceStrength: string;
@@ -223,6 +229,21 @@ export type TryCopy = {
   remixSection: string;
   remixHint: string;
   derivedTitle: string;
+  packZipDownload: string;
+  packageSection: string;
+  packageCourse: string;
+  packageCourseHint: string;
+  packageRemix: string;
+  packageRemixHint: string;
+  packageAdvanced: string;
+  packageAdvancedHint: string;
+  packageDailyHint: string;
+  packageShowAdvanced: string;
+  kpFillFromNotes: string;
+  kpFillBusy: string;
+  kpFillNeedJob: string;
+  kpFillFailed: string;
+  kpFillEmpty: string;
   derivedEnhance: string;
   derivedCompress: string;
   derivedConcat: string;
@@ -380,6 +401,8 @@ const en: UiCopy = {
     langsNeedOne: "Select at least one language.",
     langsPick: "Choose languages",
     langsDone: "Done",
+    langsSearch: "Search languages",
+    langsEmpty: "No matching language",
     langsAllLabel: "All languages",
     intentFull: "This run: full pipeline (download → notes).",
     intentPost: "This run: re-translate {n} languages (reuse transcription).",
@@ -467,6 +490,7 @@ const en: UiCopy = {
     workflowRailNotes: "Notes",
     workflowRailClips: "Clips",
     workflowRailDehardsub: "Unburn captions",
+    workflowRailDeblur: "Deblur",
     workflowRailEnhance: "Enhance",
     workflowRailCompress: "Compress",
     workflowRailConcat: "Concat",
@@ -475,6 +499,9 @@ const en: UiCopy = {
     workflowRailLangs: "Languages",
     workflowRailSoon: "Soon",
     workflowRailHint: "Tap to enable workflows for this run.",
+    inputFromLabel: "Input from",
+    inputFromAuto: "Auto (previous step)",
+    inputFromSource: "Source video",
     enhanceSection: "Enhance",
     enhanceHint: "Sharpen the working video (concat if you made one, otherwise the source). No AI upscaler in this version.",
     enhanceStrength: "Strength",
@@ -492,6 +519,21 @@ const en: UiCopy = {
     remixHint:
       "Makes a 9:16 vertical cut (1080×1920): notes one-liner as an overlay title, then the working clip. Captions follow the player clock — they are not burned into the file. No TTS.",
     derivedTitle: "Processed video",
+    packZipDownload: "Download Job Pack (.zip)",
+    packageSection: "Package",
+    packageCourse: "Course pack",
+    packageCourseHint: "Subtitles + structured notes (16 langs)",
+    packageRemix: "Remix pack",
+    packageRemixHint: "Unburn → clips from notes → 9:16 remix",
+    packageAdvanced: "Advanced",
+    packageAdvancedHint: "Pick every workflow yourself",
+    packageDailyHint: "Daily site feed uses Discover + batch — not this form.",
+    packageShowAdvanced: "Show all workflows",
+    kpFillFromNotes: "Fill clips from notes",
+    kpFillBusy: "Matching…",
+    kpFillNeedJob: "Finish notes on a job first, then fill clip ranges.",
+    kpFillFailed: "Could not map notes to clip ranges.",
+    kpFillEmpty: "No key-point time ranges found.",
     derivedEnhance: "Download enhanced MP4",
     derivedCompress: "Download compressed MP4",
     derivedConcat: "Download concatenated MP4",
@@ -640,6 +682,8 @@ const zh: UiCopy = {
     langsNeedOne: "请至少选择一种语言。",
     langsPick: "选择语言",
     langsDone: "完成",
+    langsSearch: "搜索语言",
+    langsEmpty: "无匹配语言",
     langsAllLabel: "全部语言",
     intentFull: "本次：全量处理（下载 → 笔记）。",
     intentPost: "本次：重翻 {n} 种语言（复用转写，不重跑 Whisper）。",
@@ -728,6 +772,7 @@ const zh: UiCopy = {
     workflowRailNotes: "笔记",
     workflowRailClips: "切片",
     workflowRailDehardsub: "去烧录字幕",
+    workflowRailDeblur: "去模糊",
     workflowRailEnhance: "增强",
     workflowRailCompress: "压缩",
     workflowRailConcat: "拼接",
@@ -736,6 +781,9 @@ const zh: UiCopy = {
     workflowRailLangs: "语言",
     workflowRailSoon: "待上线",
     workflowRailHint: "点选本轮要跑的工作流。",
+    inputFromLabel: "输入来自",
+    inputFromAuto: "自动（上一步产物）",
+    inputFromSource: "源片",
     enhanceSection: "画质增强",
     enhanceHint: "锐化当前工作视频（有拼接则用拼接结果，否则用源片）。本版不用 AI 超分。",
     enhanceStrength: "强度",
@@ -753,6 +801,21 @@ const zh: UiCopy = {
     remixHint:
       "做成 9:16（1080×1920）成片：片头用笔记一句话叠在画面上，正片为当前工作视频。字幕跟播放时钟走，不烧进文件。不做配音。",
     derivedTitle: "处理后的视频",
+    packZipDownload: "下载 Job Pack（.zip）",
+    packageSection: "套餐",
+    packageCourse: "跟课包",
+    packageCourseHint: "16 语字幕 + 结构化笔记",
+    packageRemix: "二创包",
+    packageRemixHint: "去硬字幕 → 要点切片 → 9:16 成片",
+    packageAdvanced: "高级",
+    packageAdvancedHint: "自行勾选每一个工作流",
+    packageDailyHint: "日更站走发现 + batch，不在本表单。",
+    packageShowAdvanced: "显示全部工作流",
+    kpFillFromNotes: "从笔记要点填区间",
+    kpFillBusy: "对齐中…",
+    kpFillNeedJob: "请先跑完笔记任务，再一键填切片。",
+    kpFillFailed: "无法把要点对齐到时间轴。",
+    kpFillEmpty: "没有可用的要点时间区间。",
     derivedEnhance: "下载增强版 MP4",
     derivedCompress: "下载压缩版 MP4",
     derivedConcat: "下载拼接 MP4",
@@ -888,6 +951,7 @@ const zhHant: UiCopy = {
     workflowRailNotes: "筆記",
     workflowRailClips: "切片",
     workflowRailDehardsub: "去燒錄字幕",
+    workflowRailDeblur: "去模糊",
     workflowRailEnhance: "增強",
     workflowRailCompress: "壓縮",
     workflowRailConcat: "拼接",
@@ -895,6 +959,11 @@ const zhHant: UiCopy = {
     workflowRailPublish: "發布",
     workflowRailSoon: "待上線",
     workflowRailHint: "點選本輪要跑的工作流。",
+    inputFromLabel: "輸入來自",
+    inputFromAuto: "自動（上一步產物）",
+    inputFromSource: "源片",
+    langsSearch: "搜尋語言",
+    langsEmpty: "無匹配語言",
   },
   ask: {
     lede: "基於專案知識庫（Milvus 向量庫 + 本地大模型）回答問題，答案附引用來源。",

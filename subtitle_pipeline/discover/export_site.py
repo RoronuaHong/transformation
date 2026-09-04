@@ -67,6 +67,39 @@ def cues_from_locale_srts(locales: dict[str, dict]) -> list[dict]:
     return cues
 
 
+def remix_overlay_public(slug: str, site_public: Path) -> dict | None:
+    """Public URLs for WF-07 overlay (remix clock). Distinct from article ``cues`` (source clock)."""
+    slug = str(slug or "").strip()
+    if not slug:
+        return None
+    derived = Path(site_public) / "derived" / slug
+    video = derived / "remix.mp4"
+    if not video.is_file() or video.stat().st_size < 800:
+        return None
+    out: dict = {
+        "clock": "remix",
+        "video": f"/derived/{slug}/remix.mp4",
+    }
+    vtt = derived / "remix.vtt"
+    cues = derived / "remix_cues.json"
+    if vtt.is_file() and vtt.stat().st_size > 20:
+        out["vtt"] = f"/derived/{slug}/remix.vtt"
+    if cues.is_file() and cues.stat().st_size > 20:
+        out["cues"] = f"/derived/{slug}/remix_cues.json"
+        try:
+            meta = json.loads(cues.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            meta = {}
+        if isinstance(meta, dict):
+            if meta.get("intro_sec") is not None:
+                out["intro_sec"] = meta.get("intro_sec")
+            if meta.get("source_clock"):
+                out["source_clock"] = meta.get("source_clock")
+            if meta.get("audio_clock") is not None:
+                out["audio_clock"] = meta.get("audio_clock")
+    return out
+
+
 def export_articles(db: ContentDB, *, site_public: Path | None = None) -> list[dict]:
     site_public = site_public or (ROOT.parent / "transform" / "public")
     rows = db._conn.execute(
@@ -125,21 +158,6 @@ def export_articles(db: ContentDB, *, site_public: Path | None = None) -> list[d
                 "hard_points": hard_points,
                 "srt_path": loc["srt_path"],
             }
-        out.append(
-            {
-                "platform": a["platform"],
-                "video_id": a["video_id"],
-                "topic": a["topic_id"],
-                "slug": a["slug"],
-                "canonical_url": a["canonical_url"],
-                "embed_url": a["embed_url"],
-                "source_lang": source_lang,
-                "title_src": a["title_src"],
-                "author": a["author"],
-                "locales": locales,
-                "cues": cues_from_locale_srts(locales),
-            }
-        )
         work = a["work_dir"]
         if work:
             n = copy_frames_to_site(Path(work), str(a["slug"]), site_public)
@@ -151,8 +169,26 @@ def export_articles(db: ContentDB, *, site_public: Path | None = None) -> list[d
             nd = copy_derived_to_site(Path(work), str(a["slug"]), site_public)
             if nd:
                 print(f"[export] derived slug={a['slug']} n={nd}")
+        article = {
+            "platform": a["platform"],
+            "video_id": a["video_id"],
+            "topic": a["topic_id"],
+            "slug": a["slug"],
+            "canonical_url": a["canonical_url"],
+            "embed_url": a["embed_url"],
+            "source_lang": source_lang,
+            "title_src": a["title_src"],
+            "author": a["author"],
+            "locales": locales,
+            # Full-length / embed timeline (source audio). Not the 9:16 remix clock.
+            "cue_clock": "source",
+            "cues": cues_from_locale_srts(locales),
+        }
+        remix = remix_overlay_public(article_slug, site_public)
+        if remix:
+            article["remix"] = remix
+        out.append(article)
     return out
-
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser()

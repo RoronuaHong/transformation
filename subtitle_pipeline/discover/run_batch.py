@@ -270,11 +270,25 @@ def _run_job_postproc(
     _mode, _gif, clips, _gif_ranges = _resolve_frame_opts(
         job, frame_mode=None, gif_duration=None, frame_clips=frame_clips
     )
+    input_from = None
+    meta_json = None
+    try:
+        meta_json = job["meta_json"]
+    except (KeyError, IndexError, TypeError):
+        meta_json = None
+    if meta_json:
+        try:
+            meta = json.loads(meta_json)
+            if isinstance(meta, dict):
+                input_from = meta.get("input_from")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
     produced = run_postproc(
         work_dir,
         enabled,
         media_opts=_job_media_opts(job),
         clip_ranges=clips,
+        input_from=str(input_from) if input_from else None,
     )
     if "publish" in enabled:
         from publish_ops import run_publish
@@ -326,7 +340,7 @@ def _attach_job_media(
         return summary
     if not summary:
         if "clips" in enabled:
-            from media_ops import cut_range_clips
+            from media_ops import cut_range_clips, resolve_working_video
             from note_frames import existing_source_video
 
             mode, _gif_sec, clips, _gif_ranges = _resolve_frame_opts(
@@ -335,7 +349,18 @@ def _attach_job_media(
                 gif_duration=gif_duration,
                 frame_clips=frame_clips,
             )
-            video = existing_source_video(work_dir)
+            input_from = None
+            try:
+                raw_meta = job["meta_json"]
+                if raw_meta:
+                    meta = json.loads(raw_meta)
+                    if isinstance(meta, dict):
+                        input_from = meta.get("input_from")
+            except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
+                input_from = None
+            video = resolve_working_video(
+                work_dir, input_from=str(input_from) if input_from else None
+            ) or existing_source_video(work_dir)
             if clips and video:
                 try:
                     cut_range_clips(work_dir, clips, video=video)
@@ -668,6 +693,7 @@ def _process_media_only(
         raise FileNotFoundError(
             f"stages={sorted(enabled)} needs existing notes in {work_dir}"
         )
+    # clips / postproc do not require notes (WF independence).
 
     src_lang = coalesce_source_lang(
         str((summary or {}).get("source_lang") or "zh")
@@ -763,6 +789,7 @@ def process_job(
     frame_clips: list | None = None,
     lang_workers_n: int | None = None,
     stages: str = "all",
+    embed_shift_ms: int = 0,
 ) -> None:
     job_id = int(job["id"])
     platform = job["platform"]
@@ -871,7 +898,7 @@ def process_job(
         hotwords_file=None,
         bvid=detect_bvid(url) if platform == "bilibili" else None,
         slice_start_sec=0.0,
-        sync_shift_ms=0,
+        sync_shift_ms=int(embed_shift_ms or 0),
         no_cookies=False,
         cookies_from_browser="chrome",
         cookies=None,
@@ -1135,6 +1162,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--device", default="cpu", choices=("cpu", "cuda"))
     p.add_argument("--no-multipass", action="store_true")
     p.add_argument("--no-llm-correct", action="store_true")
+    p.add_argument(
+        "--embed-shift-ms",
+        type=int,
+        default=0,
+        help="S8: global caption shift for embed-vs-download skew (also yarn shift-embed)",
+    )
     p.add_argument("--skip-translate", action="store_true")
     p.add_argument("--skip-summary", action="store_true")
     p.add_argument(
@@ -1251,6 +1284,7 @@ def main(argv: list[str] | None = None) -> int:
                     dry_run=args.dry_run,
                     lang_workers_n=args.lang_workers,
                     stages=args.stages,
+                    embed_shift_ms=int(args.embed_shift_ms or 0),
                 )
                 done += 1
             except Exception as e:

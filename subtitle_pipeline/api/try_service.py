@@ -17,6 +17,14 @@ from discover.run_inbox import canonical_url, parse_url
 from fetch_media import ensure_source_video, find_ffmpeg
 from job_layout import existing_wav, job_media_dir, list_locale_srts
 from langs import PACKS, coalesce_source_lang, normalize_lang, resolve_targets
+from workflows import (
+    expand_workflow_tasks,
+    infer_workflow_progress,
+    list_pack_artifacts,
+    pack_id_for,
+    workflow_products,
+    write_pack_manifest,
+)
 
 SITE_LANG_CODES = tuple(PACKS.get("site") or ())
 
@@ -98,7 +106,7 @@ def apply_batch_cookies(pasted: str | None, urls: list[str]) -> None:
 
 
 def schedule_next_try_job(*, skip_job_id: int | None = None) -> None:
-    """Chain the next high-priority pending try job when idle."""
+    """Chain the next runnable high-priority pending try job when idle."""
 
     def _runner() -> None:
         time.sleep(0.25)
@@ -106,24 +114,73 @@ def schedule_next_try_job(*, skip_job_id: int | None = None) -> None:
             return
         q = QueueDB()
         try:
-            row = q._conn.execute(
+            rows = q._conn.execute(
                 """
                 SELECT id FROM jobs
                 WHERE status='pending' AND priority='high'
                 ORDER BY created_at ASC
-                LIMIT 1
                 """
-            ).fetchone()
-            if row is None:
+            ).fetchall()
+            for row in rows:
+                jid = int(row["id"])
+                if skip_job_id is not None and jid == skip_job_id:
+                    continue
+                job = q.get_job(jid)
+                if job is None:
+                    continue
+                if not _deps_satisfied(q, job):
+                    continue
+                run_try_job(jid)
                 return
-            jid = int(row["id"])
-            if skip_job_id is not None and jid == skip_job_id:
-                return
-            run_try_job(jid)
         finally:
             q.close()
 
     threading.Thread(target=_runner, daemon=True).start()
+
+
+def _job_meta_dict(job) -> dict:
+    raw = None
+    try:
+        raw = job["meta_json"]
+    except (KeyError, IndexError, TypeError):
+        raw = None
+    if not raw:
+        return {}
+    try:
+        meta = json.loads(raw)
+        return meta if isinstance(meta, dict) else {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def _deps_satisfied(queue: QueueDB, job) -> bool:
+    """REQ-A03: do not run a WF until its depends_on workflows are done."""
+    meta = _job_meta_dict(job)
+    deps = meta.get("depends_on") or []
+    if not isinstance(deps, list) or not deps:
+        return True
+    platform = job["platform"]
+    video_id = job["video_id"]
+    for dep in deps:
+        name = str(dep or "").strip()
+        if not name:
+            continue
+        row = queue.get_job_by_workflow(platform, video_id, name)
+        if row is None or row["status"] not in ("done", "published"):
+            return False
+    return True
+
+
+def _normalize_input_from_map(raw: dict | None) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for k, v in raw.items():
+        key = str(k or "").strip()
+        val = str(v or "").strip()
+        if key and val:
+            out[key] = val
+    return out
 
 
 def normalize_try_langs(raw: str | list | None) -> str:
@@ -249,6 +306,8 @@ def compose_try_stages(
     want_translate: bool = True,
     want_notes: bool = True,
     has_media: bool = False,
+    want_clips: bool | None = None,
+    want_frames: bool = False,
     want_dehardsub: bool = False,
     want_deblur: bool = False,
     want_enhance: bool = False,
@@ -257,49 +316,54 @@ def compose_try_stages(
     want_remix: bool = False,
     want_publish: bool = False,
 ) -> str:
-    """Map workbench module toggles → batch stages string."""
-    post: list[str] = []
-    if want_dehardsub:
-        post.append("dehardsub")
-    if want_concat:
-        post.append("concat")
-    if want_deblur:
-        post.append("deblur")
-    if want_enhance:
-        post.append("enhance")
-    if want_compress:
-        post.append("compress")
-    if want_remix:
-        post.append("remix")
-    if want_publish:
-        post.append("publish")
+    """Map workbench toggles → comma stages (compat). Prefer expand_workflow_tasks."""
+    clips = has_media if want_clips is None else bool(want_clips)
+    tasks = expand_workflow_tasks(
+        want_translate=want_translate,
+        want_notes=want_notes,
+        want_clips=clips,
+        want_frames=want_frames,
+        want_dehardsub=want_dehardsub,
+        want_deblur=want_deblur,
+        want_enhance=want_enhance,
+        want_compress=want_compress,
+        want_concat=want_concat,
+        want_remix=want_remix,
+        want_publish=want_publish,
+    )
+    if not tasks:
+        return "notes,localize"
+    if len(tasks) == 1 and tasks[0]["workflow"] == "all":
+        return "all"
+    # Compat preset: both text WFs → ``all`` (+ opt-in postproc).
     if want_translate and want_notes:
-        return "all" if not post else ",".join(["all", *post])
-    parts: list[str] = []
-    text = want_translate or want_notes
-    media = has_media or want_concat
-    if text or media or post:
-        parts.append("fetch")
-    if text:
-        parts.append("asr")
-    if want_translate:
-        parts.append("translate")
-    if want_notes:
-        parts.extend(["notes", "localize"])
-    if has_media:
-        parts.extend(["frames", "clips"])
-    elif want_concat:
-        parts.append("clips")
-    if not want_translate and not want_notes and not has_media and not post:
-        parts.extend(["fetch", "asr", "notes", "localize"])
-    parts.extend(post)
-    out: list[str] = []
+        post = [
+            t
+            for t in tasks
+            if t["workflow"] not in ("translate", "notes", "frames")
+        ]
+        if not post and not want_frames:
+            return "all"
+        parts: list[str] = ["all"]
+        seen = {"all"}
+        for t in post:
+            for p in t["stages"].split(","):
+                p = p.strip()
+                if p and p not in seen:
+                    seen.add(p)
+                    parts.append(p)
+        if want_frames:
+            parts.append("frames")
+        return ",".join(parts)
+    parts = []
     seen: set[str] = set()
-    for p in parts:
-        if p not in seen:
-            seen.add(p)
-            out.append(p)
-    return ",".join(out)
+    for t in tasks:
+        for p in t["stages"].split(","):
+            p = p.strip()
+            if p and p not in seen:
+                seen.add(p)
+                parts.append(p)
+    return ",".join(parts) if parts else "all"
 
 
 def _media_workflow_fields(
@@ -621,6 +685,98 @@ _STALE_SEC = 300
 
 def _work_dir(platform: str, video_id: str) -> Path:
     return WORK_ROOT / f"{platform}_{video_id}"
+
+
+def _file_api_url(job_id: int, rel: str) -> str:
+    from urllib.parse import quote
+
+    return f"/api/try/{int(job_id)}/file?rel={quote(rel, safe='/')}"
+
+
+def keypoint_clips_for_job(job_id: int, *, max_points: int = 12) -> dict:
+    """Return clip ranges derived from notes key_points for a try job."""
+    from note_frames import keypoint_clip_ranges
+
+    queue = QueueDB()
+    try:
+        job = queue.get_job(int(job_id))
+        if job is None:
+            return {"ok": False, "error": "job not found"}
+        platform = job["platform"]
+        video_id = job["video_id"]
+        work = _work_dir(platform, video_id)
+        try:
+            clips = keypoint_clip_ranges(work, max_points=max_points)
+        except FileNotFoundError as e:
+            return {"ok": False, "error": str(e), "clips": []}
+        return {
+            "ok": True,
+            "job_id": int(job_id),
+            "pack_id": _job_pack_id(job, platform, video_id),
+            "platform": platform,
+            "video_id": video_id,
+            "clips": clips,
+            "count": len(clips),
+        }
+    finally:
+        queue.close()
+
+
+def resolve_try_pack_file(job_id: int, rel: str) -> tuple[Path, str, str]:
+    """Resolve a safe file under the job's pack work_dir."""
+    from job_pack import safe_resolve_under
+
+    queue = QueueDB()
+    try:
+        job = queue.get_job(int(job_id))
+        if job is None:
+            raise FileNotFoundError("job not found")
+        work = _work_dir(job["platform"], job["video_id"])
+        path = safe_resolve_under(work, rel)
+    finally:
+        queue.close()
+    suffix = path.suffix.lower()
+    media = {
+        ".srt": "application/x-subrip",
+        ".json": "application/json",
+        ".md": "text/markdown; charset=utf-8",
+        ".txt": "text/plain; charset=utf-8",
+        ".mp4": "video/mp4",
+        ".vtt": "text/vtt",
+        ".wav": "audio/wav",
+    }.get(suffix, "application/octet-stream")
+    return path, media, path.name
+
+
+def build_try_pack_zip(job_id: int) -> tuple[bytes, str]:
+    """Build Job Pack zip bytes + download filename."""
+    from job_pack import build_job_pack_bytes
+
+    queue = QueueDB()
+    try:
+        job = queue.get_job(int(job_id))
+        if job is None:
+            raise FileNotFoundError("job not found")
+        platform = job["platform"]
+        video_id = job["video_id"]
+        pack = _job_pack_id(job, platform, video_id)
+        work = _work_dir(platform, video_id)
+        if not work.is_dir():
+            raise FileNotFoundError(str(work))
+        data = build_job_pack_bytes(
+            work,
+            pack_id=pack,
+            meta_extra={
+                "job_id": int(job_id),
+                "platform": platform,
+                "video_id": video_id,
+                "workflow": _job_workflow(job),
+            },
+        )
+        safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in pack)[:80]
+        return data, f"{safe or 'job'}_pack.zip"
+    finally:
+        queue.close()
 
 
 def _latest_mtime(root: Path) -> float | None:
@@ -984,12 +1140,74 @@ def list_active_try_jobs(*, limit: int = 10) -> dict:
         queue.close()
 
 
-def _job_id(queue: QueueDB, platform: str, video_id: str) -> int | None:
+def _job_id(
+    queue: QueueDB,
+    platform: str,
+    video_id: str,
+    workflow: str | None = None,
+) -> int | None:
+    if workflow:
+        row = queue.get_job_by_workflow(platform, video_id, workflow)
+        return int(row["id"]) if row else None
     row = queue._conn.execute(
-        "SELECT id FROM jobs WHERE platform=? AND video_id=? ORDER BY id DESC LIMIT 1",
+        """
+        SELECT id FROM jobs
+        WHERE platform=? AND video_id=?
+        ORDER BY id DESC LIMIT 1
+        """,
         (platform, video_id),
     ).fetchone()
     return int(row["id"]) if row else None
+
+
+def _job_workflow(job) -> str:
+    try:
+        wf = job["workflow"]
+    except (KeyError, IndexError, TypeError):
+        wf = None
+    return str(wf or "all")
+
+
+def _job_pack_id(job, platform: str, video_id: str) -> str:
+    try:
+        pid = job["pack_id"]
+    except (KeyError, IndexError, TypeError):
+        pid = None
+    return str(pid or pack_id_for(platform, video_id))
+
+
+def _upsert_workflow_job(
+    queue: QueueDB,
+    c: Candidate,
+    *,
+    workflow: str,
+    pack_id: str,
+    force_requeue: bool = False,
+) -> tuple[int | None, str]:
+    """Insert or reopen one independent workflow job. Returns (job_id, enqueue)."""
+    result = queue.enqueue(
+        c, priority="high", workflow=workflow, pack_id=pack_id
+    )
+    job_id = _job_id(queue, c.platform, c.video_id, workflow)
+    if job_id is None:
+        return None, "enqueue_failed"
+    if result == "ignored":
+        job = queue.get_job(job_id)
+        if job and job["status"] in ("dead", "failed", "cancelled"):
+            if queue.requeue_job(job_id):
+                result = "requeued"
+        elif job and job["status"] == "pending":
+            result = "already_pending"
+        elif job and job["status"] in ("done", "published"):
+            result = "already_done"
+        elif job and job["status"] == "processing":
+            result = "already_processing"
+    elif result == "skipped_done":
+        result = "already_done"
+    if force_requeue and result in ("already_done", "already_pending"):
+        if queue.requeue_job(job_id, allow_done=True):
+            result = "requeued"
+    return job_id, result
 
 
 def _article_for_job(content: ContentDB, platform: str, video_id: str) -> dict | None:
@@ -1123,6 +1341,8 @@ def job_snapshot(job_id: int) -> dict:
             "status": st,
             "platform": platform,
             "video_id": video_id,
+            "workflow": _job_workflow(job),
+            "pack_id": _job_pack_id(job, platform, video_id),
             "title": title,
             "topic": job["topic_id"],
             "error": job["last_error"],
@@ -1130,6 +1350,88 @@ def job_snapshot(job_id: int) -> dict:
             "duration_sec": duration_sec,
             "frame_opts": job_frame_opts(job),
         }
+        pack_rows = queue.list_pack_jobs(out["pack_id"])
+        pack_rows = queue.list_pack_jobs(out["pack_id"])
+        derived_urls: dict[str, str] = {}
+        if article or st == "done":
+            try:
+                from discover.content_db import public_slug
+                from media_ops import copy_derived_to_site, derived_public_urls
+
+                work_early = _work_dir(platform, video_id)
+                slug_early = str(
+                    (article or {}).get("slug") or public_slug(video_id, title)
+                )
+                copy_derived_to_site(work_early, slug_early, SITE_PUBLIC)
+                derived_urls = derived_public_urls(slug_early, SITE_PUBLIC)
+            except Exception:
+                derived_urls = {}
+        if pack_rows:
+            pack_task_rows: list[dict] = []
+            for r in pack_rows:
+                wf = _job_workflow(r)
+                r_status = str(r["status"])
+                r_meta = _job_meta_dict(r)
+                r_active = (
+                    _busy
+                    and _active_try_job_id is not None
+                    and int(r["id"]) == int(_active_try_job_id)
+                )
+                products = workflow_products(_work_dir(platform, video_id), wf)
+                download = derived_urls.get(wf)
+                pack_task_rows.append(
+                    {
+                        "job_id": int(r["id"]),
+                        "workflow": wf,
+                        "status": r_status,
+                        "error": r["last_error"],
+                        "input_from": r_meta.get("input_from"),
+                        "depends_on": r_meta.get("depends_on") or [],
+                        "progress": infer_workflow_progress(
+                            wf,
+                            r_status,
+                            _work_dir(platform, video_id),
+                            active=bool(r_active),
+                        ),
+                        "products": [
+                            {
+                                "name": p["name"],
+                                "kind": p["kind"],
+                                "rel": p["rel"],
+                                "bytes": p["bytes"],
+                                "url": (
+                                    download
+                                    if download and p["kind"] == wf
+                                    else _file_api_url(int(r["id"]), p["rel"])
+                                ),
+                            }
+                            for p in products
+                        ],
+                        "download_url": download,
+                        "pack_zip_url": f"/api/try/{int(r['id'])}/pack.zip",
+                    }
+                )
+            out["pack_tasks"] = pack_task_rows
+            out["pack_zip_url"] = f"/api/try/{int(job_id)}/pack.zip"
+            try:
+                write_pack_manifest(
+                    _work_dir(platform, video_id),
+                    pack_id=out["pack_id"],
+                    tasks=pack_task_rows,
+                )
+            except Exception as e:
+                print(f"[pack_manifest] skip ({type(e).__name__}: {e})")
+        out["pack_zip_url"] = f"/api/try/{int(job_id)}/pack.zip"
+        work = _work_dir(platform, video_id)
+        try:
+            out["artifacts"] = list_pack_artifacts(work)
+        except Exception:
+            out["artifacts"] = []
+        meta = _job_meta_dict(job)
+        if meta.get("input_from") is not None:
+            out["input_from"] = meta.get("input_from")
+        if meta.get("depends_on"):
+            out["depends_on"] = meta.get("depends_on")
         if article:
             out["article"] = article
             out["path"] = f"/topics/{article['topic']}/{article['slug']}"
@@ -1143,7 +1445,27 @@ def job_snapshot(job_id: int) -> dict:
             derived = derived_public_urls(slug, SITE_PUBLIC)
             if derived:
                 out["derived"] = derived
-        if st in ("pending", "processing", "done", "failed", "dead", "cancelled"):
+        # Prefer pack-scoped progress when this job is a single WF.
+        wf_now = _job_workflow(job)
+        if wf_now and wf_now != "all" and st in (
+            "pending",
+            "processing",
+            "done",
+            "failed",
+            "dead",
+            "cancelled",
+        ):
+            out["progress"] = infer_workflow_progress(
+                wf_now,
+                st,
+                _work_dir(platform, video_id),
+                active=bool(
+                    _busy
+                    and _active_try_job_id is not None
+                    and int(job_id) == int(_active_try_job_id)
+                ),
+            )
+        elif st in ("pending", "processing", "done", "failed", "dead", "cancelled"):
             out["progress"] = infer_try_progress(
                 platform, video_id, st, langs=job_langs(job), job_id=job_id
             )
@@ -1406,6 +1728,7 @@ def submit_urls(
     langs: str | list | None = None,
     want_translate: bool = True,
     want_notes: bool = True,
+    want_clips: bool = False,
     stages: str | None = None,
     want_dehardsub: bool = False,
     want_deblur: bool = False,
@@ -1468,6 +1791,7 @@ def submit_urls(
             langs=langs,
             want_translate=want_translate,
             want_notes=want_notes,
+            want_clips=want_clips,
             stages=stages,
             want_dehardsub=want_dehardsub,
             want_deblur=want_deblur,
@@ -1511,6 +1835,7 @@ def submit_url(
     langs: str | list | None = None,
     want_translate: bool = True,
     want_notes: bool = True,
+    want_clips: bool = False,
     stages: str | None = None,
     want_dehardsub: bool = False,
     want_deblur: bool = False,
@@ -1562,48 +1887,82 @@ def submit_url(
         score=9999.0,
         duration_sec=int(dur) if dur is not None else None,
     )
+    mode = str(frame_opts.get("frames") or "auto")
+    has_clips = bool(frame_opts.get("clips"))
+    has_gif = bool(frame_opts.get("gif_ranges"))
+    clips_flag = (bool(want_clips) and has_clips) or bool(want_concat)
+    want_frames = mode != "none" and (
+        has_gif or (mode in ("auto", "gif", "jpg") and want_notes)
+    )
+    work = _work_dir(platform, video_id)
+    has_srt = bool(list_locale_srts(work))
+    opts_map = media_opts if isinstance(media_opts, dict) else {}
+    raw_if = opts_map.get("input_from")
+    if not isinstance(raw_if, dict):
+        raw_if = opts_map.get("input_from_map")
+    input_from_map = _normalize_input_from_map(
+        raw_if if isinstance(raw_if, dict) else None
+    )
+    tasks_spec = expand_workflow_tasks(
+        want_translate=want_translate,
+        want_notes=want_notes,
+        want_clips=clips_flag,
+        want_frames=want_frames,
+        want_dehardsub=want_dehardsub,
+        want_deblur=want_deblur,
+        want_enhance=want_enhance,
+        want_compress=want_compress,
+        want_concat=want_concat,
+        want_remix=want_remix,
+        want_publish=want_publish,
+        stages=stages,
+        has_source_srt=has_srt,
+        input_from=input_from_map,
+    )
+    pack = pack_id_for(platform, video_id)
     queue = QueueDB()
     try:
-        result = queue.enqueue(c, priority="high")
-        job_id = _job_id(queue, platform, video_id)
-        if job_id is None:
-            return {"ok": False, "error": "enqueue failed"}
-        if result == "ignored":
-            job = queue.get_job(job_id)
-            if job and job["status"] in ("dead", "failed", "cancelled"):
-                if queue.requeue_job(job_id):
-                    result = "requeued"
-            elif job and job["status"] == "pending":
-                result = "already_pending"
-            elif job and job["status"] in ("done", "published"):
-                result = "already_done"
-            elif job and job["status"] == "processing":
-                result = "already_processing"
-        elif result == "skipped_done":
-            result = "already_done"
-        job = queue.get_job(job_id)
-        prev_langs = job_langs(job) if job else "site"
-        prev_frame_opts = job_frame_opts(job) if job else normalize_frame_opts()
-        job_status = str(job["status"]) if job else None
-        meta_patch: dict = {
-            "frame_opts": frame_opts,
-            "langs": langs_pack,
-            "want_translate": bool(want_translate),
-            "want_notes": bool(want_notes),
-        }
-        if result != "already_done":
-            mode = str(frame_opts.get("frames") or "auto")
-            has_media = (
-                mode != "none"
-                or bool(frame_opts.get("clips"))
-                or bool(frame_opts.get("gif_ranges"))
+        task_results: list[dict] = []
+        starter: int | None = None
+        prev_langs = "site"
+        prev_frame_opts = normalize_frame_opts()
+        job_status = None
+        for spec in tasks_spec:
+            wf_name = spec["workflow"]
+            force = False
+            existing = queue.get_job_by_workflow(platform, video_id, wf_name)
+            if existing and existing["status"] in ("done", "published"):
+                # Re-run when user explicitly toggled this module again.
+                force = True
+            jid, result = _upsert_workflow_job(
+                queue, c, workflow=wf_name, pack_id=pack, force_requeue=force
             )
+            if jid is None:
+                return {"ok": False, "error": f"enqueue failed for {wf_name}"}
+            job = queue.get_job(jid)
+            if job:
+                prev_langs = job_langs(job)
+                prev_frame_opts = job_frame_opts(job)
+                job_status = str(job["status"])
+            meta_patch: dict = {
+                "frame_opts": frame_opts,
+                "langs": langs_pack,
+                "want_translate": bool(want_translate),
+                "want_notes": bool(want_notes),
+                "workflow": wf_name,
+                "pack_id": pack,
+                "stages": spec["stages"],
+            }
+            if spec.get("input_from") is not None:
+                meta_patch["input_from"] = spec["input_from"]
+            if spec.get("depends_on"):
+                meta_patch["depends_on"] = list(spec["depends_on"])
             meta_patch.update(
                 _media_workflow_fields(
                     want_translate=want_translate,
                     want_notes=want_notes,
-                    has_media=has_media,
-                    stages=stages,
+                    has_media=clips_flag or want_frames,
+                    stages=spec["stages"],
                     want_dehardsub=want_dehardsub,
                     want_deblur=want_deblur,
                     want_enhance=want_enhance,
@@ -1614,48 +1973,43 @@ def submit_url(
                     media_opts=media_opts,
                 )
             )
-        elif want_dehardsub or want_deblur or want_enhance or want_compress or want_concat or want_remix or want_publish:
-            post: list[str] = []
-            if want_dehardsub:
-                post.append("dehardsub")
-                if want_deblur:
-                    post.append("deblur")
-            if want_concat:
-                post.extend(["clips", "concat"])
-            if want_enhance:
-                post.append("enhance")
-            if want_compress:
-                post.append("compress")
-            if want_remix:
-                post.append("remix")
-            if want_publish:
-                post.append("publish")
-            post_stages = ",".join(dict.fromkeys(post))
-            wf = _media_workflow_fields(
-                want_translate=want_translate,
-                want_notes=want_notes,
-                has_media=False,
-                stages=post_stages,
-                want_dehardsub=want_dehardsub,
-                want_deblur=want_deblur,
-                want_enhance=want_enhance,
-                want_compress=want_compress,
-                want_concat=want_concat,
-                want_remix=want_remix,
-                want_publish=want_publish,
-                media_opts=media_opts,
+            # Per-task stages / handoff win over combined compose.
+            meta_patch["stages"] = spec["stages"]
+            if spec.get("input_from") is not None:
+                meta_patch["input_from"] = spec["input_from"]
+            if spec.get("depends_on"):
+                meta_patch["depends_on"] = list(spec["depends_on"])
+            queue.set_meta(jid, meta_patch)
+            task_results.append(
+                {
+                    "job_id": jid,
+                    "workflow": wf_name,
+                    "stages": spec["stages"],
+                    "enqueue": result,
+                    "input_from": spec.get("input_from"),
+                    "depends_on": list(spec.get("depends_on") or []),
+                }
             )
-            wf["stages"] = post_stages
-            meta_patch.update(wf)
-            if queue.requeue_job(job_id, allow_done=True):
-                result = "requeued"
-        queue.set_meta(job_id, meta_patch)
+            if starter is None and result in (
+                "inserted",
+                "requeued",
+                "already_pending",
+            ):
+                starter = jid
+        if starter is None and task_results:
+            starter = int(task_results[0]["job_id"])
+        primary = next(
+            (t for t in task_results if t["job_id"] == starter),
+            task_results[0] if task_results else None,
+        )
         return {
             "ok": True,
-            "job_id": job_id,
-            "enqueue": result,
+            "job_id": starter,
+            "enqueue": (primary or {}).get("enqueue", "inserted"),
             "platform": platform,
             "video_id": video_id,
+            "pack_id": pack,
+            "tasks": task_results,
             "frame_opts": frame_opts,
             "langs": langs_pack,
             "prev_langs": prev_langs,
@@ -1732,6 +2086,7 @@ def submit_upload(
     frame_opts: dict | None = None,
     want_translate: bool = True,
     want_notes: bool = True,
+    want_clips: bool = False,
     stages: str | None = None,
     want_dehardsub: bool = False,
     want_deblur: bool = False,
@@ -1763,55 +2118,110 @@ def submit_upload(
         topic_id=topic,
         score=9999.0,
     )
+    mode = str(frame_opts.get("frames") or "auto")
+    has_clips = bool(frame_opts.get("clips"))
+    has_gif = bool(frame_opts.get("gif_ranges"))
+    clips_flag = (bool(want_clips) and has_clips) or bool(want_concat)
+    want_frames = mode != "none" and (
+        has_gif or (mode in ("auto", "gif", "jpg") and want_notes)
+    )
+    opts_map = media_opts if isinstance(media_opts, dict) else {}
+    raw_if = opts_map.get("input_from")
+    if not isinstance(raw_if, dict):
+        raw_if = opts_map.get("input_from_map")
+    input_from_map = _normalize_input_from_map(
+        raw_if if isinstance(raw_if, dict) else None
+    )
+    tasks_spec = expand_workflow_tasks(
+        want_translate=want_translate,
+        want_notes=want_notes,
+        want_clips=clips_flag,
+        want_frames=want_frames,
+        want_dehardsub=want_dehardsub,
+        want_deblur=want_deblur,
+        want_enhance=want_enhance,
+        want_compress=want_compress,
+        want_concat=want_concat,
+        want_remix=want_remix,
+        want_publish=want_publish,
+        stages=stages,
+        has_source_srt=False,
+        input_from=input_from_map,
+    )
+    pack = pack_id_for("upload", uid)
     queue = QueueDB()
     try:
-        result = queue.enqueue(c, priority="high")
-        job_id = _job_id(queue, "upload", uid)
-        if job_id is None:
-            return {"ok": False, "error": "enqueue failed"}
-        if result == "ignored":
-            job = queue.get_job(job_id)
-            if job and job["status"] in ("dead", "failed"):
-                if queue.requeue_job(job_id):
-                    result = "requeued"
-        if wav:
-            queue.set_source_wav(job_id, str(wav))
-        mode = str(frame_opts.get("frames") or "auto")
-        has_media = (
-            mode != "none"
-            or bool(frame_opts.get("clips"))
-            or bool(frame_opts.get("gif_ranges"))
-        )
-        wf = _media_workflow_fields(
-            want_translate=want_translate,
-            want_notes=want_notes,
-            has_media=has_media,
-            stages=stages,
-            want_dehardsub=want_dehardsub,
-            want_deblur=want_deblur,
-            want_enhance=want_enhance,
-            want_compress=want_compress,
-            want_concat=want_concat,
-            want_remix=want_remix,
-            want_publish=want_publish,
-            media_opts=media_opts,
-        )
-        queue.set_meta(
-            job_id,
-            {
+        task_results: list[dict] = []
+        starter: int | None = None
+        for spec in tasks_spec:
+            jid, result = _upsert_workflow_job(
+                queue, c, workflow=spec["workflow"], pack_id=pack
+            )
+            if jid is None:
+                return {"ok": False, "error": f"enqueue failed for {spec['workflow']}"}
+            if wav:
+                queue.set_source_wav(jid, str(wav))
+            meta_patch = {
                 "frame_opts": frame_opts,
                 "langs": langs_pack,
                 "want_translate": bool(want_translate),
                 "want_notes": bool(want_notes),
-                **wf,
-            },
-        )
+                "workflow": spec["workflow"],
+                "pack_id": pack,
+                "stages": spec["stages"],
+            }
+            if spec.get("input_from") is not None:
+                meta_patch["input_from"] = spec["input_from"]
+            if spec.get("depends_on"):
+                meta_patch["depends_on"] = list(spec["depends_on"])
+            meta_patch.update(
+                _media_workflow_fields(
+                    want_translate=want_translate,
+                    want_notes=want_notes,
+                    has_media=clips_flag or want_frames,
+                    stages=spec["stages"],
+                    want_dehardsub=want_dehardsub,
+                    want_deblur=want_deblur,
+                    want_enhance=want_enhance,
+                    want_compress=want_compress,
+                    want_concat=want_concat,
+                    want_remix=want_remix,
+                    want_publish=want_publish,
+                    media_opts=media_opts,
+                )
+            )
+            meta_patch["stages"] = spec["stages"]
+            if spec.get("input_from") is not None:
+                meta_patch["input_from"] = spec["input_from"]
+            if spec.get("depends_on"):
+                meta_patch["depends_on"] = list(spec["depends_on"])
+            queue.set_meta(jid, meta_patch)
+            task_results.append(
+                {
+                    "job_id": jid,
+                    "workflow": spec["workflow"],
+                    "stages": spec["stages"],
+                    "enqueue": result,
+                    "input_from": spec.get("input_from"),
+                    "depends_on": list(spec.get("depends_on") or []),
+                }
+            )
+            if starter is None and result in (
+                "inserted",
+                "requeued",
+                "already_pending",
+            ):
+                starter = jid
+        if starter is None and task_results:
+            starter = int(task_results[0]["job_id"])
         return {
             "ok": True,
-            "job_id": job_id,
-            "enqueue": result,
+            "job_id": starter,
+            "enqueue": "inserted",
             "platform": "upload",
             "video_id": uid,
+            "pack_id": pack,
+            "tasks": task_results,
             "work_dir": str(work_dir),
             "frame_opts": frame_opts,
             "langs": langs_pack,
@@ -1831,6 +2241,7 @@ def submit_uploads(
     langs: str | list | None = None,
     want_translate: bool = True,
     want_notes: bool = True,
+    want_clips: bool = False,
     stages: str | None = None,
     want_dehardsub: bool = False,
     want_deblur: bool = False,
@@ -1877,6 +2288,7 @@ def submit_uploads(
             langs=langs,
             want_translate=want_translate,
             want_notes=want_notes,
+            want_clips=want_clips,
             stages=stages,
             want_dehardsub=want_dehardsub,
             want_deblur=want_deblur,
@@ -2000,8 +2412,15 @@ def run_try_job(job_id: int) -> dict:
             if job["status"] in ("dead", "failed"):
                 return job_snapshot(job_id)
 
-            video_id = job["video_id"]
-            claimed = queue.claim_next(max_attempts=5, video_id=video_id)
+            if job["status"] == "pending" and not _deps_satisfied(queue, job):
+                return {
+                    "ok": False,
+                    "waiting_for_depends_on": True,
+                    "job_id": job_id,
+                    "depends_on": list(_job_meta_dict(job).get("depends_on") or []),
+                }
+
+            claimed = queue.claim_next(max_attempts=5, job_id=job_id)
             if claimed is None:
                 return job_snapshot(job_id)
             job = claimed
@@ -2015,6 +2434,7 @@ def run_try_job(job_id: int) -> dict:
             stages = "all"
             want_translate = True
             want_notes = True
+            workflow = _job_workflow(job)
             meta_json = _job_field(job, "meta_json")
             if meta_json:
                 try:
@@ -2028,6 +2448,11 @@ def run_try_job(job_id: int) -> dict:
                             want_notes = bool(meta["want_notes"])
                 except (TypeError, ValueError, json.JSONDecodeError):
                     pass
+            # Independent WF jobs: skip flags follow this task's stages, not pack toggles.
+            if workflow not in ("all", ""):
+                enabled = {p.strip() for p in stages.split(",") if p.strip()}
+                want_translate = "translate" in enabled
+                want_notes = bool(enabled & {"notes", "localize"})
 
             if platform in ("bilibili", "youtube", "hls"):
                 work_dir = WORK_ROOT / f"{platform}_{video_id}"
@@ -2041,7 +2466,7 @@ def run_try_job(job_id: int) -> dict:
                     queue.cancel_job(job_id, reason="用户已取消")
                     return job_snapshot(job_id)
                 print(
-                    f"[try] langs={langs_pack} stages={stages} "
+                    f"[try] workflow={workflow} langs={langs_pack} stages={stages} "
                     f"translate={want_translate} notes={want_notes}"
                 )
                 process_job(

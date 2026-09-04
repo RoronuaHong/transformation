@@ -1740,18 +1740,19 @@ def transcribe_video(args: argparse.Namespace) -> tuple[list[dict], Path, str, P
     srt = locale_srt_path(out_dir, args.source_lang, stem)
     write_srt(segs, srt)
     sync_path = media / "sync_meta.json"
-    write_sync_meta(
-        sync_path,
-        {
-            "canonical_source": str(video),
-            "source_wav": str(wav),
-            "source_lang": args.source_lang,
-            "slice_start_sec": slice_start,
-            "sync_shift_ms": sync_shift_ms,
-            "cue_count": len(segs),
-            "multipass": bool(args.multipass),
-        },
-    )
+    sync_payload = {
+        "canonical_source": str(video),
+        "source_wav": str(wav),
+        "source_lang": args.source_lang,
+        "slice_start_sec": slice_start,
+        "sync_shift_ms": sync_shift_ms,
+        "cue_count": len(segs),
+        "multipass": bool(args.multipass),
+    }
+    if sync_shift_ms:
+        sync_payload["embed_shift_ms"] = sync_shift_ms
+        sync_payload["reason"] = "embed_ads"
+    write_sync_meta(sync_path, sync_payload)
     print(f"[out] {srt}")
     print(f"[out] {sync_path}")
     return segs, out_dir, stem, srt

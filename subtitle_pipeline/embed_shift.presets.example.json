@@ -1,0 +1,5 @@
+{
+  "_comment": "Copy to embed_shift.presets.json and set ms after measuring embed vs downloaded wav (3 sample points). ms>0 delays captions.",
+  "youtube": 0,
+  "bilibili": 0
+}

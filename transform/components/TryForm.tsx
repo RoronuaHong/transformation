@@ -65,7 +65,38 @@ type Poll = {
   };
   cached?: boolean;
   duration_sec?: number | null;
+  workflow?: string;
+  pack_id?: string;
+  pack_zip_url?: string | null;
+  pack_tasks?: {
+    job_id: number;
+    workflow: string;
+    status: string;
+    error?: string | null;
+    input_from?: string | null;
+    depends_on?: string[];
+    progress?: Progress;
+    download_url?: string | null;
+    pack_zip_url?: string | null;
+    products?: Array<{
+      name: string;
+      kind: string;
+      rel: string;
+      bytes?: number | null;
+      url?: string | null;
+    }>;
+  }[];
+  artifacts?: Array<{
+    key: string;
+    label: string;
+    path: string;
+    bytes?: number | null;
+  }>;
+  input_from?: string | null;
+  depends_on?: string[];
   derived?: {
+    dehardsub?: string;
+    deblur?: string;
     enhance?: string;
     compress?: string;
     concat?: string;
@@ -291,27 +322,18 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
   const [targetLangs, setTargetLangs] = useState<Locale[]>(() => [...locales]);
   const [wantTranslate, setWantTranslate] = useState(true);
   const [wantNotes, setWantNotes] = useState(true);
-  const [wantClips, setWantClips] = useState(true);
+  const [wantClips, setWantClips] = useState(false);
   const [wantEnhance, setWantEnhance] = useState(false);
   const [wantDehardsub, setWantDehardsub] = useState(false);
+  const [wantDeblur, setWantDeblur] = useState(false);
   const [wantCompress, setWantCompress] = useState(false);
   const [wantConcat, setWantConcat] = useState(false);
   const [wantRemix, setWantRemix] = useState(false);
   const [wantPublish, setWantPublish] = useState(false);
+  /** REQ-A03: per-WF input override, e.g. { enhance: "source" } */
+  const [inputFromMap, setInputFromMap] = useState<Record<string, string>>({});
+  const [kpFillBusy, setKpFillBusy] = useState(false);
   const [publishPlatforms, setPublishPlatforms] = useState<string[]>([]);
-  const [accountSlots, setAccountSlots] = useState<
-    Array<{
-      platform: string;
-      label: string;
-      account_id: string;
-      status: "valid" | "invalid" | "unbound";
-      bound: boolean;
-    }>
-  >([]);
-  const [accountDrafts, setAccountDrafts] = useState<
-    Record<string, { secret: string; label: string; account_id: string }>
-  >({});
-  const [accountBusy, setAccountBusy] = useState<string | null>(null);
   const [enhanceStrength, setEnhanceStrength] = useState<"light" | "medium" | "strong">(
     "medium"
   );
@@ -322,6 +344,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
   const [prevLangs, setPrevLangs] = useState<string | null>(null);
   const [prevFrameOpts, setPrevFrameOpts] = useState<FrameOptsLike | null>(null);
   const [langsOpen, setLangsOpen] = useState(false);
+  const [langsQuery, setLangsQuery] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [poll, setPoll] = useState<Poll | null>(null);
   const [batchJobs, setBatchJobs] = useState<
@@ -342,37 +365,9 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
   const probeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollFailRef = useRef(0);
   const langsDdRef = useRef<HTMLDivElement | null>(null);
+  const langsSearchRef = useRef<HTMLInputElement | null>(null);
   const batchJobsRef = useRef(batchJobs);
   batchJobsRef.current = batchJobs;
-
-  const loadAccounts = useCallback(async () => {
-    try {
-      const r = await fetch(`${API}/api/try/accounts`);
-      if (!r.ok) return;
-      const data = (await r.json()) as {
-        accounts?: Array<{
-          platform: string;
-          label: string;
-          account_id: string;
-          status: "valid" | "invalid" | "unbound";
-          bound: boolean;
-        }>;
-      };
-      const slots = data.accounts || [];
-      setAccountSlots(slots);
-      const valid = slots.filter((s) => s.status === "valid").map((s) => s.platform);
-      setPublishPlatforms((prev) => {
-        const keep = prev.filter((p) => valid.includes(p));
-        return keep.length ? keep : valid;
-      });
-    } catch {
-      /* backend may be down */
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadAccounts();
-  }, [loadAccounts]);
 
   const parsedUrls = useMemo(() => parseUrlLines(urlsText), [urlsText]);
 
@@ -495,13 +490,11 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
   const concatMissingRanges =
     wantConcat &&
     (sourceItems.length === 0 || sourceItems.some(({ key }) => filledClipCount(key) < 2));
-  const validPublish = accountSlots.filter((s) => s.status === "valid");
-  const publishBlocked =
-    wantPublish && (validPublish.length === 0 || publishPlatforms.length === 0);
   const hasAnyModule =
     wantTranslate ||
     wantNotes ||
     wantDehardsub ||
+    wantDeblur ||
     wantEnhance ||
     wantCompress ||
     wantConcat ||
@@ -513,6 +506,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     wantNotes,
     hasMedia: wantClips && (batchHasClips || batchHasGif || batchFrames !== "none"),
     wantDehardsub,
+    wantDeblur,
     wantEnhance,
     wantCompress,
     wantConcat,
@@ -537,7 +531,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     copy,
     plannedIntent,
     targetLangs.length,
-    wantDehardsub || wantEnhance || wantCompress || wantConcat || wantRemix || wantPublish
+    wantDehardsub || wantDeblur || wantEnhance || wantCompress || wantConcat || wantRemix || wantPublish
   );
   const langsSummary = allLangsSelected
     ? copy.langsAllLabel
@@ -806,15 +800,21 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     setTargetLangs([...locales]);
     setWantTranslate(true);
     setWantNotes(true);
-    setWantClips(true);
+    setWantClips(false);
     setWantDehardsub(false);
+    setWantDeblur(false);
     setWantEnhance(false);
+    setInputFromMap({});
     setWantCompress(false);
     setWantConcat(false);
+    setWantRemix(false);
+    setWantPublish(false);
+    setPublishPlatforms([]);
     setEnhanceStrength("medium");
     setCompressHeight(720);
     setCompressCrf(28);
     setLangsOpen(false);
+    setLangsQuery("");
     setSubmitting(false);
     setPoll(null);
     setBatchJobs([]);
@@ -846,6 +846,10 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
           error: data.error,
           progress: data.progress,
           queue_ahead: data.queue_ahead,
+          workflow: data.workflow,
+          pack_id: data.pack_id,
+          pack_tasks: data.pack_tasks,
+          pack_zip_url: data.pack_zip_url,
           queue_position: data.queue_position,
           busy: data.busy,
         });
@@ -1106,7 +1110,9 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
             langs: targetLangs,
             want_translate: wantTranslate,
             want_notes: wantNotes,
+            want_clips: wantClips,
             want_dehardsub: wantDehardsub,
+            want_deblur: wantDeblur,
             want_enhance: wantEnhance,
             want_compress: wantCompress,
             want_concat: wantConcat,
@@ -1117,6 +1123,9 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
               compress_height: compressHeight,
               compress_crf: compressCrf,
               publish_platforms: publishPlatforms,
+              ...(Object.keys(inputFromMap).length
+                ? { input_from: inputFromMap }
+                : {}),
             },
             stages: stagesPayload,
             ...(sessionid.trim() ? { sessionid: sessionid.trim() } : {}),
@@ -1140,7 +1149,9 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
         fd.append("langs", JSON.stringify(targetLangs));
         fd.append("want_translate", wantTranslate ? "true" : "false");
         fd.append("want_notes", wantNotes ? "true" : "false");
+        fd.append("want_clips", wantClips ? "true" : "false");
         fd.append("want_dehardsub", wantDehardsub ? "true" : "false");
+        fd.append("want_deblur", wantDeblur ? "true" : "false");
         fd.append("want_enhance", wantEnhance ? "true" : "false");
         fd.append("want_compress", wantCompress ? "true" : "false");
         fd.append("want_concat", wantConcat ? "true" : "false");
@@ -1153,6 +1164,9 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
             compress_height: compressHeight,
             compress_crf: compressCrf,
             publish_platforms: publishPlatforms,
+            ...(Object.keys(inputFromMap).length
+              ? { input_from: inputFromMap }
+              : {}),
           })
         );
         fd.append("stages", stagesPayload);
@@ -1170,6 +1184,12 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
         langs?: string;
         batch?: boolean;
         queued?: number;
+        tasks?: Array<{
+          job_id: number;
+          workflow: string;
+          stages?: string;
+          enqueue?: string;
+        }>;
         jobs?: Array<{
           job_id?: number;
           url?: string;
@@ -1181,6 +1201,12 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
           progress?: Progress;
           frame_opts?: FrameOptsLike;
           ok?: boolean;
+          tasks?: Array<{
+            job_id: number;
+            workflow: string;
+            stages?: string;
+            enqueue?: string;
+          }>;
         }>;
       };
       if (data.batch && typeof data.queued === "number") {
@@ -1193,34 +1219,68 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
       else if (data.jobs?.[0]?.frame_opts) setPrevFrameOpts(data.jobs[0].frame_opts);
 
       const jobsRaw = Array.isArray(data.jobs) ? data.jobs : [];
-      const mapped =
-        jobsRaw.length > 0
-          ? jobsRaw
-              .filter(
-                (j): j is typeof j & { job_id: number } => typeof j.job_id === "number"
-              )
-              .map((j) => ({
-                job_id: j.job_id,
-                label: j.url || j.filename || j.title || String(j.job_id),
+      let mapped: Array<{
+        job_id: number;
+        label: string;
+        status: string;
+        path?: string;
+        title?: string;
+        error?: string | null;
+        progress?: Progress;
+      }> = [];
+      if (jobsRaw.length > 0) {
+        for (const j of jobsRaw) {
+          const tasks = Array.isArray(j.tasks) ? j.tasks : [];
+          if (tasks.length > 0) {
+            for (const t of tasks) {
+              if (typeof t.job_id !== "number") continue;
+              mapped.push({
+                job_id: t.job_id,
+                label: `${j.url || j.filename || j.title || ""} · ${t.workflow}`.trim(),
                 status: j.status || (j.ok === false ? "failed" : "pending"),
                 path: j.path,
                 title: j.title,
                 error: j.error ?? null,
                 progress: j.progress,
-              }))
-          : typeof data.job_id === "number"
-            ? [
-                {
-                  job_id: data.job_id,
-                  label: sourceItems[0]?.label || String(data.job_id),
-                  status: data.status || "pending",
-                  path: data.path,
-                  title: data.title,
-                  error: data.error ?? null,
-                  progress: data.progress,
-                },
-              ]
-            : [];
+              });
+            }
+          } else if (typeof j.job_id === "number") {
+            mapped.push({
+              job_id: j.job_id,
+              label: j.url || j.filename || j.title || String(j.job_id),
+              status: j.status || (j.ok === false ? "failed" : "pending"),
+              path: j.path,
+              title: j.title,
+              error: j.error ?? null,
+              progress: j.progress,
+            });
+          }
+        }
+      } else if (Array.isArray(data.tasks) && data.tasks.length > 0) {
+        mapped = data.tasks
+          .filter((t) => typeof t.job_id === "number")
+          .map((t) => ({
+            job_id: t.job_id,
+            label: `${sourceItems[0]?.label || ""} · ${t.workflow}`.trim(),
+            status: data.status || "pending",
+            path: data.path,
+            title: data.title,
+            error: data.error ?? null,
+            progress: data.progress,
+          }));
+      } else if (typeof data.job_id === "number") {
+        mapped = [
+          {
+            job_id: data.job_id,
+            label: sourceItems[0]?.label || String(data.job_id),
+            status: data.status || "pending",
+            path: data.path,
+            title: data.title,
+            error: data.error ?? null,
+            progress: data.progress,
+          },
+        ];
+      }
       setBatchJobs(mapped);
       batchJobsRef.current = mapped;
 
@@ -1301,6 +1361,64 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     : null;
   const queueAheadPct = queueAheadProgress?.percent ?? 0;
 
+  async function fillClipsFromKeyPoints() {
+    const jid = poll?.job_id || batchJobs.find((j) => j.job_id)?.job_id;
+    if (!jid || !sourceItems.length) {
+      setErr(copy.kpFillNeedJob);
+      return;
+    }
+    setKpFillBusy(true);
+    setErr(null);
+    try {
+      const r = await fetch(`${API}/api/try/${jid}/keypoint-clips`);
+      const data = (await r.json()) as {
+        ok?: boolean;
+        detail?: string;
+        error?: string;
+        clips?: Array<{ start: number; end: number; title?: string }>;
+      };
+      if (!r.ok || !data.ok) {
+        throw new Error(data.detail || data.error || copy.kpFillFailed);
+      }
+      const rows: ClipRow[] = (data.clips || []).map((c) => ({
+        start: String(c.start),
+        end: String(c.end),
+      }));
+      if (!rows.length) {
+        throw new Error(copy.kpFillEmpty);
+      }
+      for (const { key } of sourceItems) {
+        patchSourceMedia(key, {
+          clips: rows,
+          frames: "none",
+        });
+      }
+      setWantClips(true);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setKpFillBusy(false);
+    }
+  }
+
+  const langsFiltered = useMemo(() => {
+    const q = langsQuery.trim().toLowerCase();
+    if (!q) return [...locales];
+    return locales.filter((code) => {
+      const name = localeNames[code].toLowerCase();
+      return name.includes(q) || code.toLowerCase().includes(q);
+    });
+  }, [langsQuery]);
+
+  useEffect(() => {
+    if (!langsOpen) {
+      setLangsQuery("");
+      return;
+    }
+    const t = window.setTimeout(() => langsSearchRef.current?.focus(), 30);
+    return () => window.clearTimeout(t);
+  }, [langsOpen]);
+
   return (
     <div className="try-panel">
       <div className="try-workflow-rail-wrap">
@@ -1319,56 +1437,56 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
             {
               id: "translate",
               on: wantTranslate,
-              set: setWantTranslate,
+              toggle: () => setWantTranslate((v) => !v),
               label: copy.workflowRailTranslate,
             },
             {
               id: "notes",
               on: wantNotes,
-              set: setWantNotes,
+              toggle: () => setWantNotes((v) => !v),
               label: copy.workflowRailNotes,
             },
             {
               id: "clips",
               on: wantClips,
-              set: setWantClips,
+              toggle: () => setWantClips((v) => !v),
               label: copy.workflowRailClips,
             },
             {
               id: "dehardsub",
               on: wantDehardsub,
-              set: setWantDehardsub,
+              toggle: () => setWantDehardsub((v) => !v),
               label: copy.workflowRailDehardsub,
+            },
+            {
+              id: "deblur",
+              on: wantDeblur,
+              toggle: () => setWantDeblur((v) => !v),
+              label: copy.workflowRailDeblur,
             },
             {
               id: "enhance",
               on: wantEnhance,
-              set: setWantEnhance,
+              toggle: () => setWantEnhance((v) => !v),
               label: copy.workflowRailEnhance,
             },
             {
               id: "compress",
               on: wantCompress,
-              set: setWantCompress,
+              toggle: () => setWantCompress((v) => !v),
               label: copy.workflowRailCompress,
             },
             {
               id: "concat",
               on: wantConcat,
-              set: setWantConcat,
+              toggle: () => setWantConcat((v) => !v),
               label: copy.workflowRailConcat,
             },
             {
               id: "remix",
               on: wantRemix,
-              set: setWantRemix,
+              toggle: () => setWantRemix((v) => !v),
               label: copy.workflowRailRemix,
-            },
-            {
-              id: "publish",
-              on: wantPublish,
-              set: setWantPublish,
-              label: copy.workflowRailPublish,
             },
           ] as const
         ).map((wf) => (
@@ -1378,7 +1496,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
               className="try-workflow-rail-toggle"
               aria-pressed={wf.on}
               disabled={submitting}
-              onClick={() => wf.set((v) => !v)}
+              onClick={wf.toggle}
             >
               <span className="try-workflow-rail-n" aria-hidden="true">
                 {wf.on ? "✓" : "–"}
@@ -1657,6 +1775,15 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
           <section className="try-section try-outputs">
             <header className="try-section-head">
               <h2 className="try-section-title">{copy.clipsSection}</h2>
+              <div className="try-section-head-actions">
+                <button
+                  type="button"
+                  className="try-sync-first"
+                  disabled={submitting || kpFillBusy || !poll?.job_id}
+                  onClick={() => void fillClipsFromKeyPoints()}
+                >
+                  {kpFillBusy ? copy.kpFillBusy : copy.kpFillFromNotes}
+                </button>
               {sourceItems.length > 1 ? (
                 <button
                   type="button"
@@ -1667,6 +1794,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                   {copy.applyDefaultsAll}
                 </button>
               ) : null}
+              </div>
             </header>
 
             {sourceItems.length === 0 ? (
@@ -1714,7 +1842,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
           </section>
         ) : null}
 
-        {wantEnhance || wantCompress || wantConcat || wantRemix || wantPublish ? (
+        {wantEnhance || wantCompress || wantConcat || wantRemix || wantPublish || wantDeblur || wantDehardsub || wantClips ? (
           <section className="try-section try-postproc">
             <header className="try-section-head">
               <h2 className="try-section-title">
@@ -1726,9 +1854,49 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                   wantPublish ? copy.workflowRailPublish : null,
                 ]
                   .filter(Boolean)
-                  .join(" · ")}
+                  .join(" · ") || copy.modulesSection}
               </h2>
             </header>
+            {(wantEnhance || wantCompress || wantDeblur || wantClips || wantRemix) ? (
+              <div className="try-field">
+                <span>{copy.inputFromLabel}</span>
+                {(
+                  [
+                    ...(wantClips ? (["clips"] as const) : []),
+                    ...(wantDeblur ? (["deblur"] as const) : []),
+                    ...(wantEnhance ? (["enhance"] as const) : []),
+                    ...(wantCompress ? (["compress"] as const) : []),
+                    ...(wantRemix ? (["remix"] as const) : []),
+                  ] as Array<"clips" | "deblur" | "enhance" | "compress" | "remix">
+                ).map((wf) => (
+                    <label key={wf} className="try-select-row">
+                      <span>{wf}</span>
+                      <select
+                        value={inputFromMap[wf] || ""}
+                        disabled={submitting}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setInputFromMap((prev) => {
+                            const next = { ...prev };
+                            if (!v) delete next[wf];
+                            else next[wf] = v;
+                            return next;
+                          });
+                        }}
+                      >
+                        <option value="">{copy.inputFromAuto}</option>
+                        <option value="source">{copy.inputFromSource}</option>
+                        <option value="dehardsub">{copy.workflowRailDehardsub}</option>
+                        <option value="concat">{copy.workflowRailConcat}</option>
+                        <option value="deblur">{copy.workflowRailDeblur}</option>
+                        <option value="enhance">{copy.workflowRailEnhance}</option>
+                        <option value="compress">{copy.workflowRailCompress}</option>
+                        <option value="remix">{copy.workflowRailRemix}</option>
+                      </select>
+                    </label>
+                  ))}
+              </div>
+            ) : null}
             {wantConcat ? <p className="try-hint">{copy.concatHint}</p> : null}
             {wantConcat && concatMissingRanges ? (
               <p className="try-error">{copy.concatNeedTwo}</p>
@@ -1795,44 +1963,6 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                 <p className="try-hint">{copy.remixHint}</p>
               </div>
             ) : null}
-            {wantPublish ? (
-              <div className="try-field">
-                <span>{copy.publishSection}</span>
-                <p className="try-hint">{copy.publishHint}</p>
-                {validPublish.length === 0 ? (
-                  <p className="try-error">{copy.accountNeedBind}</p>
-                ) : (
-                  <div className="try-frames-options try-postproc-options">
-                    {validPublish.map((slot) => (
-                      <label
-                        key={slot.platform}
-                        className={publishPlatforms.includes(slot.platform) ? "is-on" : undefined}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={publishPlatforms.includes(slot.platform)}
-                          disabled={submitting}
-                          onChange={() =>
-                            setPublishPlatforms((prev) =>
-                              prev.includes(slot.platform)
-                                ? prev.filter((p) => p !== slot.platform)
-                                : [...prev, slot.platform]
-                            )
-                          }
-                        />
-                        <span>
-                          {slot.platform === "douyin"
-                            ? copy.accountDouyin
-                            : slot.platform === "kuaishou"
-                              ? copy.accountKuaishou
-                              : slot.platform}
-                        </span>
-                      </label>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ) : null}
           </section>
         ) : null}
 
@@ -1847,7 +1977,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                 type="button"
                 className={langsOpen ? "try-langs-trigger is-open" : "try-langs-trigger"}
                 aria-expanded={langsOpen}
-                aria-haspopup="dialog"
+                aria-haspopup="listbox"
                 disabled={submitting}
                 onClick={() => setLangsOpen((v) => !v)}
               >
@@ -1873,11 +2003,55 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                     onClick={() => setLangsOpen(false)}
                   />
                   <div
-                    className="try-langs-bubble"
-                    role="dialog"
+                    className="try-langs-bubble try-langs-select"
+                    role="listbox"
+                    aria-multiselectable="true"
                     aria-label={copy.langsSection}
                   >
                     <span className="try-langs-bubble-handle" aria-hidden="true" />
+                    <div className="try-langs-search">
+                      <input
+                        ref={langsSearchRef}
+                        type="search"
+                        value={langsQuery}
+                        disabled={submitting}
+                        placeholder={copy.langsSearch}
+                        aria-label={copy.langsSearch}
+                        autoComplete="off"
+                        onChange={(e) => setLangsQuery(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Escape") setLangsOpen(false);
+                        }}
+                      />
+                    </div>
+                    <div className="try-langs-list" role="group" aria-label={copy.langsSection}>
+                      {langsFiltered.length === 0 ? (
+                        <p className="try-langs-empty">{copy.langsEmpty}</p>
+                      ) : (
+                        langsFiltered.map((code) => {
+                          const on = targetLangs.includes(code);
+                          return (
+                            <button
+                              key={code}
+                              type="button"
+                              role="option"
+                              aria-selected={on}
+                              className={`try-langs-option${on ? " is-on" : ""}`}
+                              disabled={submitting}
+                              onClick={() => toggleLang(code)}
+                            >
+                              <span className="try-langs-option-main">
+                                <em>{localeNames[code]}</em>
+                                <small>{code}</small>
+                              </span>
+                              <span className="try-langs-check" aria-hidden="true">
+                                {on ? "✓" : ""}
+                              </span>
+                            </button>
+                          );
+                        })
+                      )}
+                    </div>
                     <div className="try-langs-bubble-bar">
                       <button
                         type="button"
@@ -1903,29 +2077,6 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                         {copy.langsDone}
                       </button>
                     </div>
-                    <div
-                      className="try-langs-grid"
-                      role="group"
-                      aria-label={copy.langsSection}
-                    >
-                      {locales.map((code) => {
-                        const on = targetLangs.includes(code);
-                        return (
-                          <label key={code} className={on ? "is-on" : undefined}>
-                            <input
-                              type="checkbox"
-                              checked={on}
-                              disabled={submitting}
-                              onChange={() => toggleLang(code)}
-                            />
-                            <span>
-                              <em>{localeNames[code]}</em>
-                              <small>{code}</small>
-                            </span>
-                          </label>
-                        );
-                      })}
-                    </div>
                   </div>
                 </>
               ) : null}
@@ -1939,157 +2090,6 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
             ) : null}
           </section>
         ) : null}
-
-        <section className="try-section try-accounts">
-          <header className="try-section-head">
-            <h2 className="try-section-title">{copy.accountsSection}</h2>
-          </header>
-          <p className="try-hint">{copy.accountsHint}</p>
-          <div className="try-account-grid">
-            {(accountSlots.length
-              ? accountSlots
-              : [
-                  { platform: "douyin", label: "", account_id: "", status: "unbound" as const, bound: false },
-                  { platform: "kuaishou", label: "", account_id: "", status: "unbound" as const, bound: false },
-                ]
-            ).map((slot) => {
-              const draft = accountDrafts[slot.platform] || {
-                secret: "",
-                label: slot.label,
-                account_id: slot.account_id,
-              };
-              const name =
-                slot.platform === "douyin"
-                  ? copy.accountDouyin
-                  : slot.platform === "kuaishou"
-                    ? copy.accountKuaishou
-                    : slot.platform;
-              const statusText =
-                slot.status === "valid"
-                  ? copy.accountValid
-                  : slot.status === "invalid"
-                    ? copy.accountInvalid
-                    : copy.accountUnbound;
-              return (
-                <div key={slot.platform} className="try-account-card">
-                  <div className="try-select-row">
-                    <strong>{name}</strong>
-                    <span className={`try-account-status is-${slot.status}`}>{statusText}</span>
-                  </div>
-                  <label className="try-field">
-                    <span>{copy.accountLabel}</span>
-                    <input
-                      value={draft.label}
-                      disabled={submitting || accountBusy === slot.platform}
-                      onChange={(e) =>
-                        setAccountDrafts((prev) => ({
-                          ...prev,
-                          [slot.platform]: { ...draft, label: e.target.value },
-                        }))
-                      }
-                    />
-                  </label>
-                  <label className="try-field">
-                    <span>{copy.accountId}</span>
-                    <input
-                      value={draft.account_id}
-                      disabled={submitting || accountBusy === slot.platform}
-                      onChange={(e) =>
-                        setAccountDrafts((prev) => ({
-                          ...prev,
-                          [slot.platform]: { ...draft, account_id: e.target.value },
-                        }))
-                      }
-                    />
-                  </label>
-                  <label className="try-field">
-                    <span>{copy.accountSecret}</span>
-                    <textarea
-                      rows={3}
-                      value={draft.secret}
-                      placeholder={slot.bound ? "••••" : ""}
-                      disabled={submitting || accountBusy === slot.platform}
-                      onChange={(e) =>
-                        setAccountDrafts((prev) => ({
-                          ...prev,
-                          [slot.platform]: { ...draft, secret: e.target.value },
-                        }))
-                      }
-                    />
-                  </label>
-                  <div className="try-actions-buttons">
-                    <button
-                      type="button"
-                      className="watch-btn"
-                      disabled={submitting || accountBusy === slot.platform || !draft.secret.trim()}
-                      onClick={async () => {
-                        setAccountBusy(slot.platform);
-                        setErr(null);
-                        try {
-                          const r = await fetch(`${API}/api/try/accounts`, {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({
-                              platform: slot.platform,
-                              secret: draft.secret,
-                              label: draft.label,
-                              account_id: draft.account_id,
-                            }),
-                          });
-                          if (!r.ok) {
-                            const body = (await r.json().catch(() => ({}))) as { detail?: string };
-                            throw new Error(body.detail || r.statusText);
-                          }
-                          setAccountDrafts((prev) => ({
-                            ...prev,
-                            [slot.platform]: { ...draft, secret: "" },
-                          }));
-                          await loadAccounts();
-                        } catch (e) {
-                          setErr(e instanceof Error ? e.message : String(e));
-                        } finally {
-                          setAccountBusy(null);
-                        }
-                      }}
-                    >
-                      {copy.accountBind}
-                    </button>
-                    {slot.bound ? (
-                      <button
-                        type="button"
-                        className="watch-btn secondary"
-                        disabled={submitting || accountBusy === slot.platform}
-                        onClick={async () => {
-                          setAccountBusy(slot.platform);
-                          setErr(null);
-                          try {
-                            const r = await fetch(
-                              `${API}/api/try/accounts/${encodeURIComponent(slot.platform)}`,
-                              { method: "DELETE" }
-                            );
-                            if (!r.ok) {
-                              const body = (await r.json().catch(() => ({}))) as {
-                                detail?: string;
-                              };
-                              throw new Error(body.detail || r.statusText);
-                            }
-                            await loadAccounts();
-                          } catch (e) {
-                            setErr(e instanceof Error ? e.message : String(e));
-                          } finally {
-                            setAccountBusy(null);
-                          }
-                        }}
-                      >
-                        {copy.accountUnbind}
-                      </button>
-                    ) : null}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </section>
 
         <div className="try-actions">
           <p className="try-intent" role="status">
@@ -2114,7 +2114,6 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                 !hasAnyModule ||
                 ((wantTranslate || wantNotes) && targetLangs.length === 0) ||
                 concatMissingRanges ||
-                publishBlocked ||
                 (plannedIntent === "noop" && sourceItems.length <= 1) ||
                 (tab === "url" && cookiesBlockSubmit)
               }
@@ -2177,6 +2176,65 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
             </div>
           ) : null}
 
+          {poll.pack_zip_url ? (
+            <p className="try-pack-zip">
+              <a href={`${API}${poll.pack_zip_url}`} download>
+                {copy.packZipDownload}
+              </a>
+            </p>
+          ) : null}
+
+          {poll.pack_tasks && poll.pack_tasks.length > 0 ? (
+            <ul className="try-pack-tasks" aria-label="workflows">
+              {poll.pack_tasks.map((t) => {
+                const pct = t.progress?.percent ?? (t.status === "done" ? 100 : 0);
+                return (
+                  <li key={t.job_id} className={`try-pack-task is-${t.status}`}>
+                    <div className="try-pack-task-head">
+                      <span className="try-pack-task-wf">{t.workflow}</span>
+                      <span className="try-pack-task-st">{t.status}</span>
+                      {t.input_from ? (
+                        <span className="try-pack-task-in">←{t.input_from}</span>
+                      ) : null}
+                      {t.download_url ? (
+                        <a className="try-pack-task-dl" href={t.download_url} download>
+                          ↓
+                        </a>
+                      ) : null}
+                    </div>
+                    <div
+                      className="try-progress-bar try-pack-task-bar"
+                      role="progressbar"
+                      aria-valuenow={pct}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                    >
+                      <span style={{ width: `${pct}%` }} />
+                    </div>
+                    {t.products && t.products.length > 0 ? (
+                      <ul className="try-pack-task-products">
+                        {t.products.slice(0, 6).map((p) => (
+                          <li key={p.rel}>
+                            {p.url ? (
+                              <a href={p.url.startsWith("/") && !p.url.startsWith("/derived") ? `${API}${p.url}` : p.url} download={p.name}>
+                                {p.name}
+                              </a>
+                            ) : (
+                              <span>{p.name}</span>
+                            )}
+                          </li>
+                        ))}
+                        {t.products.length > 6 ? (
+                          <li>+{t.products.length - 6}</li>
+                        ) : null}
+                      </ul>
+                    ) : null}
+                  </li>
+                );
+              })}
+            </ul>
+          ) : null}
+
           {poll.busy && poll.status === "pending" ? (
             <>
               {poll.queue_position && poll.queue_position > 1 ? (
@@ -2231,6 +2289,20 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                 />
               ) : null}
               <ul>
+                {poll.derived.dehardsub ? (
+                  <li>
+                    <a href={poll.derived.dehardsub} download>
+                      {copy.workflowRailDehardsub}
+                    </a>
+                  </li>
+                ) : null}
+                {poll.derived.deblur ? (
+                  <li>
+                    <a href={poll.derived.deblur} download>
+                      {copy.workflowRailDeblur}
+                    </a>
+                  </li>
+                ) : null}
                 {poll.derived.concat ? (
                   <li>
                     <a href={poll.derived.concat} download>

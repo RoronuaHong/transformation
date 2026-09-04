@@ -38,13 +38,19 @@ CREATE TABLE IF NOT EXISTS jobs (
   source_wav TEXT,
   canonical_url TEXT,
   meta_json TEXT,
+  original_url TEXT,
+  workflow TEXT NOT NULL DEFAULT 'all',
+  pack_id TEXT,
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL,
-  UNIQUE(platform, video_id)
+  UNIQUE(platform, video_id, workflow)
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status_score
   ON jobs(status, priority, score DESC);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_pack
+  ON jobs(pack_id, created_at ASC);
 """
 
 # Columns added after first Phase-0 schema; migrate safely.
@@ -57,6 +63,8 @@ _EXTRA_COLUMNS: dict[str, str] = {
     "query": "TEXT",
     "meta_json": "TEXT",
     "original_url": "TEXT",
+    "workflow": "TEXT NOT NULL DEFAULT 'all'",
+    "pack_id": "TEXT",
 }
 
 
@@ -79,6 +87,138 @@ class QueueDB:
             if col not in existing:
                 self._conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {typ}")
 
+        # Backfill pack_id / workflow for legacy rows.
+        self._conn.execute(
+            """
+            UPDATE jobs
+            SET workflow=COALESCE(NULLIF(workflow, ''), 'all')
+            WHERE workflow IS NULL OR workflow=''
+            """
+        )
+        self._conn.execute(
+            """
+            UPDATE jobs
+            SET pack_id=platform || '_' || video_id
+            WHERE pack_id IS NULL OR pack_id=''
+            """
+        )
+        self._ensure_workflow_unique()
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_pack ON jobs(pack_id, created_at ASC)"
+        )
+
+    def _unique_covers_workflow(self) -> bool:
+        """True when UNIQUE(platform, video_id, workflow) is already in place."""
+        for idx in self._conn.execute("PRAGMA index_list(jobs)").fetchall():
+            # idx: seq, name, unique, origin, partial
+            if not idx[2]:
+                continue
+            cols = [
+                r[2]
+                for r in self._conn.execute(f"PRAGMA index_info('{idx[1]}')").fetchall()
+            ]
+            if cols == ["platform", "video_id", "workflow"]:
+                return True
+        return False
+
+    def _ensure_workflow_unique(self) -> None:
+        """Rebuild jobs table when still UNIQUE(platform, video_id) only."""
+        if self._unique_covers_workflow():
+            return
+        # Detect legacy 2-col unique (sqlite_autoindex or explicit).
+        legacy = False
+        for idx in self._conn.execute("PRAGMA index_list(jobs)").fetchall():
+            if not idx[2]:
+                continue
+            cols = [
+                r[2]
+                for r in self._conn.execute(f"PRAGMA index_info('{idx[1]}')").fetchall()
+            ]
+            if cols == ["platform", "video_id"]:
+                legacy = True
+                break
+        if not legacy:
+            # Fresh table from SCHEMA already has 3-col unique, or no unique yet.
+            if self._unique_covers_workflow():
+                return
+            # Table created by older SCHEMA without rebuild path: force rebuild.
+            # If CREATE TABLE IF NOT EXISTS left old schema, rebuild.
+            # Check table sql:
+            row = self._conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'"
+            ).fetchone()
+            sql = (row[0] or "") if row else ""
+            if "UNIQUE(platform, video_id, workflow)" in sql.replace(" ", ""):
+                return
+            if "UNIQUE(platform, video_id)" in sql.replace(" ", ""):
+                legacy = True
+            else:
+                return
+        if not legacy:
+            return
+
+        self._conn.executescript(
+            """
+            CREATE TABLE jobs_wf (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              platform TEXT NOT NULL,
+              video_id TEXT NOT NULL,
+              url TEXT NOT NULL,
+              title TEXT,
+              topic_id TEXT NOT NULL,
+              author TEXT,
+              author_id TEXT,
+              published_at REAL,
+              views INTEGER,
+              likes INTEGER,
+              comments INTEGER,
+              coins INTEGER,
+              favorites INTEGER,
+              shares INTEGER,
+              duration_sec INTEGER,
+              thumb_url TEXT,
+              description TEXT,
+              query TEXT,
+              score REAL DEFAULT 0,
+              status TEXT NOT NULL DEFAULT 'pending',
+              priority TEXT NOT NULL DEFAULT 'normal',
+              attempts INTEGER NOT NULL DEFAULT 0,
+              last_error TEXT,
+              source_wav TEXT,
+              canonical_url TEXT,
+              meta_json TEXT,
+              original_url TEXT,
+              workflow TEXT NOT NULL DEFAULT 'all',
+              pack_id TEXT,
+              created_at REAL NOT NULL,
+              updated_at REAL NOT NULL,
+              UNIQUE(platform, video_id, workflow)
+            );
+            INSERT INTO jobs_wf(
+              id, platform, video_id, url, title, topic_id, author, author_id,
+              published_at, views, likes, comments, coins, favorites, shares,
+              duration_sec, thumb_url, description, query, score, status, priority,
+              attempts, last_error, source_wav, canonical_url, meta_json, original_url,
+              workflow, pack_id, created_at, updated_at
+            )
+            SELECT
+              id, platform, video_id, url, title, topic_id, author, author_id,
+              published_at, views, likes, comments, coins, favorites, shares,
+              duration_sec, thumb_url, description, query, score, status, priority,
+              attempts, last_error, source_wav, canonical_url, meta_json, original_url,
+              COALESCE(NULLIF(workflow, ''), 'all'),
+              COALESCE(NULLIF(pack_id, ''), platform || '_' || video_id),
+              created_at, updated_at
+            FROM jobs;
+            DROP TABLE jobs;
+            ALTER TABLE jobs_wf RENAME TO jobs;
+            CREATE INDEX IF NOT EXISTS idx_jobs_status_score
+              ON jobs(status, priority, score DESC);
+            CREATE INDEX IF NOT EXISTS idx_jobs_pack
+              ON jobs(pack_id, created_at ASC);
+            """
+        )
+
     def close(self) -> None:
         self._conn.close()
 
@@ -88,11 +228,15 @@ class QueueDB:
         *,
         priority: str = "normal",
         status: str = "pending",
+        workflow: str = "all",
+        pack_id: str | None = None,
     ) -> str:
         """Insert job. Returns inserted | ignored | skipped_done."""
+        wf = (workflow or "all").strip() or "all"
+        pack = (pack_id or f"{c.platform}_{c.video_id}").strip()
         row = self._conn.execute(
-            "SELECT status FROM jobs WHERE platform=? AND video_id=?",
-            (c.platform, c.video_id),
+            "SELECT status FROM jobs WHERE platform=? AND video_id=? AND workflow=?",
+            (c.platform, c.video_id, wf),
         ).fetchone()
         if row is not None:
             st = row["status"]
@@ -110,8 +254,8 @@ class QueueDB:
                   published_at, views, likes, comments, coins, favorites, shares,
                   duration_sec, thumb_url, description, query,
                   score, status, priority, attempts, canonical_url, meta_json,
-                  original_url, created_at, updated_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                  original_url, workflow, pack_id, created_at, updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     c.platform,
@@ -139,6 +283,8 @@ class QueueDB:
                     c.url,
                     meta,
                     c.original_url or c.url,
+                    wf,
+                    pack,
                     now,
                     now,
                 ),
@@ -147,6 +293,29 @@ class QueueDB:
             return "inserted"
         except sqlite3.IntegrityError:
             return "ignored"
+
+    def get_job_by_workflow(
+        self, platform: str, video_id: str, workflow: str = "all"
+    ) -> sqlite3.Row | None:
+        return self._conn.execute(
+            """
+            SELECT * FROM jobs
+            WHERE platform=? AND video_id=? AND workflow=?
+            """,
+            (platform, video_id, workflow),
+        ).fetchone()
+
+    def list_pack_jobs(self, pack_id: str) -> list[sqlite3.Row]:
+        return list(
+            self._conn.execute(
+                """
+                SELECT * FROM jobs
+                WHERE pack_id=?
+                ORDER BY created_at ASC, id ASC
+                """,
+                (pack_id,),
+            )
+        )
 
     def list_pending(self, *, limit: int = 50) -> list[sqlite3.Row]:
         return list(
@@ -165,12 +334,19 @@ class QueueDB:
         )
 
     def claim_next(
-        self, *, max_attempts: int = 3, video_id: str | None = None
+        self,
+        *,
+        max_attempts: int = 3,
+        video_id: str | None = None,
+        job_id: int | None = None,
     ) -> sqlite3.Row | None:
         """Atomically move one pending job to processing. Returns the row or None."""
         params: list = [max_attempts]
         extra = ""
-        if video_id:
+        if job_id is not None:
+            extra = " AND id=?"
+            params.append(job_id)
+        elif video_id:
             extra = " AND video_id=?"
             params.append(video_id)
         row = self._conn.execute(
@@ -330,4 +506,3 @@ class QueueDB:
                 (limit,),
             )
         )
-

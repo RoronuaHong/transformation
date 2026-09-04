@@ -69,13 +69,17 @@ def test_parse_stages_deblur() -> None:
 
 def test_normalize_media_opts_deblur() -> None:
     """锁定 deblur / deblur_engine 透传（此前 media_ops 完全没有该选项）。"""
-    # 默认关闭、默认引擎 realesrgan
+    # 默认关闭、默认引擎 realesrgan；去模糊默认含去马赛克；去烧录默认也顺带 demosaic
     base = normalize_media_opts({})
     assert base["deblur"] is False
     assert base["deblur_engine"] == "realesrgan"
+    assert base["deblur_demosaic"] is True
+    assert base["dehardsub_demosaic"] is True
     # 字符串真值
     assert normalize_media_opts({"deblur": "true"})["deblur"] is True
     assert normalize_media_opts({"deblur": "off"})["deblur"] is False
+    assert normalize_media_opts({"deblur_demosaic": "off"})["deblur_demosaic"] is False
+    assert normalize_media_opts({"dehardsub_demosaic": "0"})["dehardsub_demosaic"] is False
     # 合法引擎保留
     assert normalize_media_opts({"deblur_engine": "basicvsr++"})["deblur_engine"] == "basicvsr++"
     assert (
@@ -83,6 +87,44 @@ def test_normalize_media_opts_deblur() -> None:
     )
     # 非法引擎 → 回落默认
     assert normalize_media_opts({"deblur_engine": "bogus"})["deblur_engine"] == "realesrgan"
+
+
+def test_run_postproc_deblur_runs_demosaic_first(tmp_path: Path, monkeypatch) -> None:
+    """去模糊阶段默认先去马赛克，再超分去模糊。"""
+    import sys
+    import types
+
+    import media_ops as mo
+
+    media = tmp_path / "media"
+    media.mkdir()
+    _tiny_mp4(media / "source.mp4", seconds=0.4)
+    calls: list[str] = []
+
+    def fake_demosaic(src_p, dest, *, work_dir, demosaic_engine=None, passes=None):
+        calls.append("demosaic")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(Path(src_p).read_bytes())
+        return {"action": "copy_no_regions"}
+
+    def fake_deblur(src_p, dest, *, engine="realesrgan", max_height=720):
+        calls.append("deblur")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(Path(src_p).read_bytes())
+
+    monkeypatch.setattr(mo, "demosaic_video", fake_demosaic)
+    mod = types.ModuleType("deblur_basicvsr")
+
+    class DeblurUnavailable(RuntimeError):
+        pass
+
+    mod.DeblurUnavailable = DeblurUnavailable
+    mod.deblur_video = fake_deblur
+    monkeypatch.setitem(sys.modules, "deblur_basicvsr", mod)
+
+    out = mo.run_postproc(tmp_path, frozenset({"deblur"}))
+    assert calls == ["demosaic", "deblur"]
+    assert "deblur" in out and out["deblur"].is_file()
 
 
 def test_normalize_media_opts_demosaic_engine() -> None:

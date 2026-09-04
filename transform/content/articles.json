@@ -1,6 +1,32 @@
 {
   "articles": [
     {
+      "platform": "bilibili",
+      "video_id": "BV1UQ8RzcEGF",
+      "topic": "general",
+      "slug": "bv1uq8rzcegf",
+      "canonical_url": "https://www.bilibili.com/video/BV1UQ8RzcEGF",
+      "embed_url": "https://player.bilibili.com/player.html?bvid=BV1UQ8RzcEGF&high_quality=1&danmaku=0",
+      "source_lang": "en",
+      "title_src": "喜羊羊与灰太狼哪只羊好吃",
+      "author": null,
+      "locales": {
+        "en": {
+          "title": "",
+          "one_liner": "",
+          "summary": "",
+          "outline": [],
+          "keypoints_intro": "",
+          "key_points": [],
+          "focuses": [],
+          "hard_points": [],
+          "srt_path": null
+        }
+      },
+      "cue_clock": "source",
+      "cues": []
+    },
+    {
       "platform": "youtube",
       "video_id": "kV7RuutRx-s",
       "topic": "ai_monetize",
@@ -1340,6 +1366,7 @@
           "srt_path": "D:\\MineWeb\\2026\\Vitual\\subtitle_pipeline\\downloads\\batch\\youtube_kV7RuutRx-s\\subs\\zh-Hant.srt"
         }
       },
+      "cue_clock": "source",
       "cues": [
         {
           "start": "00:00:00,020",
@@ -1737,7 +1764,16 @@
             "zh-Hant": "訂閱以獲得更多簡潔的說明。"
           }
         }
-      ]
+      ],
+      "remix": {
+        "clock": "remix",
+        "video": "/derived/understanding-artificial-intelligence-and-machine-learning-basics/remix.mp4",
+        "vtt": "/derived/understanding-artificial-intelligence-and-machine-learning-basics/remix.vtt",
+        "cues": "/derived/understanding-artificial-intelligence-and-machine-learning-basics/remix_cues.json",
+        "intro_sec": 2.951,
+        "source_clock": "clips",
+        "audio_clock": true
+      }
     }
   ]
 }

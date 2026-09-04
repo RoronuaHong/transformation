@@ -35,12 +35,20 @@ ollama list
 # N1 — enqueue (skip if user already has pending)
 yarn inbox --url "https://www.youtube.com/watch?v=kV7RuutRx-s" --topic ai_monetize --title "What is Artificial Intelligence? | AI Explained in 60 Seconds"
 
-# N2–N7 — 16-lang site pack, no multipass
+# N2–N7 — 16-lang site pack, no multipass (smoke speed)
 yarn batch:fast --requeue-failed
+
+# Quality pass (multipass ASR) before a real publish — not required for smoke:
+# yarn batch:release --requeue-failed
 
 # N8 — JSON must include cues[]; then Next SSG
 yarn export-site
 cd ../transform && npm run build
+
+# Optional sync gate (needs smoke work_dir from a prior remix run):
+# yarn sync:audit:remix
+# yarn sync:spot
+# yarn sync:gate
 ```
 
 Langs: `--langs site` = 16 codes, same set as `transform/lib/locales.ts`（pack 名 `site`，目录名 `transform`）。Priority nav order (human): 中英俄日韩葡德, then 繁中/西/法/阿/印地/印尼/越/泰/土. Code `pt` (not `pt-br`). Notes must include structured fields (see `trans/多语言与笔记.md`). Pipeline bare default is also `site`.
@@ -61,7 +69,18 @@ Optional MCP gate（API 已启时）：`yarn mcp:smoke` — 通过 `/health` + e
 
 ## After a run
 
+**Content green (N0–N8)** — does **not** require remix:
+
 - Queue job `done`; `content.db` article + 16 locales (source lang is a real code, **not** `src`).
 - `articles.json` has per-article `cues` with `start`/`end`/`text.<locale>`.
 - `npm run build` lists `/{locale}/topics/ai_monetize/<slug>` for the 16 locales.
-- Report N0–N8 pass/fail in that order. Do not start a second video unless asked.
+- `media/media_status.json` may show `postproc=skipped` / `remix=skipped` — that is OK for content smoke.
+
+**Remix green (optional WF-07)** — only when stages include `remix` (Try `want_remix`, or `--stages …,remix`):
+
+- `media/remix/remix.mp4` + `remix.vtt` + `remix_cues.json` (`audio_clock: true`).
+- `media_status.remix=ok` (job can still be `done` if content succeeded while remix failed — check this file).
+- Canonical names only (`remix.*`); no `remix_zh` / `remix_ja` leftovers.
+- `python sync_audit.py <work_dir>` → no failures.
+
+Report N0–N8 pass/fail in that order. Say explicitly whether remix was in scope. Do not start a second video unless asked.

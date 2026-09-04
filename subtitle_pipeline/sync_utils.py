@@ -9,7 +9,7 @@ from pathlib import Path
 def apply_slice_offset(segments: list[dict], slice_start_sec: float) -> list[dict]:
     """Map clip-local Whisper times onto full-video clock."""
     if not slice_start_sec:
-        return segments
+        return [dict(s) for s in segments]
     off = float(slice_start_sec)
     out: list[dict] = []
     for s in segments:
@@ -17,6 +17,51 @@ def apply_slice_offset(segments: list[dict], slice_start_sec: float) -> list[dic
         item["start"] = round(float(s["start"]) + off, 3)
         item["end"] = round(float(s["end"]) + off, 3)
         out.append(item)
+    return out
+
+
+def merge_offset_segments(
+    parts: list[tuple[list[dict], float]],
+    *,
+    fix_overlaps: bool = True,
+) -> list[dict]:
+    """Merge clip-local segment lists onto one timeline via per-part offsets.
+
+    Each part is ``(segments, slice_start_sec)`` where times inside ``segments``
+    are relative to the clip (Whisper output starting near 0). Never ``cat``
+    raw SRTs that all start at 0.
+    """
+    merged: list[dict] = []
+    for segs, offset in parts:
+        if not segs:
+            continue
+        merged.extend(apply_slice_offset(list(segs), float(offset)))
+    merged = [s for s in merged if str(s.get("text") or "").strip()]
+    merged.sort(key=lambda s: (float(s["start"]), float(s["end"])))
+    if not fix_overlaps or len(merged) <= 1:
+        return merged
+    out: list[dict] = [dict(merged[0])]
+    for seg in merged[1:]:
+        cur = dict(seg)
+        prev = out[-1]
+        if float(cur["start"]) < float(prev["end"]):
+            if float(cur["start"]) > float(prev["start"]) + 1e-9:
+                # Later cue opens inside prev — trim prev to abut.
+                prev["end"] = round(float(cur["start"]), 3)
+                if float(prev["end"]) <= float(prev["start"]) + 1e-9:
+                    out.pop()
+                    if not out:
+                        out.append(cur)
+                        continue
+                    prev = out[-1]
+                    if float(cur["start"]) < float(prev["end"]):
+                        cur["start"] = round(float(prev["end"]), 3)
+            else:
+                # Same (or earlier) start — typically a bad zero-based cat; delay cur.
+                cur["start"] = round(float(prev["end"]), 3)
+            if float(cur["end"]) <= float(cur["start"]) + 1e-9:
+                continue
+        out.append(cur)
     return out
 
 

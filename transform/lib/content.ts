@@ -151,6 +151,17 @@ type ExportedArticle = {
     }
   >;
   cues?: ExportedCue[];
+  /** Full-length / embed timeline. Distinct from ``remix`` (9:16 overlay clock). */
+  cue_clock?: "source" | string;
+  remix?: {
+    clock?: "remix" | string;
+    video?: string;
+    vtt?: string;
+    cues?: string;
+    intro_sec?: number;
+    source_clock?: string;
+    audio_clock?: boolean;
+  };
 };
 
 type ExportedLocale = ExportedArticle["locales"][string];

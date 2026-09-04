@@ -21,13 +21,16 @@ description: Keeps subtitle timelines aligned with the source video clock. Use w
 - Full-video embed + clip-only ASR requires `--slice-start-sec`.
 - Translate write: `assert_timeline_aligned` (hard fail).
 - Polish/correct must not split/merge cues.
-- Embed ads offset: `yarn shift-srt --in a.srt --ms 200`.
+- Embed ads offset: measure embed vs download, then `yarn shift-embed --work … --ms N` or `--embed-shift-ms`.
+- Multi-slice ASR: `yarn merge-slices --work …` (never `cat` zero-based clip SRTs).
 - ASR writes `{stem}_sync_meta.json`.
 - Remix overlay writes `remix.vtt` on the remix audio clock (`audio_clock: true`).
+- Site serves only `remix.mp4` / `remix.vtt` / `remix_cues.json` (purge `remix_<lang>.*`).
+- Job `done` ≠ remix ok — check `media/media_status.json`.
 
 **Main path** (`main-path` / `yarn batch`): full-length embed, so `slice_start_sec=0`. Do not concatenate clip SRTs that all start at 0 onto a full-length player.
 
-Docs: `trans/字幕同步保障.md`, `trans/字幕同步检查报告.md`. Code: `subtitle_pipeline/sync_utils.py`, `media_ops.overlay_intro_sec`.
+Docs: `trans/字幕同步保障.md`, `trans/字幕同步检查报告.md`. Code: `subtitle_pipeline/sync_utils.py`, `media_ops.overlay_intro_sec`, `embed_shift.py`.
 
 ## Commands
 
@@ -35,4 +38,7 @@ Docs: `trans/字幕同步保障.md`, `trans/字幕同步检查报告.md`. Code: 
 python pipeline.py transcribe clip.wav --slice-start-sec 42 --reuse-audio
 python pipeline.py shift-srt --in a.srt --ms 200 --reason embed_ads
 yarn shift-srt --in path\to\a.srt --ms -500
+yarn merge-slices --work path\to\workdir --lang en --clock source
+yarn sync:spot                     # 3-point bounds + in-cue energy
+yarn sync:audit:remix
 ```

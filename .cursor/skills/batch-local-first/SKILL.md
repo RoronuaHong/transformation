@@ -31,13 +31,26 @@ description: Processes pending queue jobs with ASR/translate/notes and optional 
 ## Commands (cwd = subtitle_pipeline)
 
 ```bash
-yarn batch                         # local, langs=site, limit=1
-yarn batch:fast                    # langs=site, no-multipass, cpu
+yarn batch                         # local, langs=site, limit=1 (multipass on)
+yarn batch:fast                    # smoke: langs=site, no-multipass, cpu
+yarn batch:release                 # publish-quality: multipass ASR, langs=site, cpu
 yarn batch:fast --requeue-failed   # after a failed fetch/ASR
 python -m discover.run_batch --llm-profile hybrid --langs site --limit 1
 yarn batch:cloud                   # tokenhub hy3
-yarn export-site                   # content.db → transform/content/articles.json (includes cues)
+yarn export-site                   # content.db → articles.json (cues=source clock; remix=overlay)
+yarn sync:audit                    # skip OK if smoke work_dir absent
+yarn sync:audit:remix              # strict + require remix artifacts
+yarn sync:spot                     # start/mid/end cue bounds + energy
+yarn sync:gate                     # unit subset + audit + spot
+yarn sync:gate:ci                  # CI: units required; audit soft-skip
 ```
+
+**Profiles**
+
+| Script | Multipass | Use |
+|--------|-----------|-----|
+| `batch:fast` | off | N0–N8 smoke / 验收速度 |
+| `batch` / `batch:release` | on | 正式发布前压 S4/S5 口型误差 |
 
 Register existing work dir without ASR:
 

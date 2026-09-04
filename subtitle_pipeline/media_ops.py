@@ -166,7 +166,9 @@ def normalize_media_opts(raw: dict | None = None) -> dict[str, Any]:
     if dehardsub_engine not in DEHARDSUB_ENGINES:
         dehardsub_engine = "sttn"
     demosaic_engine = str(
-        src.get("dehardsub_demosaic_engine") or DEFAULT_DEMOSAIC_ENGINE
+        src.get("dehardsub_demosaic_engine")
+        or src.get("deblur_demosaic_engine")
+        or DEFAULT_DEMOSAIC_ENGINE
     ).strip().lower()
     if demosaic_engine not in DEMOSAIC_ENGINES:
         demosaic_engine = "lama"
@@ -178,6 +180,16 @@ def normalize_media_opts(raw: dict | None = None) -> dict[str, Any]:
     ).strip().lower()
     if deblur_engine not in DEBLUR_ENGINES:
         deblur_engine = DEFAULT_DEBLUR_ENGINE
+    # Product: 「去模糊」= 去马赛克 + 超分去模糊；默认开 demosaic。
+    # 「去烧录字幕」也默认顺带 demosaic（dehardsub_demosaic）。
+    deblur_demosaic = src.get("deblur_demosaic", True)
+    if isinstance(deblur_demosaic, str):
+        deblur_demosaic = deblur_demosaic.strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
     plats_raw = src.get("publish_platforms") or []
     if isinstance(plats_raw, str):
         plats_raw = [p.strip() for p in plats_raw.replace(";", ",").split(",") if p.strip()]
@@ -210,6 +222,8 @@ def normalize_media_opts(raw: dict | None = None) -> dict[str, Any]:
         "dehardsub_demosaic_engine": demosaic_engine,
         "deblur": bool(deblur),
         "deblur_engine": deblur_engine,
+        "deblur_demosaic": bool(deblur_demosaic),
+        "deblur_demosaic_engine": demosaic_engine,
         "publish_platforms": plats,
     }
 
@@ -2077,13 +2091,16 @@ def _encode_clip(
     inputs: list[str],
     vf: str | None,
     duration: float | None = None,
+    audio_af: str | None = None,
 ) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", *inputs]
     if vf:
         cmd.extend(["-vf", vf])
+    if audio_af:
+        cmd.extend(["-af", audio_af])
     if duration is not None:
-        cmd.extend(["-t", f"{float(duration):.3f}", "-shortest"])
+        cmd.extend(["-t", f"{float(duration):.6f}", "-shortest"])
     cmd.extend(
         [
             "-c:v",
@@ -2102,6 +2119,11 @@ def _encode_clip(
             "44100",
             "-ac",
             "2",
+            # Cut AAC encoder delay so intro container ≈ silence_end.
+            "-muxdelay",
+            "0",
+            "-muxpreload",
+            "0",
             "-movflags",
             "+faststart",
             str(dest),
@@ -2110,6 +2132,57 @@ def _encode_clip(
     _run_ffmpeg(cmd)
     if not dest.is_file() or dest.stat().st_size < 800:
         raise RuntimeError(f"ffmpeg produced empty file: {dest}")
+
+
+def snap_duration_to_fps(sec: float, fps: float = 30.0) -> float:
+    """Snap seconds to an integer frame count so lavfi color/anullsrc share one clock."""
+    try:
+        s = float(sec)
+    except (TypeError, ValueError):
+        return 0.0
+    if s <= 0:
+        return 0.0
+    rate = float(fps) if fps and fps > 0 else 30.0
+    frames = max(1, int(round(s * rate)))
+    return frames / rate
+
+
+def encode_intro_card(
+    ffmpeg: str,
+    dest: Path,
+    *,
+    duration: float,
+    width: int = REMIX_W,
+    height: int = REMIX_H,
+    fps: float = 30.0,
+) -> float:
+    """Encode a silent title-card clip with frame-exact duration (reduces AAC skew)."""
+    dur = snap_duration_to_fps(duration, fps=fps)
+    if dur <= 0:
+        raise ValueError("intro duration must be > 0")
+    af = (
+        f"atrim=0:{dur:.6f},asetpts=PTS-STARTPTS,"
+        f"apad=whole_dur={dur:.6f}"
+    )
+    inputs = [
+        "-f",
+        "lavfi",
+        "-i",
+        f"color=c=0x111111:s={width}x{height}:d={dur:.6f}:r={fps:g}",
+        "-f",
+        "lavfi",
+        "-i",
+        f"anullsrc=r=44100:cl=stereo:d={dur:.6f}",
+    ]
+    _encode_clip(
+        ffmpeg,
+        dest,
+        inputs=inputs,
+        vf=None,
+        duration=dur,
+        audio_af=af,
+    )
+    return probe_duration_sec(dest) or dur
 
 
 def resolve_remix_body(work_dir: Path, *, working: Path | None = None) -> Path | None:
@@ -2182,30 +2255,21 @@ def remix_vertical_notes(
 
     pieces: list[Path] = []
     intro_actual = 0.0
+    intro_requested = 0.0
     if intro_sec > 0:
-        intro_inputs = [
-            "-f",
-            "lavfi",
-            "-i",
-            f"color=c=0x111111:s={REMIX_W}x{REMIX_H}:d={intro_sec}:r=30",
-            "-f",
-            "lavfi",
-            "-i",
-            f"anullsrc=r=44100:cl=stereo:d={intro_sec}",
-        ]
+        intro_requested = snap_duration_to_fps(intro_sec)
         try:
-            _encode_clip(
+            intro_actual = encode_intro_card(
                 ffmpeg,
                 intro_path,
-                inputs=intro_inputs,
-                vf=None,
-                duration=intro_sec,
+                duration=intro_requested,
             )
             pieces.append(intro_path)
-            intro_actual = probe_duration_sec(intro_path) or intro_sec
+            intro_sec = intro_requested
         except RuntimeError:
             intro_sec = 0.0
             intro_actual = 0.0
+            intro_requested = 0.0
 
     pieces.append(body_path)
     if len(pieces) == 1:
@@ -2272,6 +2336,7 @@ def remix_vertical_notes(
             "one_liner": hook.get("one_liner") or title,
             "notes_lang": hook.get("lang"),
             "intro_sec": intro_actual or intro_sec,
+            "intro_requested": intro_requested or intro_sec,
             "burn_subs": False,
             "overlay": True,
             "crop_hardsubs": bool(crop_hardsubs),
@@ -2512,9 +2577,10 @@ def cut_range_clips(
     src = video or existing_source_video(work_dir)
     if src is None:
         raise FileNotFoundError(f"no source video in {work_dir}")
-    clean = job_media_dir(work_dir) / "dehardsub" / "clean.mp4"
-    if clean.is_file() and clean.stat().st_size > 800:
-        src = clean
+    if video is None:
+        clean = job_media_dir(work_dir) / "dehardsub" / "clean.mp4"
+        if clean.is_file() and clean.stat().st_size > 800:
+            src = clean
     src = ensure_video_has_audio(work_dir, src)
     clips_dir = job_media_dir(work_dir) / "clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
@@ -2534,9 +2600,65 @@ def cut_range_clips(
     return out
 
 
-def resolve_working_video(work_dir: Path) -> Path | None:
-    """Prefer last postproc product, else dehardsub clean, else source."""
+def demosaic_video(
+    src: Path,
+    dest: Path,
+    *,
+    work_dir: Path,
+    demosaic_engine: str | None = None,
+    passes: int | None = None,
+) -> dict[str, Any]:
+    """去马赛克 only（不处理烧录字幕）。供「去模糊」阶段前置调用。"""
+    from visual_cleanup import run_multipass_cleanup
+
+    src = Path(src)
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    engine = (demosaic_engine or DEFAULT_DEMOSAIC_ENGINE).strip().lower()
+    if engine not in DEMOSAIC_ENGINES:
+        engine = "lama"
+    max_passes = DEFAULT_CLEAN_PASSES if passes is None else max(1, min(6, int(passes)))
+    report = run_multipass_cleanup(
+        src,
+        dest,
+        work_dir=work_dir,
+        locate_mode="band",
+        max_passes=max_passes,
+        demosaic=True,
+        dehardsub=False,
+        engine="sttn",
+        demosaic_engine=engine,
+    )
+    meta_path = dest.with_name("demosaic_meta.json")
+    _write_meta(
+        meta_path,
+        {
+            "src": src.name,
+            "dest": dest.name,
+            "demosaic_engine": engine,
+            **report,
+        },
+    )
+    return report
+
+
+def resolve_working_video(
+    work_dir: Path,
+    *,
+    input_from: str | None = None,
+) -> Path | None:
+    """Prefer explicit handoff key, else last postproc product, else source."""
     from note_frames import existing_source_video
+    from workflows import INPUT_AUTO, INPUT_SOURCE, artifact_path_for
+
+    key = (input_from or "").strip()
+    if key and key not in (INPUT_AUTO,):
+        hit = artifact_path_for(work_dir, key)
+        if hit is not None:
+            return hit
+        if key == INPUT_SOURCE:
+            return existing_source_video(work_dir)
+        # Fall through to auto chain if override missing on disk.
 
     for rel in (
         Path("remix") / "remix.mp4",
@@ -2558,6 +2680,8 @@ def run_postproc(
     *,
     media_opts: dict | None = None,
     clip_ranges: list[dict] | None = None,
+    input_from: str | None = None,
+    input_video: Path | None = None,
 ) -> dict[str, Path]:
     """Run dehardsub → concat → enhance → compress → remix. Missing steps are skipped."""
     from note_frames import existing_source_video
@@ -2565,14 +2689,18 @@ def run_postproc(
     opts = normalize_media_opts(media_opts)
     produced: dict[str, Path] = {}
     source = existing_source_video(work_dir)
-    working = source
+    if input_video is not None and Path(input_video).is_file():
+        working: Path | None = Path(input_video)
+    else:
+        working = resolve_working_video(work_dir, input_from=input_from) or source
 
     if "dehardsub" in enabled:
-        if working is None:
+        seed = working if working is not None else source
+        if seed is None:
             raise FileNotFoundError(f"dehardsub needs a source video in {work_dir}")
         cleaned, report = strip_hardsubs(
             work_dir,
-            video=working,
+            video=seed,
             force=bool(opts.get("dehardsub_force")),
             ratio=float(opts.get("dehardsub_ratio") or HARDSUB_CROP_RATIO),
             mode=str(opts.get("dehardsub_mode") or "auto"),
@@ -2604,14 +2732,33 @@ def run_postproc(
     if "deblur" in enabled:
         if working is None:
             raise FileNotFoundError(f"deblur needs a source video in {work_dir}")
-        # 去模糊在 concat 之后、enhance 之前：先恢复细节再做增强/压缩。
-        # 缺 ONNX 权重时抛 DeblurUnavailable → 跳过该阶段，不中断流水线。
+        # 「去模糊」= 去马赛克 + 超分去模糊。缺 ONNX 时仍保留 demosaic 产物。
+        deblur_src = working
+        if bool(opts.get("deblur_demosaic", True)):
+            pre = job_deblur_dir(work_dir) / "_demosaic.mp4"
+            try:
+                demosaic_video(
+                    working,
+                    pre,
+                    work_dir=work_dir,
+                    demosaic_engine=str(
+                        opts.get("deblur_demosaic_engine")
+                        or opts.get("dehardsub_demosaic_engine")
+                        or DEFAULT_DEMOSAIC_ENGINE
+                    ),
+                    passes=int(opts.get("dehardsub_passes") or DEFAULT_CLEAN_PASSES),
+                )
+                if pre.is_file() and pre.stat().st_size > 800:
+                    deblur_src = pre
+                    print(f"[postproc] deblur demosaic ok → {pre.name}")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[postproc] deblur demosaic skipped ({exc})")
         try:
             from deblur_basicvsr import DeblurUnavailable, deblur_video
 
             dest = job_deblur_dir(work_dir) / "deblurred.mp4"
             deblur_video(
-                working,
+                deblur_src,
                 dest,
                 engine=str(opts.get("deblur_engine") or DEFAULT_DEBLUR_ENGINE),
                 max_height=int(opts.get("enhance_max_height") or 720),
@@ -2620,11 +2767,28 @@ def run_postproc(
             working = dest
         except ImportError:
             print("[postproc] deblur skipped (module unavailable)")
+            if deblur_src is not working and deblur_src.is_file():
+                # 无超分权重时，至少交出 demosaic 结果
+                dest = job_deblur_dir(work_dir) / "deblurred.mp4"
+                if deblur_src.resolve() != dest.resolve():
+                    import shutil
+
+                    shutil.copy2(deblur_src, dest)
+                produced["deblur"] = dest
+                working = dest
         except Exception as exc:  # noqa: BLE001
             from deblur_basicvsr import DeblurUnavailable  # noqa: F401
 
             if isinstance(exc, DeblurUnavailable):
                 print(f"[postproc] deblur skipped ({exc})")
+                if deblur_src is not working and deblur_src.is_file():
+                    dest = job_deblur_dir(work_dir) / "deblurred.mp4"
+                    if deblur_src.resolve() != dest.resolve():
+                        import shutil
+
+                        shutil.copy2(deblur_src, dest)
+                    produced["deblur"] = dest
+                    working = dest
             else:
                 raise
 
@@ -2688,6 +2852,7 @@ def copy_derived_to_site(work_dir: Path, slug: str, site_public: Path) -> int:
     mapping = {
         "clean.mp4": media / "dehardsub" / "clean.mp4",
         "dehardsub_meta.json": media / "dehardsub" / "dehardsub_meta.json",
+        "deblurred.mp4": media / "deblur" / "deblurred.mp4",
         "concat.mp4": media / "concat" / "concat.mp4",
         "enhanced.mp4": media / "enhance" / "enhanced.mp4",
         "compressed.mp4": media / "compress" / "compressed.mp4",
@@ -2722,6 +2887,8 @@ def derived_public_urls(slug: str, site_public: Path) -> dict[str, str]:
     dest = Path(site_public) / "derived" / slug
     out: dict[str, str] = {}
     for name, key in (
+        ("clean.mp4", "dehardsub"),
+        ("deblurred.mp4", "deblur"),
         ("concat.mp4", "concat"),
         ("enhanced.mp4", "enhance"),
         ("compressed.mp4", "compress"),

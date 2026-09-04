@@ -645,6 +645,100 @@ def attach_keypoint_frames(
     return summary
 
 
+def keypoint_clip_ranges(
+    work_dir: Path,
+    *,
+    source_lang: str | None = None,
+    max_points: int = 12,
+    max_dur: float = 60.0,
+) -> list[dict]:
+    """Map notes key_points → MP4 clip ranges ``{start, end, title}`` (WF-03 bridge).
+
+    Prefers existing ``start_sec``/``end_sec`` on the point; otherwise aligns title
+    to source SRT cues via ``align_notes_to_spans``.
+    """
+    work_dir = Path(work_dir)
+    notes_root = work_dir / "notes"
+    if not notes_root.is_dir():
+        raise FileNotFoundError(f"no notes in {work_dir}")
+
+    src = coalesce_source_lang(source_lang) if source_lang else None
+    notes_path: Path | None = None
+    if src:
+        cand = notes_root / src / "summary.json"
+        if cand.is_file():
+            notes_path = cand
+    if notes_path is None:
+        for js in sorted(notes_root.glob("*/summary.json")):
+            notes_path = js
+            src = coalesce_source_lang(js.parent.name)
+            break
+    if notes_path is None or src is None:
+        raise FileNotFoundError(f"missing notes summary under {notes_root}")
+
+    summary = json.loads(notes_path.read_text(encoding="utf-8-sig"))
+    raw = [kp for kp in (summary.get("key_points") or []) if isinstance(kp, dict)]
+    points = [kp for kp in raw if not _is_range_clip_row(kp)][: max(1, int(max_points))]
+    if not points:
+        return []
+
+    # Prefer stamped times already on notes.
+    ready: list[dict] = []
+    need_align: list[dict] = []
+    need_idx: list[int] = []
+    for i, kp in enumerate(points):
+        title = str(kp.get("title") or "").strip() or f"要点 {i + 1}"
+        try:
+            start = float(kp["start_sec"]) if kp.get("start_sec") is not None else None
+            end = float(kp["end_sec"]) if kp.get("end_sec") is not None else None
+        except (TypeError, ValueError):
+            start, end = None, None
+        if start is not None and end is not None and end > start:
+            ready.append({"start": round(start, 3), "end": round(end, 3), "title": title, "i": i})
+        else:
+            need_align.append(kp)
+            need_idx.append(i)
+
+    spans: list[tuple[float, float] | None] = []
+    if need_align:
+        srt = locale_srt_path(work_dir, src)
+        if not srt.is_file():
+            raise FileNotFoundError(f"missing source srt for align: {srt}")
+        from pipeline import parse_srt
+
+        spans = align_notes_to_spans(need_align, parse_srt(srt))
+
+    cap = max(1.0, min(60.0, float(max_dur)))
+    out: list[dict] = []
+    # Merge ready + aligned in original order
+    ready_by_i = {r["i"]: r for r in ready}
+    align_j = 0
+    for i, kp in enumerate(points):
+        title = str(kp.get("title") or "").strip() or f"要点 {i + 1}"
+        if i in ready_by_i:
+            row = ready_by_i[i]
+            start, end = float(row["start"]), float(row["end"])
+        else:
+            span = spans[align_j] if align_j < len(spans) else None
+            align_j += 1
+            if span is None:
+                continue
+            start, end = float(span[0]), float(span[1])
+        if end <= start:
+            continue
+        end = min(end, start + cap)
+        if end - start < 0.4:
+            end = start + min(cap, 2.0)
+        out.append(
+            {
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "title": title,
+            }
+        )
+    return out
+
+
 def public_gif_range_path(slug: str, index: int, *, ext: str = "gif") -> str:
     return f"/frames/{slug}/gif_range_{index:02d}.{ext.lstrip('.')}"
 

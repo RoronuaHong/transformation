@@ -320,8 +320,12 @@ class TryUrlBody(BaseModel):
     )
     want_translate: bool = Field(default=True, description="Run subtitle translation")
     want_notes: bool = Field(default=True, description="Run structured notes")
+    want_clips: bool = Field(default=False, description="WF-03 cut MP4 ranges (independent of notes)")
     want_dehardsub: bool = Field(default=False, description="Strip burned-in captions when detected")
-    want_deblur: bool = Field(default=False, description="ONNX deblur / super-res (needs models/realesrgan_x4.onnx)")
+    want_deblur: bool = Field(
+        default=False,
+        description="Demosaic + ONNX deblur / super-res (needs models/realesrgan_x4.onnx)",
+    )
     want_enhance: bool = Field(default=False, description="WF-04 sharpen / mild upscale")
     want_compress: bool = Field(default=False, description="WF-05 shrink file size")
     want_concat: bool = Field(default=False, description="WF-06 concat clip ranges")
@@ -357,6 +361,7 @@ class TryUrlsBody(BaseModel):
     langs: list[str] | str | None = None
     want_translate: bool = True
     want_notes: bool = True
+    want_clips: bool = False
     want_dehardsub: bool = False
     want_deblur: bool = False
     want_enhance: bool = False
@@ -448,6 +453,7 @@ def try_urls(body: TryUrlsBody, background: BackgroundTasks) -> dict:
         langs=body.langs,
         want_translate=body.want_translate,
         want_notes=body.want_notes,
+        want_clips=body.want_clips,
         stages=body.stages,
         want_dehardsub=body.want_dehardsub,
         want_deblur=body.want_deblur,
@@ -514,6 +520,7 @@ def try_url(body: TryUrlBody, background: BackgroundTasks) -> dict:
         langs=body.langs,
         want_translate=body.want_translate,
         want_notes=body.want_notes,
+        want_clips=body.want_clips,
         stages=body.stages,
         want_dehardsub=body.want_dehardsub,
         want_deblur=body.want_deblur,
@@ -651,6 +658,7 @@ async def try_uploads(
     langs: str = Form(""),
     want_translate: str = Form("true"),
     want_notes: str = Form("true"),
+    want_clips: str = Form("false"),
     want_dehardsub: str = Form("false"),
     want_deblur: str = Form("false"),
     want_enhance: str = Form("false"),
@@ -718,6 +726,7 @@ async def try_uploads(
 
     wt = str(want_translate or "true").strip().lower() not in ("0", "false", "no", "off")
     wn = str(want_notes or "true").strip().lower() not in ("0", "false", "no", "off")
+    wcl = str(want_clips or "false").strip().lower() not in ("0", "false", "no", "off")
     wdh = str(want_dehardsub or "false").strip().lower() not in ("0", "false", "no", "off")
     wdb = str(want_deblur or "false").strip().lower() not in ("0", "false", "no", "off")
     we = str(want_enhance or "false").strip().lower() not in ("0", "false", "no", "off")
@@ -743,6 +752,7 @@ async def try_uploads(
         langs=lang_list,
         want_translate=wt,
         want_notes=wn,
+        want_clips=wcl,
         stages=stage_s,
         want_dehardsub=wdh,
         want_deblur=wdb,
@@ -886,6 +896,72 @@ def try_retry(job_id: int, background: BackgroundTasks) -> dict:
         if snap.get("ok"):
             out.update(snap)
     return out
+
+
+@app.get("/api/try/{job_id}/keypoint-clips")
+def try_keypoint_clips(job_id: int, max_points: int = 12) -> dict:
+    """Bridge WF-02 → WF-03: notes key_points → MP4 clip ranges."""
+    from api.try_service import keypoint_clips_for_job
+
+    out = keypoint_clips_for_job(job_id, max_points=max(1, min(24, int(max_points or 12))))
+    if not out.get("ok"):
+        raise HTTPException(status_code=404, detail=out.get("error") or "not found")
+    return out
+
+
+@app.get("/api/try/{job_id}/artifacts")
+def try_artifacts(job_id: int) -> dict:
+    """List pack handoff artifacts (REQ-A03)."""
+    from api.try_service import job_snapshot
+
+    snap = job_snapshot(job_id)
+    if not snap.get("ok"):
+        raise HTTPException(status_code=404, detail=snap.get("error") or "not found")
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "pack_id": snap.get("pack_id"),
+        "artifacts": snap.get("artifacts") or [],
+        "input_from": snap.get("input_from"),
+        "depends_on": snap.get("depends_on") or [],
+        "pack_zip_url": f"/api/try/{job_id}/pack.zip",
+    }
+
+
+@app.get("/api/try/{job_id}/file")
+def try_pack_file(job_id: int, rel: str = ""):
+    """Download one file from the pack work_dir (path-safe)."""
+    from fastapi.responses import FileResponse
+
+    from api.try_service import resolve_try_pack_file
+
+    try:
+        path, media_type, filename = resolve_try_pack_file(job_id, rel)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="file not found") from None
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return FileResponse(path, media_type=media_type, filename=filename)
+
+
+@app.get("/api/try/{job_id}/pack.zip")
+def try_pack_zip(job_id: int):
+    """Download Job Pack zip (subs + notes + media products + meta.json)."""
+    from fastapi.responses import Response
+
+    from api.try_service import build_try_pack_zip
+
+    try:
+        data, filename = build_try_pack_zip(job_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="pack not found") from None
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return Response(
+        content=data,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/try/{job_id}")

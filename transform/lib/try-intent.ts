@@ -119,6 +119,8 @@ export function resolveTryIntent(opts: {
       .map((p) => p.trim())
       .filter(
         (p) =>
+          p === "dehardsub" ||
+          p === "deblur" ||
           p === "enhance" ||
           p === "compress" ||
           p === "concat" ||
@@ -129,7 +131,15 @@ export function resolveTryIntent(opts: {
   if (postproc.size) {
     const parts: string[] = [];
     if (postproc.has("concat")) parts.push("clips");
-    for (const name of ["concat", "enhance", "compress", "remix", "publish"] as const) {
+    for (const name of [
+      "dehardsub",
+      "concat",
+      "deblur",
+      "enhance",
+      "compress",
+      "remix",
+      "publish",
+    ] as const) {
       if (postproc.has(name)) parts.push(name);
     }
     return { intent: "media", stages: parts.join(","), reason: "postproc" };
@@ -172,6 +182,7 @@ export function composeTryStages(opts: {
   wantNotes: boolean;
   hasMedia: boolean;
   wantDehardsub?: boolean;
+  wantDeblur?: boolean;
   wantEnhance?: boolean;
   wantCompress?: boolean;
   wantConcat?: boolean;
@@ -183,6 +194,7 @@ export function composeTryStages(opts: {
     wantNotes,
     hasMedia,
     wantDehardsub = false,
+    wantDeblur = false,
     wantEnhance = false,
     wantCompress = false,
     wantConcat = false,
@@ -192,6 +204,7 @@ export function composeTryStages(opts: {
   const post: string[] = [];
   if (wantDehardsub) post.push("dehardsub");
   if (wantConcat) post.push("concat");
+  if (wantDeblur) post.push("deblur");
   if (wantEnhance) post.push("enhance");
   if (wantCompress) post.push("compress");
   if (wantRemix) post.push("remix");
@@ -206,7 +219,8 @@ export function composeTryStages(opts: {
   if (text) parts.push("asr");
   if (wantTranslate) parts.push("translate");
   if (wantNotes) parts.push("notes", "localize");
-  if (hasMedia) parts.push("frames", "clips");
+  // Clips independent of frames (notes GIFs).
+  if (hasMedia) parts.push("clips");
   else if (wantConcat) parts.push("clips");
   if (!wantTranslate && !wantNotes && !hasMedia && !post.length) {
     parts.push("fetch", "asr", "notes", "localize");
