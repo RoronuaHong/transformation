@@ -58,6 +58,35 @@ def test_spatial_fill_clears_flat_bar_text() -> None:
     assert int(out[30, 200].mean()) < 45
 
 
+def test_tbe_recovers_grain_from_other_frames() -> None:
+    """TBE should paste real background grain, not a flat lerp smear."""
+    import numpy as np
+
+    from sttn_inpaint import build_temporal_plate, fill_caption_tbe
+
+    rng = np.random.default_rng(0)
+    # Keep caption well right of left-UI protect strip (w//5).
+    box = {"x": 120, "y": 120, "w": 220, "h": 40}
+    frames = []
+    for i in range(12):
+        fr = np.zeros((200, 400, 3), dtype=np.uint8)
+        fr[:] = (48, 52, 58)
+        fr = np.clip(
+            fr.astype(np.int16) + rng.integers(-8, 9, fr.shape), 0, 255
+        ).astype(np.uint8)
+        x0 = 140 + (i % 6) * 20
+        fr[130:155, x0 : x0 + 60] = (250, 250, 250)
+        frames.append(fr)
+    plate, hits = build_temporal_plate(frames, box, min_hits=2)
+    assert float((hits[130:155, 140:260] >= 2).mean()) > 0.5
+    dirty = frames[0].copy()
+    out = fill_caption_tbe(
+        dirty, box, plate, hits, min_hits=2, spatial_residual=False
+    )
+    assert int(out[140, 170].mean()) < 90
+    assert float(out[130:155, 140:260].astype(np.float32).std()) > 2.0
+
+
 def test_auto_engine_calls_sttn(tmp_path: Path, monkeypatch: object) -> None:
     import shutil
 

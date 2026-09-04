@@ -82,6 +82,33 @@ def mosaic_block_score(gray: Any, block: int = 16) -> float:
     return float(max(0.0, min(1.0, score / 8.0)))
 
 
+def _best_block_score(
+    gray: Any,
+    block: int,
+    *,
+    pstep: int | None = None,
+) -> tuple[float, tuple[int, int]]:
+    """相位不敏感版 mosaic_block_score：返回 (最高分, 最佳相位 (dy,dx))。
+
+    mosaic_block_score 假设马赛克网格从 (0,0) 起算；但 ROI / 滑窗起点通常与真实
+    马赛克网格错开若干像素，此时 score 会从 1.0 塌到 0.0（实测错位 4px 即从
+    1.0 掉到 0.0）。这里在 block 范围内采样相位偏移，取最高分及其相位。
+    """
+    best_s = 0.0
+    best_ph = (0, 0)
+    p = max(1, pstep or max(1, block // 4))
+    for dy in range(0, block, p):
+        for dx in range(0, block, p):
+            sub = gray[dy:, dx:]
+            if sub.shape[0] < block * 2 or sub.shape[1] < block * 2:
+                continue
+            s = mosaic_block_score(sub, block=block)
+            if s > best_s:
+                best_s = s
+                best_ph = (dy, dx)
+    return best_s, best_ph
+
+
 def detect_mosaic_boxes(
     frame: Any,
     *,
@@ -107,16 +134,41 @@ def detect_mosaic_boxes(
     h, w = gray.shape
     heat = np.zeros((h, w), dtype=np.float32)
     for bs in MOSAIC_BLOCK_SIZES:
-        step = max(bs, bs * 2)
         win = bs * 2
+        # mosaic_block_score 对「网格相位」极敏感：马赛克块起点通常不是 win 的整数倍，
+        # 从 (0,0) 固定步长滑窗会因相位错开而全部漏检（实测 32x32 窗错位 4px 时
+        # score 从 1.0 掉到 0.0）。故窗口内采样相位偏移取最高分。
+        # 注意保持 step==win：相邻窗口连续命中才能拼成足够大的连通域，
+        # 否则单个 win×win 会被 min_side 过滤掉（实测 step=win+1 反而全部漏检）。
+        step = max(bs, bs * 2)
+        pstep = max(1, bs // 4)
         for y0 in range(0, max(1, h - win), step):
             for x0 in range(0, max(1, w - win), step):
-                patch = gray[y0 : y0 + win, x0 : x0 + win]
-                if patch.shape[0] < bs * 2 or patch.shape[1] < bs * 2:
+                # 近乎纯色的窗口不可能是马赛克网格 → 跳过昂贵的相位搜索（大加速）
+                base = gray[y0 : y0 + win, x0 : x0 + win]
+                if base.shape[0] < bs * 2 or base.shape[1] < bs * 2:
                     continue
-                s = mosaic_block_score(patch, block=bs)
-                if s >= min_score:
-                    heat[y0 : y0 + win, x0 : x0 + win] += s
+                if float(base.var()) < 4.0:
+                    continue
+                best_s = 0.0
+                for dy in range(0, bs, pstep):
+                    for dx in range(0, bs, pstep):
+                        yy = y0 + dy
+                        xx = x0 + dx
+                        if yy + win > h or xx + win > w:
+                            continue
+                        patch = gray[yy : yy + win, xx : xx + win]
+                        if patch.shape[0] < bs * 2 or patch.shape[1] < bs * 2:
+                            continue
+                        s = mosaic_block_score(patch, block=bs)
+                        if s > best_s:
+                            best_s = s
+                            if best_s >= 0.9:  # 早停，省算力
+                                break
+                    if best_s >= 0.9:
+                        break
+                if best_s >= min_score:
+                    heat[y0 : y0 + win, x0 : x0 + win] += best_s
     if float(heat.max()) < min_score:
         return []
     mask = (heat >= min_score).astype(np.uint8) * 255
@@ -167,17 +219,22 @@ def build_mosaic_mask(roi: Any, *, block_hint: int = 16, dilate: int = 1) -> Any
     h, w = gray.shape
     best = np.zeros((h, w), dtype=np.uint8)
     best_s = 0.0
+    best_ph = (0, 0)
+    # 相位不敏感：ROI 起点通常与马赛克网格错开，需先找最佳相位，
+    # 否则评分归零 → mask 全空 → 马赛克区被整块跳过（表现为「没去马赛克」）。
     for bs in MOSAIC_BLOCK_SIZES:
-        s = mosaic_block_score(gray, block=bs)
+        s, ph = _best_block_score(gray, bs)
         if s > best_s:
             best_s = s
             block_hint = bs
+            best_ph = ph
     if best_s < 0.18:
         return best
     # Mark blocks with very low internal variance relative to neighbors.
     bs = block_hint
-    for y0 in range(0, h - bs + 1, bs):
-        for x0 in range(0, w - bs + 1, bs):
+    dy0, dx0 = best_ph
+    for y0 in range(dy0, h - bs + 1, bs):
+        for x0 in range(dx0, w - bs + 1, bs):
             tile = gray[y0 : y0 + bs, x0 : x0 + bs]
             if float(tile.var()) <= 18.0:
                 best[y0 : y0 + bs, x0 : x0 + bs] = 255
@@ -351,7 +408,20 @@ def _collect_mosaic_regions(video: Path, *, samples: int = 5) -> list[dict[str, 
         if not ok:
             continue
         # Stricter threshold to cut anime/UI false positives.
-        per_frame.append(detect_mosaic_boxes(frame, min_score=0.38, min_side=64))
+        boxes = detect_mosaic_boxes(frame, min_score=0.38, min_side=64)
+        # 二次确认：候选区必须能生成非空马赛克 mask，否则是规则纹理误检。
+        # （误检会导致对正常画面做 inpaint/模糊，破坏画质）
+        kept: list[dict[str, int]] = []
+        fh, fw = frame.shape[:2]
+        for b in boxes:
+            y0 = max(0, int(b["y"]))
+            x0 = max(0, int(b["x"]))
+            y1 = min(fh, y0 + int(b["h"]))
+            x1 = min(fw, x0 + int(b["w"]))
+            roi = frame[y0:y1, x0:x1]
+            if roi.size and int(build_mosaic_mask(roi).max()) > 0:
+                kept.append(b)
+        per_frame.append(kept)
     cap.release()
     flat = [b for group in per_frame for b in group]
     if not flat:
@@ -395,6 +465,7 @@ def encode_cleanup_pass(
     do_hardsub: bool = True,
     do_mosaic: bool = True,
     mask_from: Path | None = None,
+    mosaic_engine: str = "opencv",
 ) -> dict[str, Any]:
     """One full-video repair pass over ``regions``.
 
@@ -514,9 +585,33 @@ def encode_cleanup_pass(
                     mask = build_hardsub_mask(ref)
                 if int(mask.max()) == 0:
                     continue
-                restored, bg_map[i] = restore_region(
-                    roi, mask, bg_map.get(i), radius=inpaint_radius
-                )
+                if kind == "mosaic":
+                    eng = str(mosaic_engine).lower()
+                    if eng == "lama":
+                        try:
+                            from inpaint_lama import LamaUnavailable, lama_inpaint
+
+                            full = np.zeros(frame.shape[:2], dtype=np.uint8)
+                            full[y : y + bh, x : x + bw] = mask
+                            frame = lama_inpaint(frame, full)
+                            masked += 1
+                            continue
+                        except Exception:
+                            eng = "opencv"
+                    from demosaic_codeformer import restore_mosaic_crop
+
+                    restored, bg_map[i] = restore_mosaic_crop(
+                        roi,
+                        mask,
+                        bg_map.get(i),
+                        radius=inpaint_radius,
+                        use_neural=(eng in ("codeformer", "lama", "auto")),
+                        prefer=eng if eng in ("codeformer", "lama") else "auto",
+                    )
+                else:
+                    restored, bg_map[i] = restore_region(
+                        roi, mask, bg_map.get(i), radius=inpaint_radius
+                    )
                 frame[y : y + bh, x : x + bw] = restored
                 masked += 1
             proc.stdin.write(np.ascontiguousarray(frame).tobytes())
@@ -541,6 +636,123 @@ def encode_cleanup_pass(
     return {"frames": frames, "masked_ops": masked, "bytes": dest.stat().st_size}
 
 
+def encode_lama(
+    src: Path,
+    dest: Path,
+    box: dict[str, Any],
+    mosaic_regions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """LaMa 逐帧修复（VSR 双修复器之二）：静态字幕最优、无时序伪影。
+
+    hole 来源与 STTN 字形路径一致：优先 OCR 行 bbox（glyph_detect），
+    OCR 不可用回退 glyph_hole_adaptive；马赛克仍整框。
+    不可用时抛 LamaUnavailable，由调用方降级。
+    """
+    import cv2
+    import numpy as np
+
+    from inpaint_lama import lama_inpaint
+    from sttn_inpaint import glyph_hole_adaptive
+
+    src = Path(src)
+    dest = Path(dest)
+    mops = _media()
+    wh = mops.probe_video_wh(src)
+    if wh is None:
+        raise RuntimeError(f"cannot probe video: {src}")
+    frame_w, frame_h = wh
+    cap = cv2.VideoCapture(str(src))
+    if not cap.isOpened():
+        raise RuntimeError(f"cannot open {src}")
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0) or 25.0
+    n_hint = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    from fetch_media import find_ffmpeg
+
+    ffmpeg = find_ffmpeg()
+    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+           "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{frame_w}x{frame_h}",
+           "-r", f"{fps:.4f}", "-i", "pipe:0", "-i", str(src), "-map", "0:v:0"]
+    if mops.has_audio_stream(src):
+        cmd.extend(["-map", "1:a:0?", "-c:a", "aac", "-b:a", f"{mops.DEFAULT_AUDIO_K}k"])
+    else:
+        cmd.append("-an")
+    cmd.extend(["-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-shortest", str(dest)])
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert proc.stdin is not None
+    frames_done = 0
+    ocr_frames = 0
+    lama_frames = 0
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            out = frame
+            for mb in mosaic_regions or []:
+                x = max(0, min(frame_w - 2, int(mb["x"])))
+                y = max(0, min(frame_h - 2, int(mb["y"])))
+                w = max(2, min(frame_w - x, int(mb["w"])))
+                h = max(2, min(frame_h - y, int(mb["h"])))
+                roi = out[y : y + h, x : x + w]
+                mask = build_mosaic_mask(roi, dilate=1)
+                if int(mask.max()) == 0:
+                    continue
+                full = np.zeros(out.shape[:2], dtype=np.uint8)
+                full[y : y + h, x : x + w] = mask
+                try:
+                    out = lama_inpaint(out, full)
+                except Exception:
+                    from demosaic_codeformer import restore_mosaic_crop
+
+                    restored, _bg = restore_mosaic_crop(
+                        roi, mask, None, radius=7, use_neural=False
+                    )
+                    out = out.copy()
+                    out[y : y + h, x : x + w] = restored
+            # 字幕：混合字形 mask（OCR bbox 限定 + 笔画细化），回退启发式
+            from sttn_inpaint import glyph_mask_hybrid
+
+            mask = glyph_mask_hybrid(out, {
+                "x": int(box["x"]), "y": int(box["y"]),
+                "w": int(box["w"]), "h": int(box["h"]),
+            })
+            if int(mask.max()):
+                ocr_frames += 1
+            if int(mask.max()):
+                out = lama_inpaint(out, mask)
+                lama_frames += 1
+            proc.stdin.write(np.ascontiguousarray(out).tobytes())
+            frames_done += 1
+            if n_hint and frames_done % 100 == 0:
+                print(f"[lama] wrote {frames_done}/{n_hint}", flush=True)
+    except Exception:
+        proc.kill()
+        raise
+    finally:
+        cap.release()
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
+    stderr = proc.communicate(timeout=600)[1]
+    if proc.returncode != 0 or frames_done < 1:
+        err = (stderr or b"").decode("utf-8", errors="replace")[:400]
+        raise RuntimeError(f"lama encode failed ({proc.returncode}): {err}")
+    print(
+        f"[lama] frames={frames_done} ocr_hits={ocr_frames} lama_runs={lama_frames}",
+        flush=True,
+    )
+    return {
+        "engine": "lama",
+        "mode": "perframe",
+        "frames": frames_done,
+        "ocr_hits": ocr_frames,
+        "lama_runs": lama_frames,
+        "bytes": dest.stat().st_size,
+    }
+
+
 def run_multipass_cleanup(
     src: Path,
     dest: Path,
@@ -555,6 +767,7 @@ def run_multipass_cleanup(
     dehardsub: bool = True,
     engine: str = "sttn",
     demosaic_engine: str = "opencv",
+    mosaic_boxes: list[dict[str, int]] | None = None,
 ) -> dict[str, Any]:
     """Locate caption box → STTN (default) or OpenCV fill; optional mosaic pass."""
     src = Path(src)
@@ -599,7 +812,17 @@ def run_multipass_cleanup(
 
     mosaic_regions: list[dict[str, Any]] = []
     if demosaic:
-        mosaic_regions = _collect_mosaic_regions(src)
+        if mosaic_boxes:
+            # 显式马赛克框（绕过自动检测；真实场景可手动标注）
+            mosaic_regions = [
+                {
+                    "kind": "mosaic",
+                    **{k: int(b[k]) for k in ("x", "y", "w", "h")},
+                }
+                for b in mosaic_boxes
+            ]
+        else:
+            mosaic_regions = _collect_mosaic_regions(src)
         regions.extend(mosaic_regions)
 
     if not regions:
@@ -616,47 +839,115 @@ def run_multipass_cleanup(
             **locate_meta,
         }
 
+    if engine_s == "lama" and dehardsub and box is not None:
+        try:
+            from inpaint_lama import LamaUnavailable
+        except ImportError:
+            LamaUnavailable = None  # type: ignore[assignment]
+        lama_ran = False
+        if LamaUnavailable is not None:
+            try:
+                lama_stats = encode_lama(src, dest, box, mosaic_regions)
+                lama_ran = True
+            except LamaUnavailable as exc:
+                print(f"[cleanup] lama unavailable ({exc}); falling back to sttn")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[cleanup] lama failed ({exc}); falling back to sttn")
+        if lama_ran:
+            return {
+                "action": "lama_cleanup",
+                "engine": "lama",
+                "mosaic_engine": str(demosaic_engine).lower(),
+                "passes": [{"pass": 1, "encode": lama_stats}],
+                "pass_count": 1,
+                "regions": regions,
+                "mosaic_regions": mosaic_regions,
+                "demosaic": demosaic,
+                "dehardsub": dehardsub,
+                "src_size": f"{width}x{height}",
+                **locate_meta,
+                "encode": lama_stats,
+            }
+        # 降级：继续走下方 STTN 分支（engine_s 保持 sttn 语义）
+        engine_s = "sttn"
+
     if engine_s == "sttn" and dehardsub and box is not None:
         from sttn_inpaint import encode_sttn
 
-        # demosaic_engine=="sttn" 时，把马赛克块也作为 STTN 的洞一起修复，
-        # 不再走 OpenCV inpaint；否则马赛克仍走原 OpenCV 分支。
-        use_sttn_mosaic = str(demosaic_engine).lower() == "sttn" and bool(mosaic_regions)
-        mosaic_boxes = (
-            [{k: int(m[k]) for k in ("x", "y", "w", "h")} for m in mosaic_regions]
-            if use_sttn_mosaic
-            else None
-        )
-        sttn_dest = dest if not (mosaic_regions and not use_sttn_mosaic) else dest.with_name("_sttn_tmp.mp4")
-        sttn_stats = encode_sttn(
-            src,
-            sttn_dest,
-            {k: int(box[k]) for k in ("x", "y", "w", "h")},
-            mosaic_boxes=mosaic_boxes,
-        )
-        if mosaic_regions and not use_sttn_mosaic:
+        demosaic_engine_s = str(demosaic_engine).lower()
+        sttn_in = src
+        mosaic_tmp = None
+        mosaic_boxes = None
+
+        if demosaic and mosaic_regions and demosaic_engine_s == "sttn":
+            # 马赛克与字幕一起作为 STTN 的洞（合一方案）。
+            mosaic_boxes = [
+                {k: int(m[k]) for k in ("x", "y", "w", "h")} for m in mosaic_regions
+            ]
+        elif demosaic and mosaic_regions and demosaic_engine_s == "lama":
+            # 通用马赛克：先 LaMa 逐帧填洞，再 STTN 去字幕（out_real5 同款）。
+            mosaic_tmp = dest.with_name("_mosaic_pre.mp4")
+            try:
+                encode_cleanup_pass(
+                    src,
+                    mosaic_tmp,
+                    mosaic_regions,
+                    dilate=1,
+                    inpaint_radius=7,
+                    do_hardsub=False,
+                    do_mosaic=True,
+                    mosaic_engine="lama",
+                    mask_from=src,
+                )
+                sttn_in = mosaic_tmp
+            except Exception as exc:  # noqa: BLE001
+                print(f"[cleanup] lama demosaic failed ({exc}); fall back sttn holes")
+                mosaic_boxes = [
+                    {k: int(m[k]) for k in ("x", "y", "w", "h")} for m in mosaic_regions
+                ]
+                mosaic_tmp = None
+        elif demosaic and mosaic_regions:
+            # codeformer / opencv：先在原帧修马赛克，再 STTN 去字幕。
+            mosaic_tmp = dest.with_name("_mosaic_pre.mp4")
             encode_cleanup_pass(
-                sttn_dest,
-                dest,
+                src,
+                mosaic_tmp,
                 mosaic_regions,
                 dilate=1,
                 inpaint_radius=7,
                 do_hardsub=False,
                 do_mosaic=True,
+                mosaic_engine=demosaic_engine_s,
+                mask_from=src,
             )
+            sttn_in = mosaic_tmp
+
+        # STTN 只去字幕（马赛克已修好，不再当洞喂入）。
+        sttn_out = dest if sttn_in.resolve() == src.resolve() else dest.with_name("_sttn.mp4")
+        sttn_stats = encode_sttn(
+            sttn_in,
+            sttn_out,
+            {k: int(box[k]) for k in ("x", "y", "w", "h")},
+            mosaic_boxes=mosaic_boxes,
+        )
+        if mosaic_tmp is not None and mosaic_tmp.resolve() != dest.resolve():
             try:
-                sttn_dest.unlink(missing_ok=True)
+                mosaic_tmp.unlink(missing_ok=True)
             except OSError:
                 pass
-        elif sttn_dest.resolve() != dest.resolve():
-            sttn_dest.replace(dest)
+        if sttn_out.resolve() != dest.resolve():
+            sttn_out.replace(dest)
         print(
             f"[cleanup] sttn frames={sttn_stats.get('frames')} "
-            f"device={sttn_stats.get('device')}"
+            f"device={sttn_stats.get('device')} "
+            f"mosaic_pre={'on' if mosaic_tmp is not None else 'off'} "
+            f"(engine={demosaic_engine_s})"
         )
         return {
             "action": "sttn_cleanup",
             "engine": "sttn",
+            "mosaic_engine": demosaic_engine_s,
+            "mosaic_pre": mosaic_tmp is not None,
             "passes": [{"pass": 1, "encode": sttn_stats}],
             "pass_count": 1,
             "regions": regions,
@@ -689,6 +980,7 @@ def run_multipass_cleanup(
             do_hardsub=dehardsub,
             do_mosaic=demosaic and bool(mosaic_regions),
             mask_from=src,
+            mosaic_engine=str(demosaic_engine).lower() if demosaic else "opencv",
         )
         if out_p != dest:
             tmp_paths.append(out_p)

@@ -321,6 +321,7 @@ class TryUrlBody(BaseModel):
     want_translate: bool = Field(default=True, description="Run subtitle translation")
     want_notes: bool = Field(default=True, description="Run structured notes")
     want_dehardsub: bool = Field(default=False, description="Strip burned-in captions when detected")
+    want_deblur: bool = Field(default=False, description="ONNX deblur / super-res (needs models/realesrgan_x4.onnx)")
     want_enhance: bool = Field(default=False, description="WF-04 sharpen / mild upscale")
     want_compress: bool = Field(default=False, description="WF-05 shrink file size")
     want_concat: bool = Field(default=False, description="WF-06 concat clip ranges")
@@ -357,6 +358,7 @@ class TryUrlsBody(BaseModel):
     want_translate: bool = True
     want_notes: bool = True
     want_dehardsub: bool = False
+    want_deblur: bool = False
     want_enhance: bool = False
     want_compress: bool = False
     want_concat: bool = False
@@ -448,6 +450,7 @@ def try_urls(body: TryUrlsBody, background: BackgroundTasks) -> dict:
         want_notes=body.want_notes,
         stages=body.stages,
         want_dehardsub=body.want_dehardsub,
+        want_deblur=body.want_deblur,
         want_enhance=body.want_enhance,
         want_compress=body.want_compress,
         want_concat=body.want_concat,
@@ -513,6 +516,7 @@ def try_url(body: TryUrlBody, background: BackgroundTasks) -> dict:
         want_notes=body.want_notes,
         stages=body.stages,
         want_dehardsub=body.want_dehardsub,
+        want_deblur=body.want_deblur,
         want_enhance=body.want_enhance,
         want_compress=body.want_compress,
         want_concat=body.want_concat,
@@ -648,6 +652,7 @@ async def try_uploads(
     want_translate: str = Form("true"),
     want_notes: str = Form("true"),
     want_dehardsub: str = Form("false"),
+    want_deblur: str = Form("false"),
     want_enhance: str = Form("false"),
     want_compress: str = Form("false"),
     want_concat: str = Form("false"),
@@ -714,6 +719,7 @@ async def try_uploads(
     wt = str(want_translate or "true").strip().lower() not in ("0", "false", "no", "off")
     wn = str(want_notes or "true").strip().lower() not in ("0", "false", "no", "off")
     wdh = str(want_dehardsub or "false").strip().lower() not in ("0", "false", "no", "off")
+    wdb = str(want_deblur or "false").strip().lower() not in ("0", "false", "no", "off")
     we = str(want_enhance or "false").strip().lower() not in ("0", "false", "no", "off")
     wc = str(want_compress or "false").strip().lower() not in ("0", "false", "no", "off")
     wcat = str(want_concat or "false").strip().lower() not in ("0", "false", "no", "off")
@@ -739,6 +745,7 @@ async def try_uploads(
         want_notes=wn,
         stages=stage_s,
         want_dehardsub=wdh,
+        want_deblur=wdb,
         want_enhance=we,
         want_compress=wc,
         want_concat=wcat,

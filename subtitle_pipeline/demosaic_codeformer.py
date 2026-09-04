@@ -1,19 +1,16 @@
-"""去马赛克：人脸区域用 CodeFormer-ONNX 神经修复，文字/通用区域退回 OpenCV inpaint。
+"""去马赛克后端。
 
-为什么不用 basicsr/facexlib：本环境 Python3.12 + torch2.6 + cu124 装不上 mmcv
-（basicsr/facexlib 都依赖 mmcv，源码编译实测失败），故改用 ONNX 路线，
-用已装的 onnxruntime 推理，绕开 mmcv。
+引擎分工（由 visual_cleanup / media_ops 选择）：
+  - demosaic_engine=sttn（默认，通用）：整段视频把马赛克框当 STTN 洞，
+    适合身体/屏幕/文字/任意像素块，不限人脸。权重：models/sttn.pth
+  - demosaic_engine=codeformer（仅人脸）：本模块 CodeFormer-ONNX。
+    非人脸马赛克不要用——会往脸上「脑补」。缺 onnx 时退 OpenCV。
+  - demosaic_engine=opencv：中值/inpaint 兜底，整块密集马赛克很弱。
 
-接入方式（由 visual_cleanup.encode_cleanup_pass 调用）：
-    from demosaic_codeformer import restore_mosaic_crop, DemosaicUnavailable
-    restored, bg = restore_mosaic_crop(roi, mask, bg, radius=7)
+本文件只实现 codeformer + OpenCV 兜底；通用路径在 sttn_inpaint.encode_sttn。
 
-依赖（放 subtitle_pipeline/models/，缺失时抛 DemosaicUnavailable，调用方退回 inpaint）：
-    - models/codeformer.onnx  （CodeFormer 人脸修复权重，社区 ONNX 导出，输入 512x512）
-    - 可选 models/codeformer_fp32.onnx 等同名；默认文件名 codeformer.onnx
-
-注意：CodeFormer 只擅长「人脸」马赛克；文字条/通用像素块它无能为力，
-调用方仍会对那些区域走 OpenCV inpaint（见 visual_cleanup 中的降级分支）。
+依赖（人脸路径）：
+    - models/codeformer.onnx  （当前仓库默认未附带；缺失 → OpenCV）
 """
 from __future__ import annotations
 
@@ -83,29 +80,76 @@ def _restore_face(roi_bgr: np.ndarray) -> np.ndarray:
     return out
 
 
+def cv_fallback(
+    roi: np.ndarray,
+    mask: np.ndarray,
+    radius: int = 7,
+) -> np.ndarray:
+    """OpenCV 兜底修复马赛克（无神经权重时使用）。
+
+    整块被 mask 覆盖的密集马赛克不能走 cv2.inpaint —— 它没有未遮挡的源像素
+    可插值，实际会原样返回甚至引入伪影。故整块时改用中值模糊弱化网格，
+    局部马赛克才用 inpaint。
+    """
+    import cv2
+
+    cov = float((mask > 0).mean())
+    if cov >= 0.5:
+        k = 5 if min(roi.shape[:2]) >= 8 else 3
+        return cv2.medianBlur(roi, k)
+    return cv2.inpaint(roi, mask, radius, cv2.INPAINT_TELEA)
+
+
 def restore_mosaic_crop(
     roi: np.ndarray,
     mask: np.ndarray,
     bg: dict | None = None,
     radius: int = 7,
+    *,
+    use_neural: bool = True,
+    prefer: str = "auto",
 ) -> tuple[np.ndarray, dict | None]:
     """修复一个马赛克 ROI。
 
-    roi  : BGR uint8（裁剪出的马赛克区域）
-    mask : 单通道 uint8，马赛克像素=255
-    返回 (修复后 ROI, bg) —— bg 透传（本模型无时序背景，原样返回）。
-    不抛异常：内部失败直接回退 OpenCV inpaint，保证流水线不中断。
+    prefer:
+      - auto / lama: 通用 LaMa（任意马赛克）→ 失败再 OpenCV
+      - codeformer: 仅人脸 CodeFormer → 失败再 OpenCV
+      - opencv: 直接 OpenCV
+    use_neural=False 强制 OpenCV（兼容旧调用）。
     """
-    try:
-        restored = _restore_face(roi)
-        mask3 = (mask.astype(np.float32) / 255.0)[..., None]
-        out = roi.astype(np.float32) * (1.0 - mask3) + restored.astype(np.float32) * mask3
-        return out.clip(0, 255).astype(np.uint8), bg
-    except DemosaicUnavailable:
-        import cv2
+    if not use_neural or prefer == "opencv":
+        return cv_fallback(roi, mask, radius), bg
 
-        return cv2.inpaint(roi, mask, radius, cv2.INPAINT_TELEA), bg
-    except Exception:  # noqa: BLE001
-        import cv2
+    want = (prefer or "auto").strip().lower()
+    if want in ("auto", "lama"):
+        try:
+            from inpaint_lama import lama_inpaint
 
-        return cv2.inpaint(roi, mask, radius, cv2.INPAINT_TELEA), bg
+            # LaMa 吃整帧语义；这里 ROI 当小图喂入也能修网格块。
+            restored = lama_inpaint(roi, mask)
+            return restored, bg
+        except Exception:
+            if want == "lama":
+                return cv_fallback(roi, mask, radius), bg
+
+    if want in ("auto", "codeformer"):
+        h, w = roi.shape[:2]
+        aspect = (w / max(1, h)) if h else 99.0
+        if aspect <= 2.2 and aspect >= 0.45 and min(h, w) >= 24:
+            try:
+                restored = _restore_face(roi)
+                cov = float((mask > 0).mean())
+                if cov >= 0.5:
+                    return restored, bg
+                mask3 = (mask.astype(np.float32) / 255.0)[..., None]
+                out = (
+                    roi.astype(np.float32) * (1.0 - mask3)
+                    + restored.astype(np.float32) * mask3
+                )
+                return out.clip(0, 255).astype(np.uint8), bg
+            except DemosaicUnavailable:
+                pass
+            except Exception:  # noqa: BLE001
+                pass
+
+    return cv_fallback(roi, mask, radius), bg

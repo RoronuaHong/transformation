@@ -250,6 +250,7 @@ def compose_try_stages(
     want_notes: bool = True,
     has_media: bool = False,
     want_dehardsub: bool = False,
+    want_deblur: bool = False,
     want_enhance: bool = False,
     want_compress: bool = False,
     want_concat: bool = False,
@@ -262,6 +263,8 @@ def compose_try_stages(
         post.append("dehardsub")
     if want_concat:
         post.append("concat")
+    if want_deblur:
+        post.append("deblur")
     if want_enhance:
         post.append("enhance")
     if want_compress:
@@ -306,6 +309,7 @@ def _media_workflow_fields(
     has_media: bool,
     stages: str | None = None,
     want_dehardsub: bool = False,
+    want_deblur: bool = False,
     want_enhance: bool = False,
     want_compress: bool = False,
     want_concat: bool = False,
@@ -320,6 +324,7 @@ def _media_workflow_fields(
         want_notes=want_notes,
         has_media=has_media,
         want_dehardsub=want_dehardsub,
+        want_deblur=want_deblur,
         want_enhance=want_enhance,
         want_compress=want_compress,
         want_concat=want_concat,
@@ -328,6 +333,7 @@ def _media_workflow_fields(
     )
     return {
         "want_dehardsub": bool(want_dehardsub),
+        "want_deblur": bool(want_deblur),
         "want_enhance": bool(want_enhance),
         "want_compress": bool(want_compress),
         "want_concat": bool(want_concat),
@@ -1402,6 +1408,7 @@ def submit_urls(
     want_notes: bool = True,
     stages: str | None = None,
     want_dehardsub: bool = False,
+    want_deblur: bool = False,
     want_enhance: bool = False,
     want_compress: bool = False,
     want_concat: bool = False,
@@ -1463,6 +1470,7 @@ def submit_urls(
             want_notes=want_notes,
             stages=stages,
             want_dehardsub=want_dehardsub,
+            want_deblur=want_deblur,
             want_enhance=want_enhance,
             want_compress=want_compress,
             want_concat=want_concat,
@@ -1505,6 +1513,7 @@ def submit_url(
     want_notes: bool = True,
     stages: str | None = None,
     want_dehardsub: bool = False,
+    want_deblur: bool = False,
     want_enhance: bool = False,
     want_compress: bool = False,
     want_concat: bool = False,
@@ -1596,6 +1605,7 @@ def submit_url(
                     has_media=has_media,
                     stages=stages,
                     want_dehardsub=want_dehardsub,
+                    want_deblur=want_deblur,
                     want_enhance=want_enhance,
                     want_compress=want_compress,
                     want_concat=want_concat,
@@ -1604,10 +1614,12 @@ def submit_url(
                     media_opts=media_opts,
                 )
             )
-        elif want_dehardsub or want_enhance or want_compress or want_concat or want_remix or want_publish:
+        elif want_dehardsub or want_deblur or want_enhance or want_compress or want_concat or want_remix or want_publish:
             post: list[str] = []
             if want_dehardsub:
                 post.append("dehardsub")
+                if want_deblur:
+                    post.append("deblur")
             if want_concat:
                 post.extend(["clips", "concat"])
             if want_enhance:
@@ -1625,6 +1637,7 @@ def submit_url(
                 has_media=False,
                 stages=post_stages,
                 want_dehardsub=want_dehardsub,
+                want_deblur=want_deblur,
                 want_enhance=want_enhance,
                 want_compress=want_compress,
                 want_concat=want_concat,
@@ -1721,6 +1734,7 @@ def submit_upload(
     want_notes: bool = True,
     stages: str | None = None,
     want_dehardsub: bool = False,
+    want_deblur: bool = False,
     want_enhance: bool = False,
     want_compress: bool = False,
     want_concat: bool = False,
@@ -1774,6 +1788,7 @@ def submit_upload(
             has_media=has_media,
             stages=stages,
             want_dehardsub=want_dehardsub,
+            want_deblur=want_deblur,
             want_enhance=want_enhance,
             want_compress=want_compress,
             want_concat=want_concat,
@@ -1818,6 +1833,7 @@ def submit_uploads(
     want_notes: bool = True,
     stages: str | None = None,
     want_dehardsub: bool = False,
+    want_deblur: bool = False,
     want_enhance: bool = False,
     want_compress: bool = False,
     want_concat: bool = False,
@@ -1863,6 +1879,7 @@ def submit_uploads(
             want_notes=want_notes,
             stages=stages,
             want_dehardsub=want_dehardsub,
+            want_deblur=want_deblur,
             want_enhance=want_enhance,
             want_compress=want_compress,
             want_concat=want_concat,

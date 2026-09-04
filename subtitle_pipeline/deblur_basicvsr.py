@@ -65,8 +65,16 @@ def _load_session(engine: str):
         raise DeblurUnavailable(f"onnx load failed: {exc}") from exc
 
 
-def _infer_frame(sess, frame_bgr: np.ndarray) -> np.ndarray:
-    """对单帧跑一次超分去模糊，返回与原图同尺寸 BGR uint8。"""
+def _infer_frame(
+    sess,
+    frame_bgr: np.ndarray,
+    out_size: tuple[int, int] | None = None,
+) -> np.ndarray:
+    """对单帧跑一次超分去模糊，返回 BGR uint8。
+
+    out_size=(w,h) 指定输出分辨率（默认与输入同尺寸）。超分模型（x4）的输出
+    会直接重采样到 out_size，避免「先缩回降采样尺寸、再放大」的二次损失。
+    """
     import cv2
 
     # Real-ESRGAN x4 onnx 约定：输入 [1,3,H,W] float32 (0..1)，输出 [1,3,4H,4W]。
@@ -76,8 +84,9 @@ def _infer_frame(sess, frame_bgr: np.ndarray) -> np.ndarray:
     out = sess.run(None, {sess.get_inputs()[0].name: inp})[0][0]  # [3,4H,4W]
     out = np.clip(out, 0, 1)
     out = (out.transpose(1, 2, 0)[..., ::-1] * 255.0).astype(np.uint8)  # RGB->BGR
-    if out.shape[:2] != (h, w):
-        out = cv2.resize(out, (w, h), interpolation=cv2.INTER_AREA)
+    ow, oh = out_size if out_size else (w, h)
+    if out.shape[1] != ow or out.shape[0] != oh:
+        out = cv2.resize(out, (ow, oh), interpolation=cv2.INTER_LANCZOS4)
     return out
 
 
@@ -110,6 +119,8 @@ def deblur_video(
         cap.release()
         raise RuntimeError(f"bad video size: {src}")
 
+    # 降采样仅用于推理提速/控显存；输出必须恢复原始分辨率，否则会静默降低画质。
+    orig_w, orig_h = w, h
     scale = 1.0
     if max_height and h > max_height:
         scale = max_height / h
@@ -121,7 +132,8 @@ def deblur_video(
 
     tmp_vid = dest.with_name(dest.stem + "_deblur_noa.mp4")
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    vw = cv2.VideoWriter(str(tmp_vid), fourcc, fps, (iw, ih))
+    # 写回原始分辨率
+    vw = cv2.VideoWriter(str(tmp_vid), fourcc, fps, (orig_w, orig_h))
     prev: np.ndarray | None = None
     while True:
         ok, f = cap.read()
@@ -129,7 +141,8 @@ def deblur_video(
             break
         if scale != 1.0:
             f = cv2.resize(f, (iw, ih), interpolation=cv2.INTER_AREA)
-        out = _infer_frame(sess, f)
+        # 一步到位：超分输出直接重采样到原始分辨率
+        out = _infer_frame(sess, f, out_size=(orig_w, orig_h))
         # 轻量时序融合：与上一帧做 0.25 权重中值，抑制逐帧抖动。
         if prev is not None and prev.shape == out.shape:
             out = cv2.addWeighted(out, 0.75, prev, 0.25, 0)

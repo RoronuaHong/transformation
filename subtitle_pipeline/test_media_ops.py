@@ -59,6 +59,74 @@ def test_normalize_media_opts_clamps() -> None:
     assert keep["enhance_strength"] == "strong"
 
 
+def test_parse_stages_deblur() -> None:
+    """deblur 阶段必须可被 parse_stages 解析并属于 POSTPROC_STAGES。"""
+    assert parse_stages("deblur") == frozenset({"deblur"})
+    assert "deblur" in parse_stages("all,deblur")
+    assert "deblur" not in parse_stages("all")  # opt-in，不进 all
+    assert "deblur" in parse_stages("dehardsub,deblur,enhance")
+
+
+def test_normalize_media_opts_deblur() -> None:
+    """锁定 deblur / deblur_engine 透传（此前 media_ops 完全没有该选项）。"""
+    # 默认关闭、默认引擎 realesrgan
+    base = normalize_media_opts({})
+    assert base["deblur"] is False
+    assert base["deblur_engine"] == "realesrgan"
+    # 字符串真值
+    assert normalize_media_opts({"deblur": "true"})["deblur"] is True
+    assert normalize_media_opts({"deblur": "off"})["deblur"] is False
+    # 合法引擎保留
+    assert normalize_media_opts({"deblur_engine": "basicvsr++"})["deblur_engine"] == "basicvsr++"
+    assert (
+        normalize_media_opts({"deblur_engine": "REALESRGAN"})["deblur_engine"] == "realesrgan"
+    )
+    # 非法引擎 → 回落默认
+    assert normalize_media_opts({"deblur_engine": "bogus"})["deblur_engine"] == "realesrgan"
+
+
+def test_normalize_media_opts_demosaic_engine() -> None:
+    """锁定 demosaic_engine 透传：真实管线必须能选中 codeformer/sttn。
+
+    回归：此参数曾只在 run_multipass_cleanup 上存在，media_ops 从未透传，
+    导致 CodeFormer 神经去马赛克在真实调用链中永远不可达。
+    """
+    # 默认 lama（通用马赛克）；非法值也回退 lama
+    assert normalize_media_opts({})["dehardsub_demosaic_engine"] == "lama"
+    # 合法值原样保留
+    assert (
+        normalize_media_opts({"dehardsub_demosaic_engine": "codeformer"})[
+            "dehardsub_demosaic_engine"
+        ]
+        == "codeformer"
+    )
+    assert (
+        normalize_media_opts({"dehardsub_demosaic_engine": "opencv"})[
+            "dehardsub_demosaic_engine"
+        ]
+        == "opencv"
+    )
+    assert (
+        normalize_media_opts({"dehardsub_demosaic_engine": "sttn"})[
+            "dehardsub_demosaic_engine"
+        ]
+        == "sttn"
+    )
+    assert (
+        normalize_media_opts({"dehardsub_demosaic_engine": "LAMA"})[
+            "dehardsub_demosaic_engine"
+        ]
+        == "lama"
+    )
+    # 非法值 → 回退 lama
+    assert (
+        normalize_media_opts({"dehardsub_demosaic_engine": "bogus"})[
+            "dehardsub_demosaic_engine"
+        ]
+        == "lama"
+    )
+
+
 def test_parse_stages_postproc() -> None:
     assert "enhance" in parse_stages("enhance")
     assert parse_stages("compress") == frozenset({"compress"})
@@ -468,6 +536,39 @@ def test_src_av_sidecar_keeps_clips_clock(tmp_path: Path) -> None:
         '{"clock":"clips","src":"_clips.mp4"}', encoding="utf-8"
     )
     assert caption_clock_for_body(tmp_path, remux) == "clips"
+
+
+def test_purge_stale_locale_remixes(tmp_path: Path) -> None:
+    from media_ops import purge_stale_locale_remixes
+
+    remix = tmp_path / "remix"
+    remix.mkdir()
+    (remix / "remix.mp4").write_bytes(b"0" * 64)
+    (remix / "remix.vtt").write_text("WEBVTT\n", encoding="utf-8")
+    (remix / "remix_cues.json").write_text("{}", encoding="utf-8")
+    (remix / "remix_meta.json").write_text("{}", encoding="utf-8")
+    (remix / "_body.mp4").write_bytes(b"0" * 32)
+    (remix / "remix_zh.mp4").write_bytes(b"0" * 32)
+    (remix / "remix_ja_cues.json").write_text("{}", encoding="utf-8")
+    (remix / "remix_ko_meta.json").write_text("{}", encoding="utf-8")
+    removed = purge_stale_locale_remixes(remix)
+    assert set(removed) == {"remix_zh.mp4", "remix_ja_cues.json", "remix_ko_meta.json"}
+    assert (remix / "remix.mp4").is_file()
+    assert (remix / "remix_cues.json").is_file()
+    assert (remix / "_body.mp4").is_file()
+    assert not (remix / "remix_zh.mp4").is_file()
+
+
+def test_write_media_status(tmp_path: Path) -> None:
+    from media_ops import write_media_status
+
+    media = tmp_path / "media"
+    media.mkdir()
+    path = write_media_status(tmp_path, {"postproc": "ok", "remix": "ok"})
+    assert path.name == "media_status.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["remix"] == "ok"
+    assert "updated_at" in data
 
 
 def test_hardsub_crop_vf() -> None:

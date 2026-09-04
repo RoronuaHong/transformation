@@ -39,7 +39,9 @@ subtitle_pipeline/downloads/
 # 运行时产物
 output/
 subtitle_pipeline/models/*.pth
+subtitle_pipeline/models/*.onnx
 *.pth
+*.onnx
 
 # 系统 / 编辑器
 .DS_Store
@@ -142,3 +144,6 @@ trans/*.md
 trans/*.html
 subtitle_pipeline/*.md
 subtitle_pipeline/*.html
+
+# ── 实例测试产物（本地查看，不提交）──
+subtitle_pipeline/instances/

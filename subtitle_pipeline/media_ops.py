@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -29,11 +30,28 @@ DEFAULT_INTRO_SEC = 2.5
 HARDSUB_CROP_RATIO = 0.14
 HARDSUB_VLM_MODEL = os.environ.get("VITUAL_DEHARDSUB_VLM", "gemma4:e2b")
 DEHARDSUB_MODES = ("auto", "vlm", "band", "delogo", "fill", "crop")
-DEHARDSUB_ENGINES = ("sttn", "opencv")
+DEHARDSUB_ENGINES = ("sttn", "opencv", "lama")
 DEFAULT_DEHARDSUB_ENGINE = (
     str(os.environ.get("VITUAL_DEHARDSUB_ENGINE", "sttn") or "sttn").strip().lower()
 )
 DEFAULT_CLEAN_PASSES = max(1, int(os.environ.get("VITUAL_CLEAN_PASSES", "2") or 2))
+# 去马赛克引擎：
+#   lama（优先通用）= LaMa ONNX 单帧填洞（身体/屏幕/文字块/任意马赛克）
+#   sttn（默认回退）= 马赛克区当 STTN 时序洞（有权重即可）
+#   codeformer = 仅人脸 ROI
+#   opencv = 中值/inpaint 兜底
+DEMOSAIC_ENGINES = ("opencv", "codeformer", "sttn", "lama")
+DEFAULT_DEMOSAIC_ENGINE = (
+    str(os.environ.get("VITUAL_DEMOSAIC_ENGINE", "lama") or "lama").strip().lower()
+)
+# 去模糊引擎：走 ONNX（mmcv/BasicVSR++ 在本环境装不上）。
+# basicvsr++ 为别名，实际复用 realesrgan 的超分去模糊权重。
+DEBLUR_ENGINES = ("realesrgan", "basicvsr++")
+DEFAULT_DEBLUR_ENGINE = (
+    str(os.environ.get("VITUAL_DEBLUR_ENGINE", "realesrgan") or "realesrgan")
+    .strip()
+    .lower()
+)
 CLIPS_META_NAME = "clips_meta.json"
 
 
@@ -67,6 +85,12 @@ def job_remix_dir(work_dir: Path) -> Path:
 
 def job_dehardsub_dir(work_dir: Path) -> Path:
     d = job_media_dir(work_dir) / "dehardsub"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def job_deblur_dir(work_dir: Path) -> Path:
+    d = job_media_dir(work_dir) / "deblur"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -141,6 +165,19 @@ def normalize_media_opts(raw: dict | None = None) -> dict[str, Any]:
     ).strip().lower()
     if dehardsub_engine not in DEHARDSUB_ENGINES:
         dehardsub_engine = "sttn"
+    demosaic_engine = str(
+        src.get("dehardsub_demosaic_engine") or DEFAULT_DEMOSAIC_ENGINE
+    ).strip().lower()
+    if demosaic_engine not in DEMOSAIC_ENGINES:
+        demosaic_engine = "lama"
+    deblur = src.get("deblur", False)
+    if isinstance(deblur, str):
+        deblur = deblur.strip().lower() not in ("0", "false", "no", "off")
+    deblur_engine = str(
+        src.get("deblur_engine") or DEFAULT_DEBLUR_ENGINE
+    ).strip().lower()
+    if deblur_engine not in DEBLUR_ENGINES:
+        deblur_engine = DEFAULT_DEBLUR_ENGINE
     plats_raw = src.get("publish_platforms") or []
     if isinstance(plats_raw, str):
         plats_raw = [p.strip() for p in plats_raw.replace(";", ",").split(",") if p.strip()]
@@ -170,6 +207,9 @@ def normalize_media_opts(raw: dict | None = None) -> dict[str, Any]:
         "dehardsub_passes": dehardsub_passes,
         "dehardsub_demosaic": bool(demosaic),
         "dehardsub_engine": dehardsub_engine,
+        "dehardsub_demosaic_engine": demosaic_engine,
+        "deblur": bool(deblur),
+        "deblur_engine": deblur_engine,
         "publish_platforms": plats,
     }
 
@@ -1095,6 +1135,7 @@ def strip_hardsubs(
     passes: int | None = None,
     demosaic: bool = True,
     engine: str | None = None,
+    demosaic_engine: str | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     """Remove burned-in captions (+ optional mosaic) — keep full frame.
 
@@ -1121,6 +1162,9 @@ def strip_hardsubs(
     engine_s = (engine or DEFAULT_DEHARDSUB_ENGINE).strip().lower()
     if engine_s not in DEHARDSUB_ENGINES:
         engine_s = "sttn"
+    demosaic_engine_s = (demosaic_engine or DEFAULT_DEMOSAIC_ENGINE).strip().lower()
+    if demosaic_engine_s not in DEMOSAIC_ENGINES:
+        demosaic_engine_s = "lama"
     report = detect_hardsubs(src, band_ratio=max(0.12, float(ratio)))
     report.update(
         {
@@ -1210,6 +1254,7 @@ def strip_hardsubs(
                 demosaic=bool(demosaic),
                 dehardsub=bool(report.get("detected") or force or mode_s != "auto"),
                 engine=engine_s,
+                demosaic_engine=demosaic_engine_s,
             )
             report.update(cleanup)
             box = cleanup.get("box") or box
@@ -2237,7 +2282,49 @@ def remix_vertical_notes(
             "bytes": dest.stat().st_size if dest.is_file() else 0,
         },
     )
+    purged = purge_stale_locale_remixes(remix_dir)
+    if purged:
+        print(f"[remix] purged locale artifacts: {purged}")
     return dest
+
+
+CANONICAL_REMIX_FILES = frozenset(
+    {
+        "remix.mp4",
+        "remix.vtt",
+        "remix_cues.json",
+        "remix_meta.json",
+        "preview.html",
+        "concat_meta.json",
+    }
+)
+
+
+def purge_stale_locale_remixes(remix_dir: Path) -> list[str]:
+    """Drop remix_<lang>.* leftovers; site only serves remix.mp4 / cues / vtt."""
+    remix_dir = Path(remix_dir)
+    if not remix_dir.is_dir():
+        return []
+    removed: list[str] = []
+    for path in remix_dir.iterdir():
+        if not path.is_file():
+            continue
+        name = path.name
+        if name.startswith("_") or name in CANONICAL_REMIX_FILES:
+            continue
+        if name.startswith("remix_"):
+            path.unlink(missing_ok=True)
+            removed.append(name)
+    return removed
+
+
+def write_media_status(work_dir: Path, payload: dict) -> Path:
+    """Persist postproc/remix outcome next to media/ (job may still be content-done)."""
+    path = job_media_dir(work_dir) / "media_status.json"
+    data = dict(payload)
+    data.setdefault("updated_at", time.time())
+    _write_meta(path, data)
+    return path
 
 
 def _write_meta(path: Path, payload: dict) -> None:
@@ -2455,6 +2542,7 @@ def resolve_working_video(work_dir: Path) -> Path | None:
         Path("remix") / "remix.mp4",
         Path("compress") / "compressed.mp4",
         Path("enhance") / "enhanced.mp4",
+        Path("deblur") / "deblurred.mp4",
         Path("concat") / "concat.mp4",
         Path("dehardsub") / "clean.mp4",
     ):
@@ -2492,6 +2580,9 @@ def run_postproc(
             passes=int(opts.get("dehardsub_passes") or DEFAULT_CLEAN_PASSES),
             demosaic=bool(opts.get("dehardsub_demosaic", True)),
             engine=str(opts.get("dehardsub_engine") or DEFAULT_DEHARDSUB_ENGINE),
+            demosaic_engine=str(
+                opts.get("dehardsub_demosaic_engine") or DEFAULT_DEMOSAIC_ENGINE
+            ),
         )
         if report.get("action") not in (None, "skip") and cleaned.is_file():
             produced["dehardsub"] = cleaned
@@ -2509,6 +2600,33 @@ def run_postproc(
         concat_videos(clips, dest, height=opts["compress_height"] or DEFAULT_COMPRESS_HEIGHT)
         produced["concat"] = dest
         working = dest
+
+    if "deblur" in enabled:
+        if working is None:
+            raise FileNotFoundError(f"deblur needs a source video in {work_dir}")
+        # 去模糊在 concat 之后、enhance 之前：先恢复细节再做增强/压缩。
+        # 缺 ONNX 权重时抛 DeblurUnavailable → 跳过该阶段，不中断流水线。
+        try:
+            from deblur_basicvsr import DeblurUnavailable, deblur_video
+
+            dest = job_deblur_dir(work_dir) / "deblurred.mp4"
+            deblur_video(
+                working,
+                dest,
+                engine=str(opts.get("deblur_engine") or DEFAULT_DEBLUR_ENGINE),
+                max_height=int(opts.get("enhance_max_height") or 720),
+            )
+            produced["deblur"] = dest
+            working = dest
+        except ImportError:
+            print("[postproc] deblur skipped (module unavailable)")
+        except Exception as exc:  # noqa: BLE001
+            from deblur_basicvsr import DeblurUnavailable  # noqa: F401
+
+            if isinstance(exc, DeblurUnavailable):
+                print(f"[postproc] deblur skipped ({exc})")
+            else:
+                raise
 
     if "enhance" in enabled:
         if working is None:

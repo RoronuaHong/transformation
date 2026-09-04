@@ -1,7 +1,15 @@
 """STTN / caption restore for burned-in text.
 
-Flat UI bars soft-smear under STTN, so those use native per-glyph horizontal
-fill. Textured scenes still use native 1:1 STTN tiles (no bar downscale).
+Routing (industry-aligned with video-subtitle-remover / VideoWipe):
+  - Flat UI bars → Temporal Background Exposure (TBE): median of pixels that
+    are *not* glyphs in other frames. Preserves grain; falls back to spatial
+    lerp where a pixel never exposes. Matches VSR's "STTN mode" TBE idea
+    without treating the whole box as a neural hole (which soft-smears bars).
+  - Textured / live-action → native 1:1 STTN tiles (box hole).
+  - Optional: demosaic via mosaic_boxes on the same tile pass, or CodeFormer.
+
+Further quality (not default): LaMa ONNX for static never-changing text;
+ProPainter for heavy motion (VRAM-heavy, often non-commercial weights).
 """
 
 from __future__ import annotations
@@ -88,7 +96,13 @@ def extract_tile(frame: Any, tile: dict[str, int]) -> Any:
 
 
 def band_is_flat(bgr: Any, box: dict[str, int]) -> bool:
-    """True when the caption bar is a low-variance UI strip (STTN soft-smears these)."""
+    """True when the caption bar is a low-variance UI strip (STTN soft-smears these).
+
+    平坦度只在「主背景簇」内度量：旧实现直接对 gray<160 求 var，字形的抗锯齿
+    边缘（黑字↔白底之间 60..160 的过渡像素）混进 mask 后 var 被拉爆
+    （实测合成白底条 var=510>400 → 误判 False → 走 STTN tiles → 静态字幕
+    时序补全失效 → 字幕残留）。
+    """
     import cv2
     import numpy as np
 
@@ -103,7 +117,12 @@ def band_is_flat(bgr: Any, box: dict[str, int]) -> bool:
     mask = gray < 160
     if float(mask.mean()) < 0.2:
         return False
-    return float(gray[mask].var()) < 400.0
+    # 主背景 = 暗色像素的中位数；只统计 |gray-bg|<30 的背景簇（排除字形 AA）。
+    bg_med = float(np.median(gray[mask]))
+    bg = np.abs(gray.astype(np.float32) - bg_med) < 30.0
+    if float(bg.mean()) < 0.15:
+        return False
+    return float(gray[bg].var()) < 400.0
 
 
 def horiz_lerp_fill(bgr: Any, hole_u8: Any) -> Any:
@@ -144,8 +163,6 @@ def text_hole_parts(bgr: Any, box: dict[str, int]) -> list[Any]:
     import cv2
     import numpy as np
 
-    from media_ops import _hardsub_chroma_mask
-
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     y0 = max(0, int(box["y"]))
     x0 = max(0, int(box["x"]))
@@ -158,8 +175,13 @@ def text_hole_parts(bgr: Any, box: dict[str, int]) -> list[Any]:
     bright = gray >= thr
     near = cv2.dilate(bright.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=1) > 0
     bright |= (gray >= max(140.0, thr - 35.0)) & near
-    chroma = _hardsub_chroma_mask(bgr)
-    near_ui = cv2.dilate(chroma.astype(np.uint8), np.ones((9, 9), np.uint8), iterations=2) > 0
+    # Strong chroma only (avatars / icons). Weak |R-G| from compression grain
+    # must NOT wipe caption glyphs — that left TBE plates contaminated.
+    b = bgr[:, :, 0].astype(np.int16)
+    g = bgr[:, :, 1].astype(np.int16)
+    r = bgr[:, :, 2].astype(np.int16)
+    strong = (np.abs(r - g) > 40) | (np.abs(g - b) > 40) | (np.abs(r - b) > 40)
+    near_ui = cv2.dilate(strong.astype(np.uint8), np.ones((5, 5), np.uint8), iterations=1) > 0
     bright[near_ui] = False
     clip = np.zeros(gray.shape, dtype=np.uint8)
     clip[y0:y1, x0:x1] = 255
@@ -204,19 +226,119 @@ def text_hole_for_tile(tile_bgr: Any, box: dict[str, int], tile: dict[str, int])
     return hole
 
 
+def glyph_hole_adaptive(bgr: Any, box: dict[str, int]) -> Any:
+    """自适应字幕字形 mask（全帧坐标，含描边，用于 STTN 字形级 hole）。
+
+    同时支持深底白字 / 白底黑字 / 彩色描边：
+      - 主背景 = 框内灰度中位数（字幕框内背景占主导）
+      - 字形 = 与背景对比 > 60 的高对比像素（亮字暗字都抓）
+      - 形态学闭运算连接笔画 + 膨胀盖住描边
+      - 占比门卫：高对比像素 > 55% 视为复杂场景（检测不可信）→ 返回空 mask，
+        宁可漏字也不能把整框当洞重画（涂毁画面）。
+    """
+    import cv2
+    import numpy as np
+
+    y0 = max(0, int(box["y"]))
+    x0 = max(0, int(box["x"]))
+    y1 = min(bgr.shape[0], y0 + max(1, int(box["h"])))
+    x1 = min(bgr.shape[1], x0 + max(1, int(box["w"])))
+    if y1 <= y0 or x1 <= x0:
+        return np.zeros(bgr.shape[:2], dtype=np.uint8)
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    roi = gray[y0:y1, x0:x1]
+    bg_med = float(np.median(roi))
+    contrast = np.abs(roi - bg_med) > 60.0
+    frac = float(contrast.mean())
+    if frac > 0.55 or frac < 0.005:
+        # 复杂场景（检测不可信）或框内几乎无字形 → 不动背景
+        return np.zeros(bgr.shape[:2], dtype=np.uint8)
+    m = (contrast.astype(np.uint8) * 255)
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8), iterations=2)
+    m = cv2.dilate(m, np.ones((3, 3), np.uint8), iterations=2)
+    full = np.zeros(bgr.shape[:2], dtype=np.uint8)
+    full[y0:y1, x0:x1] = m
+    return full
+
+
+def glyph_hole_for_tile(glyph_union: Any, tile: dict[str, int]) -> Any:
+    """把全帧字形 mask 裁剪/填充到 STTN tile 坐标。"""
+    import numpy as np
+
+    x, y, w, h = int(tile["x"]), int(tile["y"]), int(tile["w"]), int(tile["h"])
+    sub = glyph_union[y : y + h, x : x + w]
+    if sub.shape[0] == STTN_H and sub.shape[1] == STTN_W:
+        return sub
+    pad = np.zeros((STTN_H, STTN_W), dtype=np.uint8)
+    pad[: sub.shape[0], : sub.shape[1]] = sub
+    return pad
+
+
+def glyph_mask_hybrid(bgr: Any, box: dict[str, int]) -> Any:
+    """通用字形 mask（VSR 同款两级定位）：
+
+    1) OCR 行 bbox 限定「哪里有字」（rapidocr，通用：不依赖底色/描边假设，
+       且天然排除火焰/人物轮廓等高对比非文字内容）；
+    2) bbox 内再做笔画细化（局部中位数 ±50 对比 + 闭运算 + 膨胀盖描边），
+       洞贴合笔画而非整行矩形——矩形大洞会让 STTN 产生大块生成伪影
+       （实测 bbox 直挖出现大团橙色涂抹）。
+    OCR 不可用/无检出 → 回退 glyph_hole_adaptive（全框对比度）。
+    """
+    import cv2
+    import numpy as np
+
+    try:
+        from glyph_detect import GlyphDetectUnavailable, detect_text_boxes
+    except ImportError:
+        return glyph_hole_adaptive(bgr, box)
+    try:
+        boxes = detect_text_boxes(bgr, score_thr=0.5, limit_box=box)
+    except GlyphDetectUnavailable:
+        return glyph_hole_adaptive(bgr, box)
+    except Exception:  # noqa: BLE001 — 单帧 OCR 失败不中断
+        return glyph_hole_adaptive(bgr, box)
+    if not boxes:
+        # 框内确无文本行：不挖洞（宁可漏字也不误毁画面）
+        return np.zeros(bgr.shape[:2], dtype=np.uint8)
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    H, W = gray.shape
+    mask = np.zeros((H, W), dtype=np.uint8)
+    pad = 4
+    for b in boxes:
+        x0 = max(0, b["x"] - pad)
+        y0 = max(0, b["y"] - pad)
+        x1 = min(W, b["x"] + b["w"] + pad)
+        y1 = min(H, b["y"] + b["h"] + pad)
+        roi = gray[y0:y1, x0:x1]
+        if roi.size == 0:
+            continue
+        med = float(np.median(roi))
+        strokes = (np.abs(roi - med) > 50.0).astype(np.uint8) * 255
+        strokes = cv2.morphologyEx(strokes, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8), iterations=2)
+        strokes = cv2.dilate(strokes, np.ones((3, 3), np.uint8), iterations=2)
+        if int(strokes.max()) == 0:
+            # 细化后为空（bbox 内全是背景）→ 保留矩形洞兜底，确保该行被处理
+            strokes = np.full_like(strokes, 255)
+        mask[y0:y1, x0:x1] = np.maximum(mask[y0:y1, x0:x1], strokes)
+    return mask
+
+
 def fill_caption_spatial(bgr: Any, box: dict[str, int]) -> Any:
     """Native-res caption restore for flat UI bars (per-glyph horizontal lerp)."""
     import cv2
     import numpy as np
 
-    from media_ops import _hardsub_chroma_mask
-
     out = bgr.copy()
     parts = text_hole_parts(out, box)
     if not parts:
         return out
+    protect = _caption_protect_mask(out.shape[:2], box)
     union = np.zeros(out.shape[:2], dtype=np.uint8)
     for part in parts:
+        part = part.copy()
+        part[protect] = 0
+        if int(part.max()) == 0:
+            continue
         out = horiz_lerp_fill(out, part)
         union = np.maximum(union, part)
     y0 = max(0, int(box["y"]))
@@ -226,7 +348,13 @@ def fill_caption_spatial(bgr: Any, box: dict[str, int]) -> Any:
     clip = np.zeros(out.shape[:2], dtype=np.uint8)
     clip[y0:y1, x0:x1] = 255
     near_ui = cv2.dilate(
-        _hardsub_chroma_mask(bgr).astype(np.uint8), np.ones((9, 9), np.uint8), iterations=2
+        (
+            (np.abs(bgr[:, :, 2].astype(np.int16) - bgr[:, :, 1].astype(np.int16)) > 40)
+            | (np.abs(bgr[:, :, 1].astype(np.int16) - bgr[:, :, 0].astype(np.int16)) > 40)
+            | (np.abs(bgr[:, :, 2].astype(np.int16) - bgr[:, :, 0].astype(np.int16)) > 40)
+        ).astype(np.uint8),
+        np.ones((5, 5), np.uint8),
+        iterations=1,
     ) > 0
     bg_est = float(
         np.percentile(cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)[y0:y1, x0:x1], 40)
@@ -234,8 +362,15 @@ def fill_caption_spatial(bgr: Any, box: dict[str, int]) -> Any:
     for _ in range(2):
         gray = cv2.cvtColor(out, cv2.COLOR_BGR2GRAY)
         prox = cv2.dilate(union, np.ones((5, 5), np.uint8), iterations=1) > 0
+        # 残留双向检测：暗 ghost（白底黑字场景）与亮 ghost（深底白字场景）都要抓，
+        # 否则深灰板上白字 lerp 后的亮残影（实测 glyph ratio 残留 0.05）漏检。
         resid = (
-            (gray < (bg_est - 10.0)) & prox & (clip > 0) & (~near_ui)
+            (
+                (gray < (bg_est - 10.0)) | (gray > (bg_est + 22.0))
+            )
+            & prox
+            & (clip > 0)
+            & (~near_ui)
         ).astype(np.uint8) * 255
         if int(resid.max()) == 0:
             break
@@ -246,7 +381,170 @@ def fill_caption_spatial(bgr: Any, box: dict[str, int]) -> Any:
             local = (labels == i).astype(np.uint8) * 255
             out = horiz_lerp_fill(out, local)
         union = np.maximum(union, resid)
-    return out
+    return reinject_band_grain(out, bgr, box)
+
+
+def _caption_protect_mask(shape_hw: tuple[int, int], box: dict[str, int]) -> Any:
+    """Left tier icons / avatars — never fill (captions sit mid-bar)."""
+    import numpy as np
+
+    h, w = shape_hw
+    protect = np.zeros((h, w), dtype=bool)
+    left = min(180, max(48, w // 5))
+    protect[:, :left] = True
+    _ = box
+    return protect
+
+
+def glyph_union_mask(bgr: Any, box: dict[str, int]) -> Any:
+    """Union of per-glyph holes inside ``box`` (uint8 0/255), or empty."""
+    import numpy as np
+
+    h, w = bgr.shape[:2]
+    parts = text_hole_parts(bgr, box)
+    if not parts:
+        return np.zeros((h, w), dtype=np.uint8)
+    union = parts[0].copy()
+    for part in parts[1:]:
+        union = np.maximum(union, part)
+    union[_caption_protect_mask((h, w), box)] = 0
+    return union
+
+
+def build_temporal_plate(
+    frames_bgr: list[Any],
+    box: dict[str, int],
+    *,
+    min_hits: int = 3,
+) -> tuple[Any, Any]:
+    """TBE plate: per-pixel median of non-glyph samples (robust to mask leaks)."""
+    import numpy as np
+
+    if not frames_bgr:
+        raise ValueError("empty frames for temporal plate")
+    h, w = frames_bgr[0].shape[:2]
+    y0 = max(0, int(box["y"]))
+    x0 = max(0, int(box["x"]))
+    y1 = min(h, y0 + max(1, int(box["h"])))
+    x1 = min(w, x0 + max(1, int(box["w"])))
+    rh, rw = y1 - y0, x1 - x0
+    stack = np.full((len(frames_bgr), rh, rw, 3), np.nan, dtype=np.float32)
+    hits = np.zeros((h, w), dtype=np.float32)
+    protect = _caption_protect_mask((h, w), box)
+    for i, fr in enumerate(frames_bgr):
+        mask = glyph_union_mask(fr, box)
+        clean = (mask[y0:y1, x0:x1] == 0) & (~protect[y0:y1, x0:x1])
+        if not np.any(clean):
+            continue
+        roi = fr[y0:y1, x0:x1].astype(np.float32)
+        stack[i][clean] = roi[clean]
+        hits[y0:y1, x0:x1][clean] += 1.0
+    plate = frames_bgr[0].copy()
+    with np.errstate(all="ignore"):
+        med = np.nanmedian(stack, axis=0)
+    ok = hits >= float(max(1, min_hits))
+    valid = ok[y0:y1, x0:x1] & np.isfinite(med[:, :, 0])
+    if np.any(valid):
+        plate[y0:y1, x0:x1][valid] = np.clip(med[valid], 0, 255).astype(np.uint8)
+    return plate, hits
+
+
+def fill_caption_tbe(
+    bgr: Any,
+    box: dict[str, int],
+    plate: Any,
+    hits: Any,
+    *,
+    min_hits: int = 3,
+    spatial_residual: bool = True,
+) -> Any:
+    """Replace glyph pixels from TBE plate; uncovered holes → spatial lerp."""
+    import cv2
+    import numpy as np
+
+    out = bgr.copy()
+    mask = glyph_union_mask(out, box)
+    if int(mask.max()) == 0:
+        return out
+    protect = _caption_protect_mask(out.shape[:2], box)
+    cover = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=2)
+    cover[protect] = 0
+    trusted = hits >= float(max(1, min_hits))
+    covered = (cover > 0) & trusted
+    if np.any(covered):
+        alpha = _soft_alpha(cover)
+        a = np.where(covered, alpha, 0.0).astype(np.float32)
+        base = out.astype(np.float32)
+        pl = plate.astype(np.float32)
+        out = np.clip(base * (1.0 - a[:, :, None]) + pl * a[:, :, None], 0, 255).astype(
+            np.uint8
+        )
+    need = (cover > 0) & (~trusted)
+    if np.any(need):
+        out = horiz_lerp_fill(out, need.astype(np.uint8) * 255)
+    if spatial_residual:
+        out = fill_caption_spatial(out, box)
+    return reinject_band_grain(out, bgr, box, cover)
+
+
+def reinject_band_grain(
+    out: Any,
+    src: Any,
+    box: dict[str, int],
+    filled_u8: Any | None = None,
+) -> Any:
+    """Restore local film grain on filled pixels so the patch doesn't look plastic.
+
+    Industry gap after spatial lerp / neural fill on flat UI: low-frequency OK,
+    high-frequency missing. Match high-pass σ from clean pixels in the same band.
+    """
+    import cv2
+    import numpy as np
+
+    y0 = max(0, int(box["y"]))
+    x0 = max(0, int(box["x"]))
+    y1 = min(out.shape[0], y0 + max(1, int(box["h"])))
+    x1 = min(out.shape[1], x0 + max(1, int(box["w"])))
+    if y1 <= y0 or x1 <= x0:
+        return out
+    protect = _caption_protect_mask(out.shape[:2], box)
+    if filled_u8 is None:
+        # Approximate: pixels that changed vs source inside box.
+        diff = np.abs(out.astype(np.int16) - src.astype(np.int16)).max(axis=2) > 4
+        filled = diff & (~protect)
+        filled[:y0, :] = False
+        filled[y1:, :] = False
+        filled[:, :x0] = False
+        filled[:, x1:] = False
+    else:
+        filled = (filled_u8 > 0) & (~protect)
+    if not np.any(filled):
+        return out
+    roi_src = src[y0:y1, x0:x1].astype(np.float32)
+    blur = cv2.GaussianBlur(roi_src, (5, 5), 0)
+    hp = roi_src - blur
+    clean = ~filled[y0:y1, x0:x1]
+    if float(clean.mean()) < 0.05:
+        return out
+    # Per-channel σ from clean high-pass.
+    sig = []
+    for c in range(3):
+        vals = hp[:, :, c][clean]
+        sig.append(float(np.std(vals)) if vals.size else 0.0)
+    sig_a = np.array(sig, dtype=np.float32)
+    if float(sig_a.max()) < 0.8:
+        return out
+    rng = np.random.default_rng(
+        int(out[y0, x0, 0]) * 1000 + int(out[y0, x0, 1]) * 10 + int(out[y0, x0, 2])
+    )
+    noise = rng.normal(0.0, 1.0, size=out[y0:y1, x0:x1].shape).astype(np.float32)
+    noise *= sig_a.reshape(1, 1, 3)
+    patched = out.copy()
+    local = patched[y0:y1, x0:x1].astype(np.float32)
+    m = filled[y0:y1, x0:x1]
+    local[m] = np.clip(local[m] + noise[m], 0, 255)
+    patched[y0:y1, x0:x1] = local.astype(np.uint8)
+    return patched
 
 
 def _soft_alpha(hole_u8: Any) -> Any:
@@ -433,6 +731,36 @@ def _open_ffmpeg_writer(
     return subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
+def _fill_mosaic_native(frame: Any, mosaic_boxes: list[dict[str, int]]) -> Any:
+    """在当前帧上直接弱化/修复马赛克块（spatial 路径用）。
+
+    与 encode_cleanup_pass 的马赛克分支同一套逻辑：build_mosaic_mask 取 mask，
+    restore_mosaic_crop(use_neural=False) 走 OpenCV 兜底（中值模糊弱化网格）。
+    """
+    import cv2
+
+    from demosaic_codeformer import restore_mosaic_crop
+    from visual_cleanup import build_mosaic_mask
+
+    out = frame
+    H, W = frame.shape[:2]
+    for mb in mosaic_boxes:
+        x = max(0, min(W - 2, int(mb["x"])))
+        y = max(0, min(H - 2, int(mb["y"])))
+        w = max(2, min(W - x, int(mb["w"])))
+        h = max(2, min(H - y, int(mb["h"])))
+        roi = out[y : y + h, x : x + w]
+        if roi.size == 0:
+            continue
+        mask = build_mosaic_mask(roi, dilate=1)
+        if int(mask.max()) == 0:
+            continue
+        restored, _bg = restore_mosaic_crop(roi, mask, None, radius=7, use_neural=False)
+        out = out.copy()
+        out[y : y + h, x : x + w] = restored
+    return out
+
+
 def _encode_spatial(
     src: Path,
     dest: Path,
@@ -444,33 +772,110 @@ def _encode_spatial(
     frame_h: int,
     fps: float,
     n_hint: int,
+    mosaic_boxes: list[dict[str, int]] | None = None,
 ) -> dict[str, Any]:
+    """Flat-bar path: TBE plate (pass1) then per-frame paste + spatial residual (pass2)."""
+    import cv2
     import numpy as np
 
+    min_hits = max(1, int(os.environ.get("VITUAL_TBE_MIN_HITS", "3") or 3))
+    sample_stride = max(1, int(os.environ.get("VITUAL_TBE_SAMPLE_STRIDE", "2") or 2))
+    # Pass 1 — subsampled median TBE plate (robust vs mean ghosting).
     print(
-        f"[sttn] mode=spatial_flat native fill box={box} "
-        "(flat UI — STTN would soft-smear)",
+        f"[sttn] mode=temporal_flat TBE plate box={box} min_hits={min_hits} "
+        f"stride={sample_stride} mosaic_boxes={len(mosaic_boxes or [])}",
         flush=True,
     )
-    proc = _open_ffmpeg_writer(src, dest, frame_w, frame_h, fps)
+    cap.release()
+    cap1 = cv2.VideoCapture(str(src))
+    if not cap1.isOpened():
+        raise RuntimeError(f"cannot reopen {src} for TBE plate")
+    h, w = frame_h, frame_w
+    y0 = max(0, int(box["y"]))
+    x0 = max(0, int(box["x"]))
+    y1 = min(h, y0 + max(1, int(box["h"])))
+    x1 = min(w, x0 + max(1, int(box["w"])))
+    rh, rw = y1 - y0, x1 - x0
+    protect = _caption_protect_mask((h, w), box)
+    samples: list[Any] = []
+    hits = np.zeros((h, w), dtype=np.float32)
+    scanned = 0
+    while True:
+        ok, fr = cap1.read()
+        if not ok:
+            break
+        scanned += 1
+        if (scanned - 1) % sample_stride != 0:
+            continue
+        mask = glyph_union_mask(fr, box)
+        clean = (mask[y0:y1, x0:x1] == 0) & (~protect[y0:y1, x0:x1])
+        slot = np.full((rh, rw, 3), np.nan, dtype=np.float32)
+        if np.any(clean):
+            roi = fr[y0:y1, x0:x1].astype(np.float32)
+            slot[clean] = roi[clean]
+            hits[y0:y1, x0:x1][clean] += 1.0
+        samples.append(slot)
+        if n_hint and scanned % 120 == 0:
+            print(f"[sttn] TBE scan {scanned}/{n_hint}", flush=True)
+    cap1.release()
+    plate = first.copy()
+    if samples:
+        stack = np.stack(samples, axis=0)
+        with np.errstate(all="ignore"):
+            med = np.nanmedian(stack, axis=0)
+        ok_hits = hits >= float(min_hits)
+        valid = ok_hits[y0:y1, x0:x1] & np.isfinite(med[:, :, 0])
+        if np.any(valid):
+            plate[y0:y1, x0:x1][valid] = np.clip(med[valid], 0, 255).astype(np.uint8)
+    else:
+        ok_hits = hits >= float(min_hits)
+    coverage = float(ok_hits[y0:y1, x0:x1].mean()) if y1 > y0 and x1 > x0 else 0.0
+    # High TBE coverage: skip spatial residual (it re-lerps and kills grain / smears UI).
+    use_spatial = coverage < 0.85
+    print(
+        f"[sttn] TBE plate coverage={coverage:.3f} scanned={scanned} "
+        f"spatial_residual={use_spatial}",
+        flush=True,
+    )
+
+    # Pass 2 — apply plate under glyphs, spatial residual for never-exposed.
+    writing = dest.with_name("_clean_tbe_writing.mp4")
+    if writing.is_file():
+        writing.unlink(missing_ok=True)
+    proc = _open_ffmpeg_writer(src, writing, frame_w, frame_h, fps)
     assert proc.stdin is not None
+    cap2 = cv2.VideoCapture(str(src))
+    if not cap2.isOpened():
+        proc.kill()
+        raise RuntimeError(f"cannot reopen {src} for TBE encode")
     frames_done = 0
     try:
-        frame = first
-        while frame is not None:
-            out = fill_caption_spatial(frame, box)
+        while True:
+            ok, frame = cap2.read()
+            if not ok:
+                break
+            out = frame
+            if mosaic_boxes:
+                out = _fill_mosaic_native(out, mosaic_boxes)
+            out = fill_caption_tbe(
+                out,
+                box,
+                plate,
+                hits,
+                min_hits=min_hits,
+                spatial_residual=use_spatial,
+            )
             proc.stdin.write(np.ascontiguousarray(out).tobytes())
             frames_done += 1
             if n_hint and frames_done % 60 == 0:
                 print(f"[sttn] wrote {frames_done}/{n_hint}", flush=True)
-            ok, nxt = cap.read()
-            frame = nxt if ok else None
         if n_hint:
             print(f"[sttn] wrote {frames_done}/{n_hint}", flush=True)
     except Exception:
         proc.kill()
         raise
     finally:
+        cap2.release()
         try:
             proc.stdin.close()
         except Exception:
@@ -478,12 +883,41 @@ def _encode_spatial(
     stderr = proc.communicate(timeout=300)[1]
     if proc.returncode != 0 or frames_done < 1:
         err = (stderr or b"").decode("utf-8", errors="replace")[:400]
-        raise RuntimeError(f"spatial encode failed ({proc.returncode}): {err}")
-    if not dest.is_file() or dest.stat().st_size < 800:
-        raise RuntimeError(f"spatial encode produced empty file: {dest}")
+        try:
+            writing.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise RuntimeError(f"TBE encode failed ({proc.returncode}): {err}")
+    if not writing.is_file() or writing.stat().st_size < 800:
+        raise RuntimeError(f"TBE encode produced empty file: {writing}")
+    import shutil
+    import time
+
+    last_err: OSError | None = None
+    for _ in range(8):
+        try:
+            if dest.is_file():
+                dest.unlink()
+            writing.replace(dest)
+            last_err = None
+            break
+        except OSError as exc:
+            last_err = exc
+            time.sleep(0.4)
+    if last_err is not None:
+        try:
+            shutil.copy2(writing, dest)
+            writing.unlink(missing_ok=True)
+        except OSError as exc:
+            raise RuntimeError(
+                f"TBE wrote {writing} but could not replace {dest}: {exc}"
+            ) from exc
     return {
         "engine": "sttn",
-        "mode": "spatial_flat",
+        "mode": "temporal_flat",
+        "tbe_coverage": round(coverage, 4),
+        "tbe_min_hits": min_hits,
+        "tbe_spatial_residual": use_spatial,
         "frames": frames_done,
         "device": "cpu",
         "bytes": dest.stat().st_size,
@@ -527,13 +961,14 @@ def encode_sttn(
         cap.release()
         raise RuntimeError(f"empty video: {src}")
 
-    # Default: STTN. Opt into flat spatial fill only when explicitly requested.
-    prefer_flat = (os.environ.get("VITUAL_STTN_FORCE") or "1").strip().lower() in (
-        "0",
-        "false",
-        "no",
-        "flat",
-    )
+    # 默认 auto = STTN tiles + 自适应字形级 hole（只重画笔画，背景 1:1 保留）。
+    # 历史：
+    #   - 整框 hole（旧 tiles）→ 扁平条被整体重画涂毁；
+    #   - spatial lerp → 中文连排字幕黑边相连成整行 hole → 水平 lerp 大块涂抹。
+    #   字形级 hole 是唯一同时「去字 + 不毁背景」的路线（STTN 训练目标就是补字幕笔画）。
+    # VITUAL_STTN_FORCE=flat → 显式退回 spatial lerp（小字幕场景）。
+    _force = (os.environ.get("VITUAL_STTN_FORCE") or "auto").strip().lower()
+    prefer_flat = _force == "flat"
     if prefer_flat and band_is_flat(first, box):
         try:
             return _encode_spatial(
@@ -546,6 +981,7 @@ def encode_sttn(
                 frame_h=frame_h,
                 fps=fps,
                 n_hint=n_hint,
+                mosaic_boxes=list(mosaic_boxes or []),
             )
         finally:
             cap.release()
@@ -572,11 +1008,13 @@ def encode_sttn(
     regions: list[dict[str, Any]] = []
     cap_region = _build_region(box)
     if cap_region:
+        cap_region["kind"] = "hardsub"
         regions.append(cap_region)
     # 马赛克块也作为 STTN 的「洞」接入同一套 tiles（人脸/大块由时序补内容）。
     for mb in mosaic_boxes or []:
         r = _build_region(mb)
         if r:
+            r["kind"] = "mosaic"
             regions.append(r)
     if not regions:
         cap.release()
@@ -585,9 +1023,10 @@ def encode_sttn(
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
         torch.cuda.empty_cache()
+    total_tiles = sum(len(r["tiles"]) for r in regions)
     print(
-        f"[sttn] mode=tiles device={device} ckpt={weights.name} tiles={len(tiles)} "
-        f"native={STTN_W}x{STTN_H} box={box}",
+        f"[sttn] mode=tiles device={device} ckpt={weights.name} regions={len(regions)} "
+        f"tiles={total_tiles} native={STTN_W}x{STTN_H} box={box}",
         flush=True,
     )
     model = _load_generator(weights, device)
@@ -645,15 +1084,24 @@ def encode_sttn(
         for r in regions:
             tiles = r["tiles"]
             box = r["box"]
+            kind = str(r.get("kind") or "hardsub")
+            # 字幕：通用混合字形 hole（OCR 行 bbox 限定 + 笔画细化，回退自适应对比度）。
+            # 马赛克：块状区域，整框 hole 才正确。
+            glyph_per_frame: list[Any] = []
+            if kind == "hardsub":
+                glyph_per_frame = [glyph_mask_hybrid(fr, box) for fr in bgr_frames]
             tile_preds: list[Any] = []
             tile_holes: list[list[Any]] = []
             for tile in tiles:
                 rgbs: list[Any] = []
                 holes: list[Any] = []
                 any_hole = False
-                for fr in bgr_frames:
+                for fi, fr in enumerate(bgr_frames):
                     patch = extract_tile(fr, tile)
-                    hole = text_hole_for_tile(patch, box, tile)
+                    if kind == "hardsub":
+                        hole = glyph_hole_for_tile(glyph_per_frame[fi], tile)
+                    else:
+                        hole = text_hole_for_tile(patch, box, tile)
                     if hole.shape[0] != STTN_H or hole.shape[1] != STTN_W:
                         padded = np.zeros((STTN_H, STTN_W), dtype=np.uint8)
                         padded[: hole.shape[0], : hole.shape[1]] = hole
@@ -679,6 +1127,8 @@ def encode_sttn(
             )
         for i in range(write_n):
             out = _composite_frame(bgr_frames[i], regions_data, i)
+            # Close the last plastic-patch gap on flat UI bars.
+            out = reinject_band_grain(out, bgr_frames[i], box)
             proc.stdin.write(np.ascontiguousarray(out).tobytes())
             frames_done += 1
         if n_hint:
@@ -748,7 +1198,7 @@ def encode_sttn(
         "engine": "sttn",
         "mode": "tiles",
         "frames": frames_done,
-        "tiles": tiles,
+        "tiles": total_tiles,
         "ckpt": weights.name,
         "device": str(device),
         "bytes": dest.stat().st_size,

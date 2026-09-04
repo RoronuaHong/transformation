@@ -70,7 +70,7 @@ ALL_STAGES = frozenset(
     {"fetch", "asr", "translate", "notes", "localize", "frames", "clips"}
 )
 POSTPROC_STAGES = frozenset(
-    {"dehardsub", "enhance", "compress", "concat", "remix", "publish"}
+    {"dehardsub", "deblur", "enhance", "compress", "concat", "remix", "publish"}
 )
 KNOWN_STAGES = ALL_STAGES | POSTPROC_STAGES
 MEDIA_ONLY_STAGES = frozenset({"frames", "clips"}) | POSTPROC_STAGES
@@ -101,7 +101,7 @@ def parse_stages(raw: str | None) -> frozenset[str]:
         return frozenset({"translate", "notes", "localize", "frames", "clips"})
     if s in ("dehardsub", "strip_hardsubs", "hardsub", "unburn"):
         return frozenset({"dehardsub"})
-    if s in ("enhance", "compress", "concat", "remix", "publish"):
+    if s in ("deblur", "enhance", "compress", "concat", "remix", "publish"):
         return frozenset({s})
     parts = {p.strip() for p in s.replace(";", ",").split(",") if p.strip()}
     # Aliases → canonical stage name
@@ -258,10 +258,14 @@ def _run_job_postproc(
     enabled: frozenset[str],
     *,
     frame_clips: list | None = None,
-) -> None:
+) -> dict:
+    """Run opt-in media stages. Always returns a media_status payload."""
+    from media_ops import run_postproc, write_media_status
+
     if not (enabled & POSTPROC_STAGES):
-        return
-    from media_ops import run_postproc
+        status = {"postproc": "skipped", "produced": {}, "remix": "skipped", "stages": []}
+        write_media_status(work_dir, status)
+        return status
 
     _mode, _gif, clips, _gif_ranges = _resolve_frame_opts(
         job, frame_mode=None, gif_duration=None, frame_clips=frame_clips
@@ -282,7 +286,28 @@ def _run_job_postproc(
             platforms=list(plats) if plats else None,
         )
         produced["publish"] = Path(pub["report"])
-    print(f"[postproc] { {k: str(v.name) for k, v in produced.items()} }")
+    names = {k: str(v.name) for k, v in produced.items()}
+    print(f"[postproc] {names}")
+    status = {
+        "postproc": "ok",
+        "stages": sorted(enabled & POSTPROC_STAGES),
+        "produced": names,
+        "remix": "ok"
+        if "remix" in produced
+        else ("requested" if "remix" in enabled else "skipped"),
+    }
+    write_media_status(work_dir, status)
+    return status
+
+
+def _finish_media_status(queue, job_id: int, work_dir: Path, status: dict) -> None:
+    from media_ops import write_media_status
+
+    write_media_status(work_dir, status)
+    try:
+        queue.set_meta(job_id, {"media_status": status})
+    except Exception as e:
+        print(f"[media_status] queue meta skip ({type(e).__name__}: {e})")
 
 
 def _attach_job_media(
@@ -673,7 +698,19 @@ def _process_media_only(
             gif_duration=gif_duration,
             frame_clips=frame_clips,
         ) or summary
-    _run_job_postproc(out_dir, job, enabled, frame_clips=frame_clips)
+    try:
+        media_st = _run_job_postproc(out_dir, job, enabled, frame_clips=frame_clips)
+        _finish_media_status(queue, job_id, out_dir, media_st)
+    except Exception as e:
+        media_st = {
+            "postproc": "failed",
+            "stages": sorted(enabled & POSTPROC_STAGES),
+            "error": f"{type(e).__name__}: {e}",
+            "remix": "failed" if "remix" in enabled else "skipped",
+        }
+        print(f"[postproc] FAILED ({media_st['error']})")
+        traceback.print_exc()
+        _finish_media_status(queue, job_id, out_dir, media_st)
 
     article_id = None
     if summary:
@@ -1024,10 +1061,18 @@ def process_job(
             traceback.print_exc()
 
     try:
-        _run_job_postproc(out_dir, job, enabled, frame_clips=frame_clips)
+        media_st = _run_job_postproc(out_dir, job, enabled, frame_clips=frame_clips)
+        _finish_media_status(queue, job_id, out_dir, media_st)
     except Exception as e:
+        media_st = {
+            "postproc": "failed",
+            "stages": sorted(enabled & POSTPROC_STAGES),
+            "error": f"{type(e).__name__}: {e}",
+            "remix": "failed" if "remix" in enabled else "skipped",
+        }
         print(f"[postproc] FAILED ({type(e).__name__}: {e})")
         traceback.print_exc()
+        _finish_media_status(queue, job_id, out_dir, media_st)
 
     wav_path = existing_wav(out_dir) or (
         Path(wav) if wav and Path(wav).is_file() else None

@@ -196,6 +196,37 @@ def audit_work_dir(work: Path) -> dict:
         else:
             warn("S3-remix-body-gap", f"gap={gap:.3f}s intro={intro:.3f}s")
 
+    remix_dir = remix.parent if remix.is_file() else media / "remix"
+    if remix_dir.is_dir():
+        from media_ops import CANONICAL_REMIX_FILES
+
+        stale = [
+            p.name
+            for p in remix_dir.iterdir()
+            if p.is_file()
+            and p.name.startswith("remix_")
+            and p.name not in CANONICAL_REMIX_FILES
+            and not p.name.startswith("_")
+        ]
+        if stale:
+            warn("S10-locale-remix-stale", f"remove unused: {stale[:8]}")
+        else:
+            ok("S10-canonical-remix-only", "no remix_<lang> leftovers")
+
+    status_path = media / "media_status.json"
+    if status_path.is_file():
+        try:
+            ms = json.loads(status_path.read_text(encoding="utf-8"))
+            out["media_status"] = ms
+            if ms.get("postproc") == "failed" or ms.get("remix") == "failed":
+                fail("media_status", str(ms.get("error") or ms))
+            elif ms.get("remix") == "ok":
+                ok("media_status", f"remix=ok postproc={ms.get('postproc')}")
+            else:
+                ok("media_status", f"postproc={ms.get('postproc')} remix={ms.get('remix')}")
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as e:
+            warn("media_status", f"unreadable: {e}")
+
     return out
 
 
