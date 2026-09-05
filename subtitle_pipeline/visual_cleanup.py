@@ -256,6 +256,136 @@ def restore_region(
     return _media()._restore_hardsub_roi(roi, mask_u8, bg)
 
 
+def restore_edge_overlay(frame: Any, box: dict[str, int]) -> Any:
+    """Edge overlay fallback for top/bottom/right static overlays.
+
+    Copy a same-size patch from a nearby clean band and feather only on
+    non-edge sides. This is crude, but it is often more stable than glyph-wise
+    inpainting for large outlined titles / watermarks on blurry backgrounds.
+    """
+    import cv2
+    import numpy as np
+
+    out = frame.copy()
+    h, w = out.shape[:2]
+    x0 = max(0, min(w - 1, int(box["x"])))
+    y0 = max(0, min(h - 1, int(box["y"])))
+    x1 = max(x0 + 1, min(w, x0 + max(1, int(box["w"]))))
+    y1 = max(y0 + 1, min(h, y0 + max(1, int(box["h"]))))
+    bw = x1 - x0
+    bh = y1 - y0
+    if bw < 8 or bh < 8:
+        return out
+
+    touch_top = y0 <= 2
+    touch_bottom = y1 >= h - 2
+    touch_left = x0 <= 2
+    touch_right = x1 >= w - 2
+
+    # Prefer borrowing from the nearest clean interior band.
+    if touch_top:
+        sy0 = min(h - bh, y1 + 2)
+        sy1 = min(h, sy0 + bh)
+        sx0, sx1 = x0, x1
+    elif touch_bottom and touch_right:
+        sx1 = max(bw, x0 - 2)
+        sx0 = max(0, sx1 - bw)
+        sy1 = max(bh, y0 - 2)
+        sy0 = max(0, sy1 - bh)
+    elif touch_right:
+        sx1 = max(bw, x0 - 2)
+        sx0 = max(0, sx1 - bw)
+        sy0, sy1 = y0, y1
+    elif touch_bottom:
+        sy1 = max(bh, y0 - 2)
+        sy0 = max(0, sy1 - bh)
+        sx0, sx1 = x0, x1
+    else:
+        sy1 = max(bh, y0 - 2)
+        sy0 = max(0, sy1 - bh)
+        sx0, sx1 = x0, x1
+    sample = out[sy0:sy1, sx0:sx1]
+    if sample.size == 0:
+        return out
+    if sample.shape[0] != bh or sample.shape[1] != bw:
+        sample = cv2.resize(sample, (bw, bh), interpolation=cv2.INTER_LINEAR)
+
+    yy, xx = np.mgrid[0:bh, 0:bw].astype(np.float32)
+    dist_left = xx if not touch_left else np.full_like(xx, 9999.0)
+    dist_top = yy if not touch_top else np.full_like(yy, 9999.0)
+    dist_right = (bw - 1 - xx) if not touch_right else np.full_like(xx, 9999.0)
+    dist_bottom = (bh - 1 - yy) if not touch_bottom else np.full_like(yy, 9999.0)
+    edge = np.minimum.reduce([dist_left, dist_top, dist_right, dist_bottom])
+    alpha = np.clip(edge / 10.0, 0.0, 1.0)[:, :, None]
+    target = out[y0:y1, x0:x1].astype(np.float32)
+    donor = sample.astype(np.float32)
+    mixed = donor * alpha + target * (1.0 - alpha)
+    out[y0:y1, x0:x1] = np.clip(mixed, 0, 255).astype(np.uint8)
+    return out
+
+
+def expand_static_overlay_box(
+    box: dict[str, int],
+    frame_w: int,
+    frame_h: int,
+    *,
+    role: str,
+) -> dict[str, int]:
+    """Slightly enlarge static overlay boxes so edge text remnants are fully covered."""
+    role_s = (role or "").strip().lower()
+    if role_s == "title":
+        pad_l, pad_t, pad_r, pad_b = 14, 0, 18, 14
+    elif role_s == "watermark":
+        pad_l, pad_t, pad_r, pad_b = 28, 16, 10, 14
+    else:
+        pad_l = pad_t = pad_r = pad_b = 0
+    x0 = max(0, int(box["x"]) - pad_l)
+    y0 = max(0, int(box["y"]) - pad_t)
+    x1 = min(frame_w, int(box["x"]) + int(box["w"]) + pad_r)
+    y1 = min(frame_h, int(box["y"]) + int(box["h"]) + pad_b)
+    return {"x": x0, "y": y0, "w": max(2, x1 - x0), "h": max(2, y1 - y0)}
+
+
+def restore_static_overlay_box(frame: Any, box: dict[str, int]) -> Any:
+    """Generic static edge-overlay remover: full expanded box inpaint.
+
+    This is more general than subtitle-shaped masks for top titles / corner
+    watermarks because the overlay is static and edge-attached.
+    """
+    import cv2
+    import numpy as np
+
+    out = frame.copy()
+    h, w = out.shape[:2]
+    x0 = max(0, min(w - 1, int(box["x"])))
+    y0 = max(0, min(h - 1, int(box["y"])))
+    x1 = max(x0 + 1, min(w, x0 + max(1, int(box["w"]))))
+    y1 = max(y0 + 1, min(h, y0 + max(1, int(box["h"]))))
+    mask = np.zeros((h, w), dtype=np.uint8)
+    mask[y0:y1, x0:x1] = 255
+    filled = cv2.inpaint(out, mask, 5, cv2.INPAINT_TELEA)
+
+    # Soften the rectangle boundary by blending a blurred version only near the
+    # non-edge sides of the box; this reduces the "patched rectangle" look.
+    touch_top = y0 <= 2
+    touch_bottom = y1 >= h - 2
+    touch_left = x0 <= 2
+    touch_right = x1 >= w - 2
+    roi = filled[y0:y1, x0:x1]
+    blur = cv2.GaussianBlur(roi, (0, 0), 3.0)
+    bh, bw = roi.shape[:2]
+    yy, xx = np.mgrid[0:bh, 0:bw].astype(np.float32)
+    dist_left = xx if not touch_left else np.full_like(xx, 9999.0)
+    dist_top = yy if not touch_top else np.full_like(yy, 9999.0)
+    dist_right = (bw - 1 - xx) if not touch_right else np.full_like(xx, 9999.0)
+    dist_bottom = (bh - 1 - yy) if not touch_bottom else np.full_like(yy, 9999.0)
+    edge = np.minimum.reduce([dist_left, dist_top, dist_right, dist_bottom])
+    alpha = np.clip((10.0 - edge) / 10.0, 0.0, 1.0)[:, :, None]
+    mixed = roi.astype(np.float32) * (1.0 - alpha) + blur.astype(np.float32) * alpha
+    filled[y0:y1, x0:x1] = np.clip(mixed, 0, 255).astype(np.uint8)
+    return filled
+
+
 def _merge_masks(*masks: Any) -> Any:
     import numpy as np
 
@@ -636,26 +766,88 @@ def encode_cleanup_pass(
     return {"frames": frames, "masked_ops": masked, "bytes": dest.stat().st_size}
 
 
+def residual_ghost_mask(bgr: Any, box: dict[str, int], *, thr: float = 14.0) -> Any:
+    """STTN/lerp 后残影 mask：框内相对局部中位数的笔画状偏差（OCR 已看不到字时仍可用）。"""
+    import cv2
+    import numpy as np
+
+    h, w = bgr.shape[:2]
+    mask = np.zeros((h, w), dtype=np.uint8)
+    x0 = max(0, min(w - 1, int(box["x"])))
+    y0 = max(0, min(h - 1, int(box["y"])))
+    x1 = max(x0 + 1, min(w, x0 + max(1, int(box["w"]))))
+    y1 = max(y0 + 1, min(h, y0 + max(1, int(box["h"]))))
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    roi = gray[y0:y1, x0:x1]
+    if roi.size < 64:
+        return mask
+    med = cv2.medianBlur(roi, 15)
+    diff = np.abs(roi.astype(np.float32) - med.astype(np.float32))
+    hit = (diff > float(thr)).astype(np.uint8) * 255
+    hit = cv2.morphologyEx(hit, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    hit = cv2.morphologyEx(hit, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8), iterations=1)
+    n_cc, labels, stats, _ = cv2.connectedComponentsWithStats(hit, connectivity=8)
+    clean = np.zeros_like(hit)
+    for i in range(1, n_cc):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        bw = int(stats[i, cv2.CC_STAT_WIDTH])
+        bh = int(stats[i, cv2.CC_STAT_HEIGHT])
+        if area < 8 or max(bw, bh) < 3:
+            continue
+        clean[labels == i] = 255
+    if int(clean.max()) == 0:
+        return mask
+    frac = float((clean > 0).mean())
+    if frac > 0.45:
+        keep = diff > max(float(thr) + 8.0, float(np.percentile(diff, 85)))
+        clean = (keep & (clean > 0)).astype(np.uint8) * 255
+    mask[y0:y1, x0:x1] = clean
+    return mask
+
+
+def _lama_box_mask(bgr: Any, box: dict[str, int], mode: str) -> Any:
+    """glyph = OCR 笔画；residual = 残影；auto = 有字用 glyph，否则 residual。"""
+    from sttn_inpaint import glyph_mask_hybrid
+
+    mode_s = (mode or "glyph").strip().lower()
+    if mode_s == "residual":
+        return residual_ghost_mask(bgr, box)
+    glyph = glyph_mask_hybrid(bgr, box)
+    if mode_s == "glyph":
+        return glyph
+    if int(glyph.max()) > 0:
+        return glyph
+    return residual_ghost_mask(bgr, box)
+
+
 def encode_lama(
     src: Path,
     dest: Path,
     box: dict[str, Any],
     mosaic_regions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """LaMa 逐帧修复（VSR 双修复器之二）：静态字幕最优、无时序伪影。
+    """LaMa 逐帧修复（VSR 双修复器之二）：静态字幕最优、无时序伪影。"""
+    return encode_lama_boxes(src, dest, [box], mosaic_regions=mosaic_regions)
 
-    hole 来源与 STTN 字形路径一致：优先 OCR 行 bbox（glyph_detect），
-    OCR 不可用回退 glyph_hole_adaptive；马赛克仍整框。
-    不可用时抛 LamaUnavailable，由调用方降级。
-    """
+
+def encode_lama_boxes(
+    src: Path,
+    dest: Path,
+    boxes: list[dict[str, Any]],
+    mosaic_regions: list[dict[str, Any]] | None = None,
+    *,
+    dilate: int = 2,
+    mask_mode: str = "glyph",
+) -> dict[str, Any]:
+    """LaMa 多区域字形填洞——纹理背景（衣服/木纹）比 STTN  smear 更自然。"""
     import cv2
     import numpy as np
 
     from inpaint_lama import lama_inpaint
-    from sttn_inpaint import glyph_hole_adaptive
 
     src = Path(src)
     dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
     mops = _media()
     wh = mops.probe_video_wh(src)
     if wh is None:
@@ -669,20 +861,33 @@ def encode_lama(
     from fetch_media import find_ffmpeg
 
     ffmpeg = find_ffmpeg()
-    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
-           "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{frame_w}x{frame_h}",
-           "-r", f"{fps:.4f}", "-i", "pipe:0", "-i", str(src), "-map", "0:v:0"]
+    writing = dest.with_name(dest.stem + "_lama_writing.mp4")
+    if writing.is_file():
+        writing.unlink(missing_ok=True)
+    cmd = [
+        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{frame_w}x{frame_h}",
+        "-r", f"{fps:.4f}", "-i", "pipe:0", "-i", str(src), "-map", "0:v:0",
+    ]
     if mops.has_audio_stream(src):
         cmd.extend(["-map", "1:a:0?", "-c:a", "aac", "-b:a", f"{mops.DEFAULT_AUDIO_K}k"])
     else:
         cmd.append("-an")
-    cmd.extend(["-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-                "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-shortest", str(dest)])
+    cmd.extend([
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-shortest", str(writing),
+    ])
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     assert proc.stdin is not None
     frames_done = 0
-    ocr_frames = 0
     lama_frames = 0
+    kernel = np.ones((3, 3), np.uint8)
+    boxes_n = [
+        {k: int(b[k]) for k in ("x", "y", "w", "h")}
+        for b in boxes
+        if b and all(k in b for k in ("x", "y", "w", "h"))
+    ]
+    mode_s = (mask_mode or "glyph").strip().lower()
     try:
         while True:
             ok, frame = cap.read()
@@ -710,22 +915,24 @@ def encode_lama(
                     )
                     out = out.copy()
                     out[y : y + h, x : x + w] = restored
-            # 字幕：混合字形 mask（OCR bbox 限定 + 笔画细化），回退启发式
-            from sttn_inpaint import glyph_mask_hybrid
-
-            mask = glyph_mask_hybrid(out, {
-                "x": int(box["x"]), "y": int(box["y"]),
-                "w": int(box["w"]), "h": int(box["h"]),
-            })
-            if int(mask.max()):
-                ocr_frames += 1
-            if int(mask.max()):
+            hit = False
+            for box in boxes_n:
+                mask = _lama_box_mask(out, box, mode_s)
+                if int(mask.max()) == 0:
+                    continue
+                if dilate > 0:
+                    mask = cv2.dilate(mask, kernel, iterations=int(dilate))
                 out = lama_inpaint(out, mask)
+                hit = True
+            if hit:
                 lama_frames += 1
             proc.stdin.write(np.ascontiguousarray(out).tobytes())
             frames_done += 1
-            if n_hint and frames_done % 100 == 0:
-                print(f"[lama] wrote {frames_done}/{n_hint}", flush=True)
+            if n_hint and frames_done % 60 == 0:
+                print(
+                    f"[lama] wrote {frames_done}/{n_hint} boxes={len(boxes_n)} mode={mode_s}",
+                    flush=True,
+                )
     except Exception:
         proc.kill()
         raise
@@ -738,17 +945,25 @@ def encode_lama(
     stderr = proc.communicate(timeout=600)[1]
     if proc.returncode != 0 or frames_done < 1:
         err = (stderr or b"").decode("utf-8", errors="replace")[:400]
+        try:
+            writing.unlink(missing_ok=True)
+        except OSError:
+            pass
         raise RuntimeError(f"lama encode failed ({proc.returncode}): {err}")
+    if writing.resolve() != dest.resolve():
+        if dest.is_file():
+            dest.unlink(missing_ok=True)
+        writing.replace(dest)
     print(
-        f"[lama] frames={frames_done} ocr_hits={ocr_frames} lama_runs={lama_frames}",
+        f"[lama] frames={frames_done} lama_hits={lama_frames} boxes={len(boxes_n)} mode={mode_s}",
         flush=True,
     )
     return {
         "engine": "lama",
-        "mode": "perframe",
+        "mode": mode_s,
         "frames": frames_done,
-        "ocr_hits": ocr_frames,
         "lama_runs": lama_frames,
+        "boxes": len(boxes_n),
         "bytes": dest.stat().st_size,
     }
 
@@ -784,8 +999,9 @@ def run_multipass_cleanup(
     engine_s = (engine or "sttn").strip().lower()
     locate_meta: dict[str, Any] = {}
     box: dict[str, Any] | None = None
+    hardsub_boxes: list[dict[str, int]] = []
     if dehardsub:
-        located = mops.resolve_hardsub_box(
+        located_list = mops.resolve_hardsub_boxes(
             src,
             width,
             height,
@@ -794,19 +1010,39 @@ def run_multipass_cleanup(
             vlm_model=model,
             work_dir=work_dir,
         )
-        # STTN hole = located caption box (no glyph / strip mask).
-        if engine_s == "sttn":
-            box = located["box"]
-        else:
-            box = mops.refine_hardsub_box_glyphs(src, width, height, located["box"])
-        regions.append({"kind": "hardsub", **box})
+        located = located_list[0]
+        for loc in located_list:
+            b = loc["box"]
+            if engine_s != "sttn":
+                b = mops.refine_hardsub_box_glyphs(src, width, height, b)
+            hardsub_boxes.append({k: int(b[k]) for k in ("x", "y", "w", "h")})
+            regions.append(
+                {
+                    "kind": "hardsub",
+                    "role": loc.get("role") or "dialogue",
+                    **{k: int(b[k]) for k in ("x", "y", "w", "h")},
+                }
+            )
+        box = hardsub_boxes[0]
         locate_meta = {
             "box": box,
-            "box_seed": located.get("box"),
+            "boxes": hardsub_boxes,
+            "box_roles": [loc.get("role") for loc in located_list],
+            "box_seed": located.get("box_seed") or located.get("box"),
             "box_source": located.get("source"),
+            "tightened": bool(located.get("tightened")),
             "locate": {
-                k: located.get(k) for k in ("norm", "hits", "source", "model", "samples")
+                k: located.get(k)
+                for k in ("norm", "hits", "source", "model", "samples", "tightened")
             },
+            "locate_all": [
+                {
+                    "role": loc.get("role"),
+                    "source": loc.get("source"),
+                    "box": loc.get("box"),
+                }
+                for loc in located_list
+            ],
             "engine": engine_s,
         }
 
@@ -922,14 +1158,184 @@ def run_multipass_cleanup(
             )
             sttn_in = mosaic_tmp
 
-        # STTN 只去字幕（马赛克已修好，不再当洞喂入）。
+        # 去字幕：对话用 STTN 时序；标题/水印用 LaMa 融背景；最后 LaMa 收残影。
         sttn_out = dest if sttn_in.resolve() == src.resolve() else dest.with_name("_sttn.mp4")
-        sttn_stats = encode_sttn(
-            sttn_in,
-            sttn_out,
-            {k: int(box[k]) for k in ("x", "y", "w", "h")},
-            mosaic_boxes=mosaic_boxes,
-        )
+        boxes_run = hardsub_boxes or [{k: int(box[k]) for k in ("x", "y", "w", "h")}]
+        roles = list(locate_meta.get("box_roles") or [])
+        current = sttn_in
+        temps: list[Path] = []
+        pass_stats: list[dict[str, Any]] = []
+        try:
+            from inpaint_lama import LamaUnavailable
+        except ImportError:
+            LamaUnavailable = None  # type: ignore[misc, assignment]
+
+        def _try_lama(
+            inp: Path,
+            outp: Path,
+            boxes_l: list[dict[str, int]],
+            tag: str,
+            *,
+            mask_mode: str = "glyph",
+        ) -> dict[str, Any] | None:
+            if LamaUnavailable is None:
+                return None
+            try:
+                stats = encode_lama_boxes(
+                    inp, outp, boxes_l, dilate=2, mask_mode=mask_mode
+                )
+                stats = dict(stats)
+                stats["role"] = tag
+                return stats
+            except Exception as exc:  # noqa: BLE001
+                print(f"[cleanup] lama {tag} skipped ({exc})", flush=True)
+                return None
+
+        try:
+            for i, hb in enumerate(boxes_run):
+                out_i = dest.with_name(f"_hs_r{i}.mp4")
+                temps.append(out_i)
+                role = roles[i] if i < len(roles) else "dialogue"
+                box_i = {k: int(hb[k]) for k in ("x", "y", "w", "h")}
+                box_run = (
+                    expand_static_overlay_box(box_i, width, height, role=role)
+                    if role in ("title", "watermark")
+                    else box_i
+                )
+                if role in ("title", "watermark"):
+                    import cv2
+                    import numpy as np
+                    from sttn_inpaint import _open_ffmpeg_writer
+
+                    cap_fill = cv2.VideoCapture(str(current))
+                    if not cap_fill.isOpened():
+                        raise RuntimeError(f"cannot open {current} for edge overlay fill")
+                    fps_fill = float(cap_fill.get(cv2.CAP_PROP_FPS) or 25.0) or 25.0
+                    n_fill = int(cap_fill.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+                    proc_fill = _open_ffmpeg_writer(current, out_i, width, height, fps_fill)
+                    assert proc_fill.stdin is not None
+                    frames_fill = 0
+                    try:
+                        while True:
+                            ok_fill, fr_fill = cap_fill.read()
+                            if not ok_fill:
+                                break
+                            if role == "watermark":
+                                out_fill = restore_edge_overlay(fr_fill, box_run)
+                            else:
+                                out_fill = restore_static_overlay_box(fr_fill, box_run)
+                            proc_fill.stdin.write(np.ascontiguousarray(out_fill).tobytes())
+                            frames_fill += 1
+                            if n_fill and frames_fill % 60 == 0:
+                                print(f"[edgefill:{role}] wrote {frames_fill}/{n_fill}", flush=True)
+                    except Exception:
+                        proc_fill.kill()
+                        raise
+                    finally:
+                        cap_fill.release()
+                        try:
+                            proc_fill.stdin.close()
+                        except Exception:
+                            pass
+                    stderr_fill = proc_fill.communicate(timeout=300)[1]
+                    if proc_fill.returncode != 0 or frames_fill < 1:
+                        err_fill = (stderr_fill or b"").decode("utf-8", errors="replace")[:400]
+                        raise RuntimeError(
+                            f"edge overlay fill failed ({proc_fill.returncode}): {err_fill}"
+                        )
+                    used = {
+                        "engine": "copyfill" if role == "watermark" else "boxfill",
+                        "mode": "edge_patch" if role == "watermark" else "box_inpaint",
+                        "frames": frames_fill,
+                        "bytes": out_i.stat().st_size if out_i.is_file() else 0,
+                        "role": role,
+                        "box": box_run,
+                    }
+                    pass_stats.append(used)
+                    current = out_i
+                    continue
+                env_prev = None
+                force_tiles = role in ("title", "watermark")
+                if role == "dialogue":
+                    try:
+                        import cv2
+                        from sttn_inpaint import band_is_flat as _bif
+
+                        cap_chk = cv2.VideoCapture(str(current))
+                        ok_chk, fr_chk = cap_chk.read()
+                        cap_chk.release()
+                        if ok_chk and not _bif(fr_chk, box_i):
+                            force_tiles = True
+                    except Exception:
+                        force_tiles = True
+                if force_tiles:
+                    import os as _os
+
+                    env_prev = _os.environ.get("VITUAL_STTN_FORCE")
+                    if (env_prev or "auto").strip().lower() == "auto":
+                        _os.environ["VITUAL_STTN_FORCE"] = "tiles"
+                try:
+                    used = encode_sttn(
+                        current,
+                        out_i,
+                        box_run,
+                        mosaic_boxes=(mosaic_boxes if i == 0 else None),
+                    )
+                    used = dict(used)
+                    used["role"] = role
+                    used["box"] = box_run
+                finally:
+                    if force_tiles:
+                        import os as _os
+
+                        if env_prev is None:
+                            _os.environ.pop("VITUAL_STTN_FORCE", None)
+                        else:
+                            _os.environ["VITUAL_STTN_FORCE"] = env_prev
+                pass_stats.append(used)
+                current = out_i
+
+            # Residual polish: only static overlays are safe for LaMa touch-up here.
+            polish_roles = {"title", "watermark"}
+            polish_boxes = [
+                expand_static_overlay_box(
+                    {k: int(hb[k]) for k in ("x", "y", "w", "h")},
+                    width,
+                    height,
+                    role=(roles[i] if i < len(roles) else "dialogue"),
+                )
+                for i, hb in enumerate(boxes_run)
+                if (roles[i] if i < len(roles) else "dialogue") in polish_roles
+            ]
+            polish = None
+            if polish_boxes:
+                polish = _try_lama(
+                    current, sttn_out, polish_boxes, "polish", mask_mode="residual"
+                )
+            if polish is None:
+                if current.resolve() != sttn_out.resolve():
+                    import shutil
+
+                    shutil.copy2(current, sttn_out)
+            else:
+                pass_stats.append(polish)
+
+            sttn_stats = {
+                "engine": "hybrid",
+                "regions": len(boxes_run),
+                "passes": pass_stats,
+                "mode": "sttn+lama",
+                "frames": pass_stats[-1].get("frames") if pass_stats else 0,
+                "device": pass_stats[0].get("device") if pass_stats else "cpu",
+                "bytes": sttn_out.stat().st_size if sttn_out.is_file() else 0,
+            }
+        finally:
+            for t in temps:
+                try:
+                    if t.resolve() != sttn_out.resolve():
+                        t.unlink(missing_ok=True)
+                except OSError:
+                    pass
         if mosaic_tmp is not None and mosaic_tmp.resolve() != dest.resolve():
             try:
                 mosaic_tmp.unlink(missing_ok=True)
@@ -938,14 +1344,13 @@ def run_multipass_cleanup(
         if sttn_out.resolve() != dest.resolve():
             sttn_out.replace(dest)
         print(
-            f"[cleanup] sttn frames={sttn_stats.get('frames')} "
-            f"device={sttn_stats.get('device')} "
-            f"mosaic_pre={'on' if mosaic_tmp is not None else 'off'} "
-            f"(engine={demosaic_engine_s})"
+            f"[cleanup] hybrid frames={sttn_stats.get('frames')} "
+            f"regions={len(boxes_run)} mosaic_pre={'on' if mosaic_tmp is not None else 'off'} "
+            f"(demosaic={demosaic_engine_s})"
         )
         return {
-            "action": "sttn_cleanup",
-            "engine": "sttn",
+            "action": "hybrid_cleanup",
+            "engine": "sttn+lama",
             "mosaic_engine": demosaic_engine_s,
             "mosaic_pre": mosaic_tmp is not None,
             "passes": [{"pass": 1, "encode": sttn_stats}],

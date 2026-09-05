@@ -117,10 +117,80 @@ def test_auto_engine_calls_sttn(tmp_path: Path, monkeypatch: object) -> None:
         demosaic=False,
         dehardsub=True,
     )
-    assert meta["action"] == "sttn_cleanup"
+    assert meta["action"] in ("sttn_cleanup", "hybrid_cleanup")
     assert called.get("box")
     cleaned, report = strip_hardsubs(
         tmp_path, video=src, force=True, mode="band", engine="sttn", demosaic=False
     )
-    assert report["action"] == "sttn_cleanup"
+    assert report["action"] in ("sttn_cleanup", "hybrid_cleanup")
     assert cleaned.is_file()
+
+
+def test_encode_sttn_auto_routes_flat_bar(tmp_path: Path, monkeypatch: object) -> None:
+    """Default auto: flat UI bars must not enter STTN tiles."""
+    import shutil
+
+    import cv2
+    import numpy as np
+
+    from sttn_inpaint import encode_sttn
+
+    src = tmp_path / "flat.mp4"
+    w, h, fps, n = 320, 240, 10, 8
+    writer = cv2.VideoWriter(str(src), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+    assert writer.isOpened()
+    for _ in range(n):
+        fr = np.full((h, w, 3), 48, dtype=np.uint8)
+        fr[190:230, 40:280] = (40, 40, 40)  # flat dark bar
+        fr[200:220, 80:200] = (245, 245, 245)  # glyphs
+        writer.write(fr)
+    writer.release()
+    dest = tmp_path / "out.mp4"
+    box = {"x": 40, "y": 190, "w": 240, "h": 40}
+    routed: dict[str, str] = {}
+
+    def fake_spatial(src_p, dest_p, box_p, **_kw):
+        routed["mode"] = "temporal_flat"
+        shutil.copy2(src_p, dest_p)
+        return {"engine": "sttn", "mode": "temporal_flat", "frames": n}
+
+    def boom_tiles(*_a, **_k):
+        raise AssertionError("tiles path must not run for flat bars")
+
+    monkeypatch.setenv("VITUAL_STTN_FORCE", "auto")
+    monkeypatch.setattr("sttn_inpaint._encode_spatial", fake_spatial)
+    # If routing wrongly picks tiles, default_ckpt / torch would run; stub tiles builder.
+    monkeypatch.setattr("sttn_inpaint.sttn_tiles", boom_tiles)
+    stats = encode_sttn(src, dest, box)
+    assert routed.get("mode") == "temporal_flat"
+    assert stats.get("mode") == "temporal_flat"
+    assert dest.is_file()
+
+
+def test_band_is_flat_rejects_textured_desk() -> None:
+    """Wood/scene texture behind glyphs must not route to temporal_flat."""
+    import numpy as np
+
+    from sttn_inpaint import band_is_flat
+
+    rng = np.random.default_rng(0)
+    frame = np.zeros((240, 400, 3), dtype=np.uint8)
+    # High-contrast wood-like grain (core_var ≫ UI strip).
+    noise = rng.integers(15, 200, (50, 300, 3), dtype=np.uint8)
+    frame[170:220, 50:350] = noise
+    frame[185:205, 100:220] = (245, 245, 245)
+    assert band_is_flat(frame, {"x": 50, "y": 170, "w": 300, "h": 50}) is False
+
+
+def test_band_is_flat_rejects_midtone_clothing() -> None:
+    """Smooth suit/skin midtones must not count as a UI caption bar."""
+    import numpy as np
+
+    from sttn_inpaint import band_is_flat
+
+    frame = np.zeros((240, 400, 3), dtype=np.uint8)
+    frame[170:220, 50:350] = (170, 165, 160)  # suit gray
+    frame[185:205, 80:280] = (245, 245, 245)  # white glyphs
+    # dark outline
+    frame[184:206, 80:82] = (20, 20, 20)
+    assert band_is_flat(frame, {"x": 50, "y": 170, "w": 300, "h": 50}) is False

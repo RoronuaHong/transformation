@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from api.memory_store import MemoryStore
+from api.runner import run_locked
 from api.security import emit_alert
 from api.settings import Settings
 from discover.models import Candidate
@@ -36,3 +37,17 @@ def test_alert_and_ack() -> None:
     assert store.list_alerts(unacked_only=True)[0]["id"] == aid
     assert store.ack_alert(aid) is True
     assert store.list_alerts(unacked_only=True) == []
+
+
+def test_run_locked_keeps_summary_payload() -> None:
+    store = MemoryStore()
+    settings = Settings(alert_webhook_url="")
+    out = run_locked(
+        store,
+        settings,
+        "game_claim",
+        lambda: {"ok": True, "exit_code": 0, "summary_path": "runs/summary.json", "claimed": 2},
+    )
+    assert out["ok"] is True
+    assert out["summary_path"] == "runs/summary.json"
+    assert out["claimed"] == 2

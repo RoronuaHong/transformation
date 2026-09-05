@@ -64,7 +64,7 @@ def test_lama_engine_fallback_without_weights(tmp_path, monkeypatch) -> None:
         engine="lama", demosaic=False, dehardsub=True,
     )
     assert out.is_file()
-    assert res.get("action") == "sttn_cleanup", res.get("action")
+    assert res.get("action") in ("sttn_cleanup", "hybrid_cleanup"), res.get("action")
 
 
 def test_lama_inpaint_missing_weights_raises(monkeypatch) -> None:

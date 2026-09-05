@@ -26,13 +26,99 @@ DEBLUR_ONNX = {
     "realesrgan": MODELS_DIR / "realesrgan_x4.onnx",
     "basicvsr++": MODELS_DIR / "realesrgan_x4.onnx",  # 降级：BasicVSR++ 不可用，复用超分去模糊
 }
+# Torch .pth 备用（仓库常有 realesrgan_x4.pth 但无 onnx）
+DEBLUR_PTH = MODELS_DIR / "realesrgan_x4.pth"
 DEFAULT_DEBLUR_ENGINE = "realesrgan"
 
 _SESSION = {}  # engine -> onnxruntime.InferenceSession
+_TORCH_MODEL = {}  # engine -> (device, model)
 
 
 class DeblurUnavailable(RuntimeError):
     """去模糊模型不可用（缺 onnx 权重/推理失败）——调用方应跳过 deblur 阶段。"""
+
+
+def deblur_weights_available(engine: str = DEFAULT_DEBLUR_ENGINE) -> Path | None:
+    """Return onnx path if present; else None (ffmpeg fallback still usable)."""
+    weight = DEBLUR_ONNX.get(engine, DEBLUR_ONNX[DEFAULT_DEBLUR_ENGINE])
+    if weight.is_file() and weight.stat().st_size > 1_000_000:
+        return weight
+    return None
+
+
+def deblur_video_ffmpeg(
+    src: Path | str,
+    dest: Path | str,
+    *,
+    strength: str = "medium",
+) -> Path:
+    """CPU fallback when RealESRGAN ONNX is missing: unsharp + mild denoise.
+
+    Not as strong as RealESRGAN, but the deblur WF must not be a silent no-op.
+    """
+    from fetch_media import find_ffmpeg
+
+    src = Path(src)
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    # light / medium / strong → unsharp luma amount
+    amt = {"light": 0.6, "medium": 1.0, "strong": 1.4}.get(
+        (strength or "medium").strip().lower(), 1.0
+    )
+    # cas (contrast adaptive sharpen) if available; else unsharp.
+    vf = f"unsharp=5:5:{amt}:5:5:0.0,hqdn3d=1.2:1.2:3:3"
+    ffmpeg = find_ffmpeg()
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(src),
+        "-vf",
+        vf,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "20",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "copy",
+        str(dest),
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.returncode != 0 or not dest.is_file() or dest.stat().st_size < 800:
+        # Retry without audio copy (some snips are silent).
+        cmd2 = [
+            ffmpeg,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(src),
+            "-vf",
+            vf,
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-pix_fmt",
+            "yuv420p",
+            str(dest),
+        ]
+        r2 = subprocess.run(cmd2, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if r2.returncode != 0 or not dest.is_file():
+            err = (r.stderr or r2.stderr or "")[:400]
+            raise RuntimeError(f"ffmpeg deblur failed: {err}")
+    return dest
 
 
 def _ort_providers() -> list:
@@ -65,6 +151,55 @@ def _load_session(engine: str):
         raise DeblurUnavailable(f"onnx load failed: {exc}") from exc
 
 
+def _load_torch_model(engine: str):
+    key = f"{engine}:pth"
+    if key in _TORCH_MODEL:
+        return _TORCH_MODEL[key]
+    if not DEBLUR_PTH.is_file():
+        raise DeblurUnavailable(f"missing deblur pth: {DEBLUR_PTH}")
+
+    import torch
+    from torch import nn
+    from torch.nn import functional as F
+
+    class SRVGGNetCompact(nn.Module):
+        def __init__(
+            self,
+            num_in_ch: int = 3,
+            num_out_ch: int = 3,
+            num_feat: int = 64,
+            num_conv: int = 32,
+            upscale: int = 4,
+        ) -> None:
+            super().__init__()
+            self.upscale = upscale
+            self.body = nn.ModuleList()
+            self.body.append(nn.Conv2d(num_in_ch, num_feat, 3, 1, 1))
+            self.body.append(nn.PReLU(num_parameters=num_feat))
+            for _ in range(num_conv):
+                self.body.append(nn.Conv2d(num_feat, num_feat, 3, 1, 1))
+                self.body.append(nn.PReLU(num_parameters=num_feat))
+            self.body.append(nn.Conv2d(num_feat, num_out_ch * upscale * upscale, 3, 1, 1))
+            self.upsampler = nn.PixelShuffle(upscale)
+
+        def forward(self, x):
+            out = x
+            for layer in self.body:
+                out = layer(out)
+            out = self.upsampler(out)
+            base = F.interpolate(x, scale_factor=self.upscale, mode="nearest")
+            return out + base
+
+    raw = torch.load(DEBLUR_PTH, map_location="cpu")
+    state = raw.get("params_ema") or raw.get("params") or raw
+    model = SRVGGNetCompact()
+    model.load_state_dict(state, strict=True)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = model.to(device).eval()
+    _TORCH_MODEL[key] = (device, model)
+    return device, model
+
+
 def _infer_frame(
     sess,
     frame_bgr: np.ndarray,
@@ -90,22 +225,60 @@ def _infer_frame(
     return out
 
 
+def _infer_frame_torch(
+    device: str,
+    model,
+    frame_bgr: np.ndarray,
+    out_size: tuple[int, int] | None = None,
+) -> np.ndarray:
+    import cv2
+    import torch
+
+    h, w = frame_bgr.shape[:2]
+    inp = (frame_bgr.astype(np.float32) / 255.0)[..., ::-1].transpose(2, 0, 1)
+    ten = torch.from_numpy(np.ascontiguousarray(inp)).unsqueeze(0).to(device)
+    with torch.inference_mode():
+        out = model(ten).clamp_(0.0, 1.0)[0].detach().cpu().numpy()
+    out = (out.transpose(1, 2, 0)[..., ::-1] * 255.0).astype(np.uint8)
+    ow, oh = out_size if out_size else (w, h)
+    if out.shape[1] != ow or out.shape[0] != oh:
+        out = cv2.resize(out, (ow, oh), interpolation=cv2.INTER_LANCZOS4)
+    return out
+
+
 def deblur_video(
     src: Path | str,
     dest: Path | str,
     *,
     engine: str = DEFAULT_DEBLUR_ENGINE,
     max_height: int = 720,
+    allow_ffmpeg_fallback: bool = True,
 ) -> Path:
     """对 src 视频做逐帧去模糊，输出 dest（保留原音频）。
 
     max_height: 超过则先降采样再推理，控制 6GB 显存占用。
-    返回 dest；任何不可用情况抛 DeblurUnavailable（调用方捕获后跳过）。
+    返回 dest。缺 ONNX 时默认走 ffmpeg unsharp 兜底（不再静默跳过）。
     """
     src = Path(src)
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    sess = _load_session(engine)
+    infer_backend = "onnx"
+    try:
+        sess = _load_session(engine)
+    except DeblurUnavailable:
+        try:
+            sess = _load_torch_model(engine)
+            infer_backend = "torch"
+            print(f"[deblur] ONNX missing → torch PTH fallback ({DEBLUR_PTH.name})", flush=True)
+        except DeblurUnavailable:
+            if allow_ffmpeg_fallback:
+                print(
+                    f"[deblur] ONNX missing → ffmpeg unsharp fallback "
+                    f"(want {DEBLUR_ONNX.get(engine, DEBLUR_ONNX[DEFAULT_DEBLUR_ENGINE]).name})",
+                    flush=True,
+                )
+                return deblur_video_ffmpeg(src, dest, strength="medium")
+            raise
 
     import cv2
 
@@ -135,6 +308,7 @@ def deblur_video(
     # 写回原始分辨率
     vw = cv2.VideoWriter(str(tmp_vid), fourcc, fps, (orig_w, orig_h))
     prev: np.ndarray | None = None
+    prev_mix = 0.0 if infer_backend == "torch" else 0.25
     while True:
         ok, f = cap.read()
         if not ok:
@@ -142,10 +316,14 @@ def deblur_video(
         if scale != 1.0:
             f = cv2.resize(f, (iw, ih), interpolation=cv2.INTER_AREA)
         # 一步到位：超分输出直接重采样到原始分辨率
-        out = _infer_frame(sess, f, out_size=(orig_w, orig_h))
+        if infer_backend == "torch":
+            device, model = sess
+            out = _infer_frame_torch(device, model, f, out_size=(orig_w, orig_h))
+        else:
+            out = _infer_frame(sess, f, out_size=(orig_w, orig_h))
         # 轻量时序融合：与上一帧做 0.25 权重中值，抑制逐帧抖动。
-        if prev is not None and prev.shape == out.shape:
-            out = cv2.addWeighted(out, 0.75, prev, 0.25, 0)
+        if prev_mix > 0.0 and prev is not None and prev.shape == out.shape:
+            out = cv2.addWeighted(out, 1.0 - prev_mix, prev, prev_mix, 0)
         prev = out
         vw.write(out)
     cap.release()

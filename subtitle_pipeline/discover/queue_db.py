@@ -48,9 +48,6 @@ CREATE TABLE IF NOT EXISTS jobs (
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status_score
   ON jobs(status, priority, score DESC);
-
-CREATE INDEX IF NOT EXISTS idx_jobs_pack
-  ON jobs(pack_id, created_at ASC);
 """
 
 # Columns added after first Phase-0 schema; migrate safely.

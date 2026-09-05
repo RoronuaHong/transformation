@@ -53,8 +53,9 @@ def _make_work_dir(tmp_path, src) -> "object":
     return work
 
 
-def test_deblur_skipped_when_weights_missing(tmp_path) -> None:
-    """缺权重时应跳过 deblur 且不抛异常，流水线继续。"""
+def test_deblur_falls_back_when_weights_missing(tmp_path, monkeypatch) -> None:
+    """所有权重都缺失时仍应交出 ffmpeg fallback 产物。"""
+    import deblur_basicvsr as dbv
     from media_ops import run_postproc
     from test_demosaic_instance import _make_sample
 
@@ -62,10 +63,16 @@ def test_deblur_skipped_when_weights_missing(tmp_path) -> None:
     _make_sample(src)
     work = _make_work_dir(tmp_path, src)
 
-    # deblur 权重不存在（默认 models/realesrgan_x4.onnx 缺失）
-    out = run_postproc(work, frozenset({"deblur"}), media_opts={"deblur": True})
-    # 未产出 deblur（优雅跳过），但不抛异常
-    assert "deblur" not in out
+    # 同时屏蔽 ONNX 与 PTH，才应该优雅跳过。
+    monkeypatch.setitem(dbv.DEBLUR_ONNX, "realesrgan", tmp_path / "missing.onnx")
+    monkeypatch.setitem(dbv.DEBLUR_ONNX, "basicvsr++", tmp_path / "missing.onnx")
+    monkeypatch.setattr(dbv, "DEBLUR_PTH", tmp_path / "missing.pth", raising=False)
+    dbv._SESSION.clear()
+    dbv._TORCH_MODEL.clear()
+    out = run_postproc(
+        work, frozenset({"deblur"}), media_opts={"deblur": True, "deblur_demosaic": False}
+    )
+    assert "deblur" in out
 
 
 def test_deblur_runs_when_weights_present(tmp_path) -> None:
@@ -81,7 +88,9 @@ def test_deblur_runs_when_weights_present(tmp_path) -> None:
     sess = _FakeDeblurSession()
     dbv._SESSION["realesrgan"] = sess
     try:
-        out = run_postproc(work, frozenset({"deblur"}), media_opts={"deblur": True})
+        out = run_postproc(
+            work, frozenset({"deblur"}), media_opts={"deblur": True, "deblur_demosaic": False}
+        )
     finally:
         dbv._SESSION.clear()
 
@@ -107,7 +116,11 @@ def test_deblur_engine_option_respected(tmp_path) -> None:
         out = run_postproc(
             work,
             frozenset({"deblur"}),
-            media_opts={"deblur": True, "deblur_engine": "basicvsr++"},
+            media_opts={
+                "deblur": True,
+                "deblur_engine": "basicvsr++",
+                "deblur_demosaic": False,
+            },
         )
     finally:
         dbv._SESSION.clear()

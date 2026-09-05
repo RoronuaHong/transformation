@@ -98,10 +98,8 @@ def extract_tile(frame: Any, tile: dict[str, int]) -> Any:
 def band_is_flat(bgr: Any, box: dict[str, int]) -> bool:
     """True when the caption bar is a low-variance UI strip (STTN soft-smears these).
 
-    平坦度只在「主背景簇」内度量：旧实现直接对 gray<160 求 var，字形的抗锯齿
-    边缘（黑字↔白底之间 60..160 的过渡像素）混进 mask 后 var 被拉爆
-    （实测合成白底条 var=510>400 → 误判 False → 走 STTN tiles → 静态字幕
-    时序补全失效 → 字幕残留）。
+    Real footage (衣服/皮肤/木纹) 必须返回 False → STTN tiles。
+    仅动画/纯色 UI 底条才走 temporal_flat。
     """
     import cv2
     import numpy as np
@@ -114,15 +112,39 @@ def band_is_flat(bgr: Any, box: dict[str, int]) -> bool:
     if roi.size < 16:
         return False
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    mask = gray < 160
-    if float(mask.mean()) < 0.2:
+    bg_med = float(np.median(gray))
+    glyphs = np.abs(gray.astype(np.float32) - bg_med) > 55.0
+    remain = ~glyphs
+    if float(remain.mean()) < 0.25:
         return False
-    # 主背景 = 暗色像素的中位数；只统计 |gray-bg|<30 的背景簇（排除字形 AA）。
-    bg_med = float(np.median(gray[mask]))
-    bg = np.abs(gray.astype(np.float32) - bg_med) < 30.0
-    if float(bg.mean()) < 0.15:
+    core_var = float(gray[remain].var())
+    if core_var > 250.0:
         return False
-    return float(gray[bg].var()) < 400.0
+    remain_med = float(np.median(gray[remain]))
+    # Mid-tone scene (skin / suit / wood) — never a caption UI strip,
+    # even when locally smooth (zero core_var).
+    if 85.0 < remain_med < 195.0:
+        return False
+    # Edge energy gate only for ambiguous tones; putText AA on solid UI bars
+    # already has moderate Laplacian (~8-14).
+    lap = float(np.abs(cv2.Laplacian(gray, cv2.CV_32F)[remain]).mean())
+    if 60.0 <= remain_med <= 220.0 and lap > 16.0:
+        return False
+
+    def _flat_on(mask: Any) -> bool:
+        if float(mask.mean()) < 0.25:
+            return False
+        local_med = float(np.median(gray[mask]))
+        bg = np.abs(gray.astype(np.float32) - local_med) < 28.0
+        if float(bg.mean()) < 0.2:
+            return False
+        return float(gray[bg].var()) < 280.0
+
+    if _flat_on(gray < 140):
+        return True
+    if _flat_on(gray > 200):
+        return True
+    return False
 
 
 def horiz_lerp_fill(bgr: Any, hole_u8: Any) -> Any:
@@ -175,13 +197,22 @@ def text_hole_parts(bgr: Any, box: dict[str, int]) -> list[Any]:
     bright = gray >= thr
     near = cv2.dilate(bright.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=1) > 0
     bright |= (gray >= max(140.0, thr - 35.0)) & near
-    # Strong chroma only (avatars / icons). Weak |R-G| from compression grain
-    # must NOT wipe caption glyphs — that left TBE plates contaminated.
+    # Strong chroma only (avatars / icons). Keep yellow/white caption paint —
+    # yellow outline titles were wiped by the old |R-G|/|R-B| gate.
     b = bgr[:, :, 0].astype(np.int16)
     g = bgr[:, :, 1].astype(np.int16)
     r = bgr[:, :, 2].astype(np.int16)
+    yellow = (
+        (r > 170)
+        & (g > 150)
+        & (b < 150)
+        & ((r + g) > (2 * b + 30))
+    )
+    bright |= yellow
     strong = (np.abs(r - g) > 40) | (np.abs(g - b) > 40) | (np.abs(r - b) > 40)
-    near_ui = cv2.dilate(strong.astype(np.uint8), np.ones((5, 5), np.uint8), iterations=1) > 0
+    caption_paint = yellow | (gray >= thr)
+    strong_ui = strong & (~caption_paint)
+    near_ui = cv2.dilate(strong_ui.astype(np.uint8), np.ones((5, 5), np.uint8), iterations=1) > 0
     bright[near_ui] = False
     clip = np.zeros(gray.shape, dtype=np.uint8)
     clip[y0:y1, x0:x1] = 255
@@ -249,6 +280,12 @@ def glyph_hole_adaptive(bgr: Any, box: dict[str, int]) -> Any:
     roi = gray[y0:y1, x0:x1]
     bg_med = float(np.median(roi))
     contrast = np.abs(roi - bg_med) > 60.0
+    # Yellow title paint (may sit near bg luminance after blur).
+    bch = bgr[y0:y1, x0:x1, 0].astype(np.int16)
+    gch = bgr[y0:y1, x0:x1, 1].astype(np.int16)
+    rch = bgr[y0:y1, x0:x1, 2].astype(np.int16)
+    yellow = (rch > 170) & (gch > 150) & (bch < 150) & ((rch + gch) > (2 * bch + 30))
+    contrast |= yellow
     frac = float(contrast.mean())
     if frac > 0.55 or frac < 0.005:
         # 复杂场景（检测不可信）或框内几乎无字形 → 不动背景
@@ -775,15 +812,23 @@ def _encode_spatial(
     mosaic_boxes: list[dict[str, int]] | None = None,
 ) -> dict[str, Any]:
     """Flat-bar path: TBE plate (pass1) then per-frame paste + spatial residual (pass2)."""
+    import math
+
     import cv2
     import numpy as np
 
     min_hits = max(1, int(os.environ.get("VITUAL_TBE_MIN_HITS", "3") or 3))
     sample_stride = max(1, int(os.environ.get("VITUAL_TBE_SAMPLE_STRIDE", "2") or 2))
+    # Cap plate samples so long videos cannot allocate multi-GiB nanmedian stacks
+    # (e.g. 4179×131×1316×3 float32 ≈ 8 GiB on a 4.5min 1080p clip).
+    max_samples = max(16, int(os.environ.get("VITUAL_TBE_MAX_SAMPLES", "96") or 96))
+    if n_hint and n_hint > max_samples:
+        sample_stride = max(sample_stride, int(math.ceil(n_hint / max_samples)))
     # Pass 1 — subsampled median TBE plate (robust vs mean ghosting).
     print(
         f"[sttn] mode=temporal_flat TBE plate box={box} min_hits={min_hits} "
-        f"stride={sample_stride} mosaic_boxes={len(mosaic_boxes or [])}",
+        f"stride={sample_stride} max_samples={max_samples} "
+        f"mosaic_boxes={len(mosaic_boxes or [])}",
         flush=True,
     )
     cap.release()
@@ -816,13 +861,14 @@ def _encode_spatial(
             hits[y0:y1, x0:x1][clean] += 1.0
         samples.append(slot)
         if n_hint and scanned % 120 == 0:
-            print(f"[sttn] TBE scan {scanned}/{n_hint}", flush=True)
+            print(f"[sttn] TBE scan {scanned}/{n_hint} samples={len(samples)}", flush=True)
     cap1.release()
     plate = first.copy()
     if samples:
         stack = np.stack(samples, axis=0)
         with np.errstate(all="ignore"):
             med = np.nanmedian(stack, axis=0)
+        del stack
         ok_hits = hits >= float(min_hits)
         valid = ok_hits[y0:y1, x0:x1] & np.isfinite(med[:, :, 0])
         if np.any(valid):
@@ -834,7 +880,7 @@ def _encode_spatial(
     use_spatial = coverage < 0.85
     print(
         f"[sttn] TBE plate coverage={coverage:.3f} scanned={scanned} "
-        f"spatial_residual={use_spatial}",
+        f"samples={len(samples)} spatial_residual={use_spatial}",
         flush=True,
     )
 
@@ -932,10 +978,13 @@ def encode_sttn(
     ckpt: Path | None = None,
     mosaic_boxes: list[dict[str, int]] | None = None,
 ) -> dict[str, Any]:
-    """Restore caption region with STTN tiles (box hole, no glyph mask).
+    """Restore caption region.
 
-    Default is STTN. Set ``VITUAL_STTN_FORCE=flat`` (or ``0``/``false``/``no``)
-    to use the legacy spatial_flat path on flat UI bars.
+    Routing (``VITUAL_STTN_FORCE``):
+      - ``auto`` (default): flat UI bars → temporal_flat (TBE); textured → STTN tiles
+        with glyph-level holes. Flat bars + whole-box/neural fill leave glyph ghosts.
+      - ``flat`` / ``0`` / ``false``: force temporal_flat
+      - ``tiles`` / ``sttn`` / ``1`` / ``true``: force STTN tiles
     """
     import cv2
     import numpy as np
@@ -961,15 +1010,35 @@ def encode_sttn(
         cap.release()
         raise RuntimeError(f"empty video: {src}")
 
-    # 默认 auto = STTN tiles + 自适应字形级 hole（只重画笔画，背景 1:1 保留）。
-    # 历史：
-    #   - 整框 hole（旧 tiles）→ 扁平条被整体重画涂毁；
-    #   - spatial lerp → 中文连排字幕黑边相连成整行 hole → 水平 lerp 大块涂抹。
-    #   字形级 hole 是唯一同时「去字 + 不毁背景」的路线（STTN 训练目标就是补字幕笔画）。
-    # VITUAL_STTN_FORCE=flat → 显式退回 spatial lerp（小字幕场景）。
     _force = (os.environ.get("VITUAL_STTN_FORCE") or "auto").strip().lower()
-    prefer_flat = _force == "flat"
-    if prefer_flat and band_is_flat(first, box):
+    force_tiles = _force in ("tiles", "sttn", "1", "true", "yes", "on")
+    force_flat = _force in ("flat", "0", "false", "no", "off", "spatial")
+    # Multi-frame flat vote: static UI bars stay flat; one noisy frame shouldn't force STTN.
+    flat_votes = 1 if band_is_flat(first, box) else 0
+    flat_checks = 1
+    if n_hint > 8 and not force_tiles and not force_flat:
+        for frac in (0.35, 0.65):
+            idx = max(1, min(n_hint - 2, int(n_hint * frac)))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, float(idx))
+            ok_f, fr = cap.read()
+            if not ok_f:
+                continue
+            flat_checks += 1
+            if band_is_flat(fr, box):
+                flat_votes += 1
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 1.0)
+        ok_r, first2 = cap.read()
+        if ok_r:
+            first = first2
+    use_flat = force_flat or (
+        not force_tiles and flat_votes * 2 >= flat_checks  # majority / tie → flat
+    )
+    if use_flat:
+        print(
+            f"[sttn] route=temporal_flat votes={flat_votes}/{flat_checks} "
+            f"force={_force or 'auto'} box={box}",
+            flush=True,
+        )
         try:
             return _encode_spatial(
                 src,
@@ -984,7 +1053,16 @@ def encode_sttn(
                 mosaic_boxes=list(mosaic_boxes or []),
             )
         finally:
-            cap.release()
+            try:
+                cap.release()
+            except Exception:
+                pass
+
+    print(
+        f"[sttn] route=tiles votes={flat_votes}/{flat_checks} "
+        f"force={_force or 'auto'} box={box}",
+        flush=True,
+    )
 
     weights = Path(ckpt) if ckpt else default_ckpt()
     if not weights.is_file() or weights.stat().st_size < 1_000_000:

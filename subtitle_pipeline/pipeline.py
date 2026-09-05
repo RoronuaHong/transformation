@@ -602,7 +602,7 @@ def _overview_method_checklist(
         "Return plain lines only, no JSON, no intro.\n\n"
         f"{text[:20000]}"
     )
-    return _filter_checklist_ads(ollama_chat(ollama, model, prompt, timeout=180).strip())
+    return _filter_checklist_ads(ollama_chat(ollama, model, prompt, timeout=600).strip())
 
 
 def summarize_overview(
@@ -636,7 +636,7 @@ def summarize_overview(
             )
             section_notes.append(
                 f"[section {i}/{len(chunks)}]\n"
-                + ollama_chat(ollama, model, prompt, timeout=180)
+                + ollama_chat(ollama, model, prompt, timeout=600)
             )
         material = "\n\n".join(section_notes)
 
@@ -658,7 +658,7 @@ def summarize_overview(
         f"REQUIRED checklist (cover all, in order):\n{checklist}\n\n"
         f"Transcript / digests:\n{material[:18000]}"
     )
-    raw = ollama_chat(ollama, model, prompt, timeout=300)
+    raw = ollama_chat(ollama, model, prompt, timeout=600)
     try:
         data = extract_json_object(raw)
         overview = str(data.get("summary") or "").strip()
@@ -692,7 +692,7 @@ def summarize_text(
                 f"Write in {out_name}. Group as 重点 / 要点 / 难点. Plain bullets only.\n\n"
                 f"{chunk}"
             )
-            partials.append(ollama_chat(ollama, model, prompt, timeout=180))
+            partials.append(ollama_chat(ollama, model, prompt, timeout=600))
         else:
             partials.append(chunk)
 
@@ -729,7 +729,7 @@ def summarize_text(
         f"Known full-video overview (do not paste into list fields):\n{overview}\n\n"
         f"{material[:14000]}"
     )
-    raw = ollama_chat(ollama, model, prompt, timeout=300)
+    raw = ollama_chat(ollama, model, prompt, timeout=600)
     data = extract_json_object(raw)
     focuses = normalize_key_points(data.get("focuses"))
     key_points = normalize_key_points(data.get("key_points"))
@@ -847,7 +847,7 @@ def summarize_keypoints(
                 f"Write in {out_name}. Plain bullets only, one tip per line.\n\n"
                 f"{chunk}"
             )
-            notes.append(ollama_chat(ollama, model, prompt, timeout=180))
+            notes.append(ollama_chat(ollama, model, prompt, timeout=600))
         material = "\n".join(notes)
     else:
         material = text
@@ -870,7 +870,7 @@ def summarize_keypoints(
         "- Prefer verbs/imperatives where natural (e.g. 用醋清洁… / Use vinegar to…)\n\n"
         f"{material[:12000]}"
     )
-    raw = ollama_chat(ollama, model, prompt, timeout=300)
+    raw = ollama_chat(ollama, model, prompt, timeout=600)
     data = extract_json_object(raw)
     key_points = normalize_key_points(data.get("key_points"))
     intro = str(data.get("intro") or "").strip()

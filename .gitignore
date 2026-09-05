@@ -33,6 +33,9 @@ transform/public/derived/
 
 # 发现队列 / 本机数据库
 subtitle_pipeline/data/
+!subtitle_pipeline/data/game_claim/
+subtitle_pipeline/data/game_claim/browser/
+subtitle_pipeline/data/game_claim/runs/
 subtitle_pipeline/downloads/
 *.db
 
@@ -147,3 +150,6 @@ subtitle_pipeline/*.html
 
 # ── 实例测试产物（本地查看，不提交）──
 subtitle_pipeline/instances/
+
+# ── 本地第三方工具（claim-auto 部署 + propainter 源码包），不入库 ──
+tools/

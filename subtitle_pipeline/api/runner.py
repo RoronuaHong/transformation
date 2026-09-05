@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from typing import Callable
+from typing import Any, Callable
 
 from api.mongo import MongoStore
 from api.security import emit_alert
@@ -51,8 +51,8 @@ def run_locked(
     store: MongoStore,
     settings: Settings,
     kind: str,
-    fn: Callable[[], int],
-) -> dict:
+    fn: Callable[[], int | dict[str, Any]],
+) -> dict[str, Any]:
     if not _busy.acquire(blocking=False):
         return {"ok": False, "error": "another job is running", "busy": True}
     run_id = store.start_run(kind)
@@ -60,7 +60,13 @@ def run_locked(
     _current["run_id"] = run_id
     store.write_log("info", kind, "started", run_id=run_id)
     try:
-        code = fn()
+        raw = fn()
+        if isinstance(raw, dict):
+            code = int(raw.get("exit_code", 0 if raw.get("ok", True) else 1))
+            payload = dict(raw)
+        else:
+            code = raw
+            payload = {}
         ok = code == 0
         err = None if ok else f"exit_code={code}"
         store.finish_run(run_id, ok=ok, error=err)
@@ -81,7 +87,13 @@ def run_locked(
         synced = 0
         if kind in {"discover", "inbox", "daily"}:
             synced = sync_links_from_queue(store, source=kind)
-        return {"ok": ok, "run_id": run_id, "exit_code": code, "links_synced": synced}
+        out = {"ok": ok, "run_id": run_id, "exit_code": code, "links_synced": synced}
+        out.update(payload)
+        out["ok"] = ok
+        out["run_id"] = run_id
+        out["exit_code"] = code
+        out["links_synced"] = synced
+        return out
     except Exception as e:
         store.finish_run(run_id, ok=False, error=str(e))
         store.write_log("error", kind, str(e), run_id=run_id)

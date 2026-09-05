@@ -673,6 +673,209 @@ def locate_hardsub_box_vlm(
     }
 
 
+def locate_hardsub_box_top_title(
+    video: Path,
+    width: int,
+    height: int,
+) -> dict[str, Any] | None:
+    """Locate persistent top-left title overlays (yellow/white outlined meme text).
+
+    Dialogue VLM deliberately ignores these; many Bilibili skits keep a static
+    title in the top ~22% for the whole clip.
+    """
+    import cv2
+    import numpy as np
+
+    video = Path(video)
+    dur = probe_duration_sec(video) or 0.0
+    if dur <= 0.4:
+        return None
+    hits: list[tuple[int, int, int, int]] = []
+    for frac in (0.2, 0.45, 0.7):
+        raw = _grab_bgr_frame(video, dur * frac)
+        if raw is None:
+            continue
+        if raw.shape[1] != width or raw.shape[0] != height:
+            raw = cv2.resize(raw, (width, height), interpolation=cv2.INTER_AREA)
+        y1 = max(24, int(height * 0.24))
+        x1 = max(48, int(width * 0.78))
+        roi = raw[0:y1, 0:x1]
+        b, g, r = cv2.split(roi)
+        # Prefer yellow title paint; white alone is too noisy (ceilings/windows).
+        yellow = (
+            (r > 170)
+            & (g > 150)
+            & (b < 150)
+            & ((r.astype(np.int16) + g.astype(np.int16)) > (2 * b.astype(np.int16) + 30))
+        )
+        mask = yellow.astype(np.uint8) * 255
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 5), np.uint8), iterations=2)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8), iterations=1)
+        if float((mask > 0).mean()) < 0.003 or float((mask > 0).mean()) > 0.28:
+            continue
+        n_cc, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        # Merge left-side yellow components into one title strip (don't keep only the largest glyph).
+        keep: list[tuple[int, int, int, int]] = []
+        for i in range(1, n_cc):
+            area = int(stats[i, cv2.CC_STAT_AREA])
+            if area < 40:
+                continue
+            bx = int(stats[i, cv2.CC_STAT_LEFT])
+            by = int(stats[i, cv2.CC_STAT_TOP])
+            bw = int(stats[i, cv2.CC_STAT_WIDTH])
+            bh = int(stats[i, cv2.CC_STAT_HEIGHT])
+            if bx > int(x1 * 0.55):
+                continue
+            if bh > int(y1 * 0.9):
+                continue
+            keep.append((bx, by, bx + bw, by + bh))
+        if not keep:
+            continue
+        bx0 = min(k[0] for k in keep)
+        by0 = min(k[1] for k in keep)
+        bx1 = max(k[2] for k in keep)
+        by1 = max(k[3] for k in keep)
+        if (bx1 - bx0) < 40 or (by1 - by0) < 16:
+            continue
+        if (bx1 - bx0) > int(x1 * 0.92):
+            continue
+        pad_x, pad_y = 14, 10
+        hits.append(
+            (
+                max(0, bx0 - pad_x),
+                max(0, by0 - pad_y),
+                min(x1, bx1 + pad_x),
+                min(y1, by1 + pad_y),
+            )
+        )
+    if len(hits) < 2:
+        return None
+    x0 = min(h[0] for h in hits)
+    y0 = min(h[1] for h in hits)
+    x1 = max(h[2] for h in hits)
+    y1 = max(h[3] for h in hits)
+    # Reject absurdly wide "titles" (ceiling reflections / UI chrome).
+    if (x1 - x0) > int(width * 0.72):
+        return None
+    box = clamp_hardsub_box(
+        {"x": x0, "y": y0, "w": max(8, x1 - x0), "h": max(8, y1 - y0)},
+        width,
+        height,
+        zone="top",
+        max_h_ratio=0.16,
+        max_h_px=160,
+    )
+    return {
+        "box": box,
+        "norm": {
+            "x": box["x"] / width,
+            "y": box["y"] / height,
+            "w": box["w"] / width,
+            "h": box["h"] / height,
+        },
+        "hits": len(hits),
+        "source": "top_title",
+        "zone": "top",
+        "role": "title",
+    }
+
+
+def locate_hardsub_box_watermark(
+    video: Path,
+    width: int,
+    height: int,
+) -> dict[str, Any] | None:
+    """Bottom-right channel watermark / bilibili credit (optional burn-in)."""
+    import cv2
+    import numpy as np
+
+    video = Path(video)
+    dur = probe_duration_sec(video) or 0.0
+    if dur <= 0.4:
+        return None
+    hits: list[tuple[int, int, int, int]] = []
+    for frac in (0.3, 0.55, 0.8):
+        raw = _grab_bgr_frame(video, dur * frac)
+        if raw is None:
+            continue
+        if raw.shape[1] != width or raw.shape[0] != height:
+            raw = cv2.resize(raw, (width, height), interpolation=cv2.INTER_AREA)
+        y0 = int(height * 0.88)
+        x0 = int(width * 0.68)
+        roi = raw[y0:height, x0:width]
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        # Watermarks are often thin bright glyphs with a dark outline. Prefer a
+        # tighter lower-right ROI and accept either bright fill or bright edge
+        # strokes near dark pixels so faint outlined credits are still caught.
+        bright = gray >= 185
+        dark = gray <= 105
+        near_dark = cv2.dilate(dark.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=1) > 0
+        edge = cv2.morphologyEx(gray, cv2.MORPH_GRADIENT, np.ones((3, 3), np.uint8))
+        mask = ((bright & near_dark) | (bright & (edge >= 20))).astype(np.uint8) * 255
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((2, 4), np.uint8), iterations=1)
+        mask = cv2.dilate(mask, np.ones((2, 2), np.uint8), iterations=1)
+        frac_m = float((mask > 0).mean())
+        if frac_m < 0.001 or frac_m > 0.18:
+            continue
+        n_cc, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        keep = np.zeros_like(mask)
+        for i in range(1, n_cc):
+            area = int(stats[i, cv2.CC_STAT_AREA])
+            if area < 16:
+                continue
+            bx = int(stats[i, cv2.CC_STAT_LEFT])
+            by = int(stats[i, cv2.CC_STAT_TOP])
+            bw = int(stats[i, cv2.CC_STAT_WIDTH])
+            bh = int(stats[i, cv2.CC_STAT_HEIGHT])
+            if bx + bw < int(roi.shape[1] * 0.45):
+                continue
+            if by + bh < int(roi.shape[0] * 0.18):
+                continue
+            keep[labels == i] = 255
+        ys, xs = np.where(keep > 0)
+        if len(xs) < 16:
+            continue
+        pad = 8
+        hits.append(
+            (
+                x0 + max(0, int(xs.min()) - pad),
+                y0 + max(0, int(ys.min()) - pad),
+                x0 + min(roi.shape[1], int(xs.max()) + pad + 1),
+                y0 + min(roi.shape[0], int(ys.max()) + pad + 1),
+            )
+        )
+    if not hits:
+        return None
+    x0 = min(h[0] for h in hits)
+    y0 = min(h[1] for h in hits)
+    x1 = max(h[2] for h in hits)
+    y1 = max(h[3] for h in hits)
+    if len(hits) == 1 and (x1 - x0) < max(48, width // 24):
+        return None
+    box = clamp_hardsub_box(
+        {"x": x0, "y": y0, "w": max(8, x1 - x0), "h": max(8, y1 - y0)},
+        width,
+        height,
+        zone="bottom",
+        max_h_ratio=0.08,
+        max_h_px=90,
+        min_y_ratio=0.85,
+    )
+    return {
+        "box": box,
+        "norm": {
+            "x": box["x"] / width,
+            "y": box["y"] / height,
+            "w": box["w"] / width,
+            "h": box["h"] / height,
+        },
+        "hits": len(hits),
+        "source": "watermark",
+        "zone": "bottom",
+        "role": "watermark",
+    }
+
+
 def resolve_hardsub_box(
     video: Path,
     width: int,
@@ -683,31 +886,224 @@ def resolve_hardsub_box(
     vlm_model: str = HARDSUB_VLM_MODEL,
     work_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Pick caption box: vlm → band scan → full-width ratio fallback."""
+    """Pick primary (dialogue) caption box: vlm → band → ratio.
+
+    Prefer ``resolve_hardsub_boxes`` when callers can handle multi-region.
+    """
+    boxes = resolve_hardsub_boxes(
+        video,
+        width,
+        height,
+        mode=mode,
+        ratio=ratio,
+        vlm_model=vlm_model,
+        work_dir=work_dir,
+    )
+    primary = next((b for b in boxes if b.get("role") == "dialogue"), boxes[0])
+    return primary
+
+
+def expand_dialogue_box_full_line(
+    video: Path,
+    width: int,
+    height: int,
+    seed: dict[str, int],
+) -> dict[str, int]:
+    """Expand/repair dialogue box so a full bottom caption line is covered.
+
+    Band/VLM/tighten often clip long lines or get carved by watermark. Rescan the
+    bottom band for outlined white glyphs and take their horizontal union.
+    """
+    import cv2
+    import numpy as np
+
+    dur = probe_duration_sec(video) or 0.0
+    if dur <= 0.4:
+        return clamp_hardsub_box(seed, width, height, zone="bottom")
+
+    y_lo = int(height * 0.78)
+    x_lo = int(width * 0.08)
+    x_hi = int(width * 0.92)
+    xs0: list[int] = []
+    ys0: list[int] = []
+    xs1: list[int] = []
+    ys1: list[int] = []
+    for frac in (0.2, 0.4, 0.55, 0.7, 0.85):
+        raw = _grab_bgr_frame(video, dur * frac)
+        if raw is None:
+            continue
+        if raw.shape[1] != width or raw.shape[0] != height:
+            raw = cv2.resize(raw, (width, height), interpolation=cv2.INTER_AREA)
+        roi = raw[y_lo:height, x_lo:x_hi]
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        # White fill + dark outline captions.
+        bright = gray >= 200
+        dark = gray <= 70
+        near_dark = cv2.dilate(dark.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=2) > 0
+        mask = (bright & near_dark).astype(np.uint8) * 255
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 7), np.uint8), iterations=2)
+        if float((mask > 0).mean()) < 0.004:
+            continue
+        # Drop right-edge watermark cluster (far right, short).
+        n_cc, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        keep = np.zeros_like(mask)
+        for i in range(1, n_cc):
+            area = int(stats[i, cv2.CC_STAT_AREA])
+            if area < 20:
+                continue
+            bx = int(stats[i, cv2.CC_STAT_LEFT])
+            by = int(stats[i, cv2.CC_STAT_TOP])
+            bw = int(stats[i, cv2.CC_STAT_WIDTH])
+            bh = int(stats[i, cv2.CC_STAT_HEIGHT])
+            # Skip small far-right credit blobs.
+            if (
+                bx > int((x_hi - x_lo) * 0.72)
+                and bw < int((x_hi - x_lo) * 0.28)
+                and bh < int((height - y_lo) * 0.42)
+            ):
+                continue
+            # Keep tiny bottom-row dots that belong to outlined captions.
+            if area < 60 and by < int((height - y_lo) * 0.18):
+                continue
+            keep[labels == i] = 255
+        if int(keep.max()) == 0:
+            continue
+        ys, xs = np.where(keep > 0)
+        if len(xs) < 30:
+            continue
+        xs0.append(x_lo + int(xs.min()))
+        xs1.append(x_lo + int(xs.max()) + 1)
+        ys0.append(y_lo + int(ys.min()))
+        ys1.append(y_lo + int(ys.max()) + 1)
+
+    if not xs0:
+        return clamp_hardsub_box(seed, width, height, zone="bottom")
+
+    pad_x = max(14, (max(xs1) - min(xs0)) // 24)
+    pad_y = max(12, (max(ys1) - min(ys0)) // 3)
+    box = {
+        "x": max(0, min(xs0) - pad_x),
+        "y": max(y_lo, min(ys0) - pad_y),
+        "w": min(width, max(xs1) + pad_x) - max(0, min(xs0) - pad_x),
+        "h": min(height, max(ys1) + pad_y) - max(y_lo, min(ys0) - pad_y),
+    }
+    # Merge with seed so we never shrink below a reasonable seed.
+    sx, sy, sw, sh = int(seed["x"]), int(seed["y"]), int(seed["w"]), int(seed["h"])
+    x0 = min(box["x"], sx)
+    y0 = min(box["y"], sy)
+    x1 = max(box["x"] + box["w"], sx + sw)
+    y1 = max(box["y"] + box["h"], sy + sh)
+    merged = {
+        "x": max(0, x0 - 6),
+        "y": max(y_lo, y0 - 4),
+        "w": min(width, x1 + 6) - max(0, x0 - 6),
+        "h": min(height, y1 + 8) - max(y_lo, y0 - 4),
+    }
+    return clamp_hardsub_box(
+        merged, width, height, zone="bottom", max_h_ratio=0.18, max_h_px=190
+    )
+
+
+def resolve_hardsub_boxes(
+    video: Path,
+    width: int,
+    height: int,
+    *,
+    mode: str,
+    ratio: float = HARDSUB_CROP_RATIO,
+    vlm_model: str = HARDSUB_VLM_MODEL,
+    work_dir: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Locate all burned-in text regions: dialogue + top title + watermark."""
     mode_s = (mode or "vlm").strip().lower()
-    locate: dict[str, Any] | None = None
+    dialogue: dict[str, Any] | None = None
     if mode_s == "vlm":
-        locate = locate_hardsub_box_vlm(
+        dialogue = locate_hardsub_box_vlm(
             video, width, height, model=vlm_model, work_dir=work_dir
         )
-        if locate is None:
-            locate = locate_hardsub_box_band(video, width, height)
+        if dialogue is None:
+            dialogue = locate_hardsub_box_band(video, width, height)
     elif mode_s == "band":
-        locate = locate_hardsub_box_band(video, width, height)
-    if locate and locate.get("box"):
-        return locate
-    box = hardsub_band_box(width, height, ratio)
-    return {
-        "box": box,
-        "norm": {
-            "x": box["x"] / width,
-            "y": box["y"] / height,
-            "w": box["w"] / width,
-            "h": box["h"] / height,
-        },
-        "hits": 0,
-        "source": "ratio",
-    }
+        dialogue = locate_hardsub_box_band(video, width, height)
+
+    out: list[dict[str, Any]] = []
+    if dialogue and dialogue.get("box"):
+        seed = dialogue["box"]
+        tight = tighten_hardsub_box(video, width, height, seed, zone="bottom")
+        # Repair clipped long lines (do not trust watermark carve / short VLM).
+        full = expand_dialogue_box_full_line(video, width, height, tight)
+        row = dict(dialogue)
+        row["box_seed"] = {
+            "x": int(seed["x"]),
+            "y": int(seed["y"]),
+            "w": int(seed["w"]),
+            "h": int(seed["h"]),
+        }
+        row["box"] = full
+        row["norm"] = {
+            "x": full["x"] / width,
+            "y": full["y"] / height,
+            "w": full["w"] / width,
+            "h": full["h"] / height,
+        }
+        row["tightened"] = True
+        row["zone"] = "bottom"
+        row["role"] = "dialogue"
+        out.append(row)
+    else:
+        seed = hardsub_band_box(width, height, ratio)
+        full = expand_dialogue_box_full_line(video, width, height, seed)
+        out.append(
+            {
+                "box": full,
+                "norm": {
+                    "x": full["x"] / width,
+                    "y": full["y"] / height,
+                    "w": full["w"] / width,
+                    "h": full["h"] / height,
+                },
+                "hits": 0,
+                "source": "ratio+expand",
+                "zone": "bottom",
+                "role": "dialogue",
+            }
+        )
+
+    # Always try top title + watermark (independent of dialogue mode).
+    top = locate_hardsub_box_top_title(video, width, height)
+    if top and top.get("box"):
+        seed = top["box"]
+        tight = tighten_hardsub_box(video, width, height, seed, zone="top")
+        # Cap absurd title widths (ceiling false positives).
+        if int(tight["w"]) > int(width * 0.55):
+            tight = dict(tight)
+            tight["w"] = int(width * 0.55)
+            tight = clamp_hardsub_box(tight, width, height, zone="top")
+        top = dict(top)
+        top["box_seed"] = seed
+        top["box"] = tight
+        top["tightened"] = True
+        out.append(top)
+
+    mark = locate_hardsub_box_watermark(video, width, height)
+    if mark and mark.get("box"):
+        # Keep the full watermark box even when it overlaps dialogue. The cleanup
+        # pipeline handles regions sequentially, so a dedicated static watermark
+        # pass is more reliable than carving the box down to a thin right-edge
+        # sliver that misses most glyphs.
+        mark = dict(mark)
+        mark["box"] = clamp_hardsub_box(
+            dict(mark["box"]),
+            width,
+            height,
+            zone="bottom",
+            max_h_ratio=0.08,
+            max_h_px=90,
+            min_y_ratio=0.85,
+        )
+        out.append(mark)
+
+    return out
 
 
 def _encode_dehardsub_fill(
@@ -917,6 +1313,136 @@ def refine_hardsub_box_glyphs(
         width,
         height,
     )
+
+
+def clamp_hardsub_box(
+    box: dict[str, int],
+    width: int,
+    height: int,
+    *,
+    max_h_ratio: float = 0.14,
+    max_h_px: int = 160,
+    min_y_ratio: float = 0.72,
+    zone: str = "bottom",
+) -> dict[str, int]:
+    """Reject oversized boxes. ``zone``: bottom | top | any (no y floor/ceiling)."""
+    b = {
+        "x": int(box["x"]),
+        "y": int(box["y"]),
+        "w": int(box["w"]),
+        "h": int(box["h"]),
+    }
+    zone_s = (zone or "bottom").strip().lower()
+    max_h = max(24, min(int(max_h_px), int(height * max_h_ratio)))
+    if b["h"] > max_h:
+        if zone_s == "top":
+            # Keep top edge (title sits near the upper edge).
+            b["h"] = max_h
+        else:
+            bottom = b["y"] + b["h"]
+            b["h"] = max_h
+            b["y"] = max(0, bottom - max_h)
+    if zone_s == "bottom":
+        min_y = int(height * min_y_ratio)
+        if b["y"] < min_y:
+            grow = min_y - b["y"]
+            b["y"] = min_y
+            b["h"] = max(16, b["h"] - grow)
+    elif zone_s == "top":
+        max_y = int(height * 0.28)
+        if b["y"] + b["h"] > max_y:
+            b["h"] = max(16, max_y - b["y"])
+    return _clamp_delogo_box(b, width, height)
+
+
+def tighten_hardsub_box(
+    video: Path,
+    width: int,
+    height: int,
+    seed: dict[str, int],
+    *,
+    samples: int = 5,
+    zone: str = "bottom",
+) -> dict[str, int]:
+    """Shrink seed to glyph extent across sampled frames (+ small pad).
+
+    If glyphs cannot be found, still clamp height so VLM cannot return a 20% band.
+    """
+    import cv2
+    import numpy as np
+
+    seed_c = clamp_hardsub_box(seed, width, height, zone=zone)
+    dur = probe_duration_sec(video) or 0.0
+    if dur <= 0.4:
+        return seed_c
+
+    xs0: list[int] = []
+    ys0: list[int] = []
+    xs1: list[int] = []
+    ys1: list[int] = []
+    fracs = [0.2, 0.35, 0.5, 0.65, 0.8][: max(1, samples)]
+    for frac in fracs:
+        raw = _grab_bgr_frame(video, dur * frac)
+        if raw is None:
+            continue
+        if raw.shape[1] != width or raw.shape[0] != height:
+            raw = cv2.resize(raw, (width, height), interpolation=cv2.INTER_AREA)
+        y0 = max(0, int(seed_c["y"]))
+        x0 = max(0, int(seed_c["x"]))
+        y1 = min(height, y0 + max(1, int(seed_c["h"])))
+        x1 = min(width, x0 + max(1, int(seed_c["w"])))
+        roi = raw[y0:y1, x0:x1]
+        if roi.size < 16:
+            continue
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        bg = float(np.median(gray))
+        # Bright or dark glyphs vs local background.
+        mask = (np.abs(gray.astype(np.float32) - bg) > 55.0).astype(np.uint8) * 255
+        # Also keep yellow title paint (high R/G, low B).
+        bch, gch, rch = cv2.split(roi)
+        yellow = (
+            (rch > 170)
+            & (gch > 150)
+            & (bch < 150)
+            & ((rch.astype(np.int16) + gch.astype(np.int16)) > (2 * bch.astype(np.int16) + 30))
+        )
+        mask = np.maximum(mask, (yellow.astype(np.uint8) * 255))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8), iterations=1)
+        if float((mask > 0).mean()) < 0.004 or float((mask > 0).mean()) > 0.55:
+            continue
+        ys, xs = np.where(mask > 0)
+        if len(xs) < 8:
+            continue
+        xs0.append(x0 + int(xs.min()))
+        xs1.append(x0 + int(xs.max()) + 1)
+        ys0.append(y0 + int(ys.min()))
+        ys1.append(y0 + int(ys.max()) + 1)
+
+    if not xs0:
+        return seed_c
+
+    pad_x = max(6, (max(xs1) - min(xs0)) // 20)
+    pad_y = max(4, (max(ys1) - min(ys0)) // 6)
+    tight = {
+        "x": max(0, min(xs0) - pad_x),
+        "y": max(0, min(ys0) - pad_y),
+        "w": min(width, max(xs1) + pad_x) - max(0, min(xs0) - pad_x),
+        "h": min(height, max(ys1) + pad_y) - max(0, min(ys0) - pad_y),
+    }
+    return clamp_hardsub_box(tight, width, height, zone=zone)
+
+
+def _grab_bgr_frame(video: Path, t_sec: float) -> Any | None:
+    """Best-effort BGR frame at t; None on failure."""
+    import tempfile
+
+    import cv2
+
+    with tempfile.TemporaryDirectory(prefix="vitual_hs_") as td:
+        jpg = Path(td) / "f.jpg"
+        if _grab_jpeg_frame(video, t_sec, jpg) is None:
+            return None
+        return cv2.imread(str(jpg), cv2.IMREAD_COLOR)
 
 
 def _encode_dehardsub_inpaint(

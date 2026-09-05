@@ -707,6 +707,17 @@ def _tiny_mp4_with_bottom_bar(path: Path, *, seconds: float = 1.0) -> None:
     )
 
 
+def test_clamp_and_tighten_hardsub_box() -> None:
+    from media_ops import clamp_hardsub_box
+
+    # Oversized VLM box (≈20% height) must shrink and stay near bottom.
+    tall = {"x": 1, "y": 836, "w": 1438, "h": 218}
+    out = clamp_hardsub_box(tall, 1440, 1080)
+    assert out["h"] <= 151  # min(160, 0.14*1080)
+    assert out["y"] >= int(1080 * 0.72)
+    assert out["y"] + out["h"] <= 1080
+
+
 def test_detect_and_strip_hardsubs(tmp_path: Path) -> None:
     from media_ops import detect_hardsubs, locate_hardsub_box_band, probe_video_wh, strip_hardsubs
 

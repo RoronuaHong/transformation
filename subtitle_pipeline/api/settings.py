@@ -25,6 +25,17 @@ class Settings(BaseSettings):
     schedule_discover: str = "0 8 * * *"
     schedule_batch: str = "30 8 * * *"
     schedule_enabled: bool = True
+    schedule_game_claim: str = "0 22 * * 4"
+    game_claim_enabled: bool = False
+    game_claim_stores: str = "epic,steam"
+    game_claim_profile_dir: str = "data/game_claim/browser"
+    game_claim_artifacts_dir: str = "data/game_claim/runs"
+    game_claim_headless: bool = True
+    game_claim_slow_mo_ms: int = 0
+    game_claim_browser_channel: str = "chromium"
+    game_claim_profile_name: str = ""
+    game_claim_epic_urls: str = ""
+    game_claim_steam_urls: str = ""
 
 
 def get_settings() -> Settings:

@@ -162,4 +162,4 @@ def test_demosaic_combined_and_lama_fallback(tmp_path, monkeypatch) -> None:
                                locate_mode="band", engine="lama",
                                demosaic=False, dehardsub=True)
     assert out2.is_file()
-    assert r2.get("action") == "sttn_cleanup", "缺 lama.onnx 应降级 STTN"
+    assert r2.get("action") in ("sttn_cleanup", "hybrid_cleanup"), "缺 lama.onnx 应降级 STTN"

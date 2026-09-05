@@ -83,11 +83,22 @@ async def lifespan(app: FastAPI):
             id="daily_batch",
             replace_existing=True,
         )
+        if settings.game_claim_enabled:
+            _scheduler.add_job(
+                lambda: _job_game_claim(settings),
+                CronTrigger(**_cron_parts(settings.schedule_game_claim)),
+                id="weekly_game_claim",
+                replace_existing=True,
+            )
         _scheduler.start()
         _store.write_log(
             "info",
             "scheduler",
-            f"discover={settings.schedule_discover} batch={settings.schedule_batch}",
+            (
+                f"discover={settings.schedule_discover} "
+                f"batch={settings.schedule_batch} "
+                f"game_claim={settings.schedule_game_claim if settings.game_claim_enabled else 'disabled'}"
+            ),
         )
     yield
     if _scheduler is not None:
@@ -135,6 +146,14 @@ class BatchBody(BaseModel):
     requeue_failed: bool = True
 
 
+class GameClaimBody(BaseModel):
+    dry_run: bool = False
+    headless: bool | None = None
+    stores: list[str] = Field(default_factory=lambda: ["epic", "steam"])
+    epic_urls: list[str] = Field(default_factory=list)
+    steam_urls: list[str] = Field(default_factory=list)
+
+
 def _job_discover(settings: Settings, body: DiscoverBody | None = None) -> dict:
     from discover.run_discover import main as discover_main
 
@@ -169,6 +188,25 @@ def _job_export(settings: Settings) -> dict:
     from discover.export_site import main as export_main
 
     return run_locked(store(), settings, "export", lambda: export_main([]))
+
+
+def _job_game_claim(settings: Settings, body: GameClaimBody | None = None) -> dict:
+    from game_claim.runner import run_from_settings
+
+    b = body or GameClaimBody()
+    return run_locked(
+        store(),
+        settings,
+        "game_claim",
+        lambda: run_from_settings(
+            settings,
+            stores=b.stores,
+            headless=b.headless,
+            dry_run=b.dry_run,
+            epic_urls=b.epic_urls,
+            steam_urls=b.steam_urls,
+        ),
+    )
 
 
 def _job_inbox(settings: Settings, body: InboxBody) -> dict:
@@ -257,6 +295,14 @@ def admin_export(
 ) -> dict:
     background.add_task(_job_export, settings)
     return {"accepted": True, "action": "export"}
+
+
+@app.post("/admin/game-claim", dependencies=[Depends(require_admin)])
+def admin_game_claim(
+    body: GameClaimBody, background: BackgroundTasks, settings: Settings = Depends(get_settings)
+) -> dict:
+    background.add_task(_job_game_claim, settings, body)
+    return {"accepted": True, "action": "game_claim", "stores": body.stores, "dry_run": body.dry_run}
 
 
 @app.get("/admin/links", dependencies=[Depends(require_admin)])
