@@ -1,0 +1,15 @@
+---
+description: Windows 文件路径在聊天中要用可点击格式，避免 D:\ 反斜杠链接失效
+alwaysApply: true
+---
+
+# Chat file links (Windows)
+
+Cursor chat often cannot open absolute `D:\` or even `D:/` file links from agent messages (`Unable to resolve resource` / `%5C`). This is a **client limitation**; the agent cannot patch Cursor.
+
+When pointing users to local files:
+
+1. Prefer **workspace-relative** links only: `[label](box-lift-sitting-concept.html)`
+2. Tell user to use **Ctrl+P** → type filename, or open from the file tree
+3. If they still cannot click, **open the file via Shell** (`Start-Process`) for them
+4. Do not claim absolute drive-letter markdown links will work in Cursor chat
