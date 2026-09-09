@@ -26,15 +26,9 @@ class LamaUnavailable(RuntimeError):
 
 
 def _ort_providers() -> list:
-    try:
-        import onnxruntime as ort
+    from ort_runtime import ort_providers
 
-        avail = ort.get_available_providers()
-        if "CUDAExecutionProvider" in avail:
-            return ["CUDAExecutionProvider", "CPUExecutionProvider"]
-        return ["CPUExecutionProvider"]
-    except Exception:
-        return ["CPUExecutionProvider"]
+    return ort_providers()
 
 
 def _load_session():
@@ -46,11 +40,16 @@ def _load_session():
     try:
         import onnxruntime as ort
 
+        from ort_runtime import preload_ort_cuda_dlls
+
+        preload_ort_cuda_dlls()
+        providers = _ort_providers()
         so = ort.SessionOptions()
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         _SESSION = ort.InferenceSession(
-            str(LAMA_WEIGHTS), sess_options=so, providers=_ort_providers()
+            str(LAMA_WEIGHTS), sess_options=so, providers=providers
         )
+        print(f"[lama] onnx providers={_SESSION.get_providers()}", flush=True)
         return _SESSION
     except Exception as exc:  # noqa: BLE001
         raise LamaUnavailable(f"lama onnx load failed: {exc}") from exc

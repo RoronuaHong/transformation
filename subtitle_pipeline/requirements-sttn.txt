@@ -1,3 +1,6 @@
 # Optional CUDA torch for STTN dehardsub (install from pytorch.org cu124).
 # pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 # Weights: models/sttn.pth (gitignored). Override with VITUAL_STTN_CKPT.
+#
+# ONNX GPU (LaMa / CodeFormer / Real-ESRGAN). CPU wheel has no CUDA EP.
+# pip install "onnxruntime-gpu==1.22.0"

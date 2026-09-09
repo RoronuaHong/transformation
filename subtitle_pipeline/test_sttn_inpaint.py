@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from sttn_inpaint import STTN_H, STTN_W, sttn_tiles, sttn_view, text_hole_for_tile
+from sttn_inpaint import STTN_H, STTN_W, spatial_sampling_policy, sttn_tiles, sttn_view, text_hole_for_tile
 
 
 def test_sttn_tiles_are_native_and_cover_box() -> None:
@@ -85,6 +85,20 @@ def test_tbe_recovers_grain_from_other_frames() -> None:
     )
     assert int(out[140, 170].mean()) < 90
     assert float(out[130:155, 140:260].astype(np.float32).std()) > 2.0
+
+
+def test_spatial_sampling_policy_is_more_aggressive_for_short_wide_segments() -> None:
+    policy = spatial_sampling_policy(n_hint=69, frame_w=1920, box_w=1759, has_mosaic=False)
+    assert policy["min_hits"] == 2
+    assert policy["sample_stride"] >= 4
+
+
+def test_spatial_sampling_policy_stays_conservative_for_long_or_mosaic_runs() -> None:
+    long_policy = spatial_sampling_policy(n_hint=8210, frame_w=1920, box_w=1759, has_mosaic=False)
+    assert long_policy["sample_stride"] >= 3
+    mosaic_policy = spatial_sampling_policy(n_hint=69, frame_w=1920, box_w=1759, has_mosaic=True)
+    assert mosaic_policy["min_hits"] >= 3
+    assert mosaic_policy["sample_stride"] <= long_policy["sample_stride"]
 
 
 def test_auto_engine_calls_sttn(tmp_path: Path, monkeypatch: object) -> None:
@@ -194,3 +208,69 @@ def test_band_is_flat_rejects_midtone_clothing() -> None:
     # dark outline
     frame[184:206, 80:82] = (20, 20, 20)
     assert band_is_flat(frame, {"x": 50, "y": 170, "w": 300, "h": 50}) is False
+
+
+def test_ffmpeg_writing_mp4_is_playable_before_close(tmp_path: Path) -> None:
+    """Fragmented writing temps must open mid-stream (no 'moov atom not found')."""
+    import subprocess
+    import time
+
+    import numpy as np
+
+    from media_ops import find_ffmpeg
+    from sttn_inpaint import _WRITE_MOVFLAGS, _finalize_writing_mp4, _open_ffmpeg_writer
+
+    assert "frag_keyframe" in _WRITE_MOVFLAGS
+    assert "empty_moov" in _WRITE_MOVFLAGS
+
+    ffmpeg = find_ffmpeg()
+    src = tmp_path / "src.mp4"
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=64x48:r=10:d=0.3",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(src),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    writing = tmp_path / "_clean_sttn_writing.mp4"
+    dest = tmp_path / "clean.mp4"
+    fps = 10.0
+    # Writer uses gop≈fps (min 12); need ~2 GOPs before the first media fragment sticks.
+    gop = max(12, min(60, int(round(fps))))
+    proc = _open_ffmpeg_writer(src, writing, 64, 48, fps)
+    assert proc.stdin is not None
+    frame = np.zeros((48, 64, 3), dtype=np.uint8)
+    frame[:] = (40, 80, 120)
+    for i in range(gop * 2 + 4):
+        proc.stdin.write(np.ascontiguousarray(frame).tobytes())
+        proc.stdin.flush()
+        if i == gop * 2:
+            time.sleep(0.5)
+    time.sleep(0.4)
+    probe = subprocess.run(
+        [ffmpeg, "-v", "error", "-i", str(writing), "-f", "null", "-"],
+        capture_output=True,
+        text=True,
+    )
+    assert probe.returncode == 0, probe.stderr
+    for _ in range(2):
+        proc.stdin.write(np.ascontiguousarray(frame).tobytes())
+    proc.stdin.close()
+    err = proc.communicate(timeout=60)[1]
+    assert proc.returncode == 0, (err or b"").decode("utf-8", errors="replace")[:300]
+    _finalize_writing_mp4(writing, dest)
+    assert dest.is_file() and dest.stat().st_size > 800
+    assert not writing.is_file() or writing.resolve() == dest.resolve()

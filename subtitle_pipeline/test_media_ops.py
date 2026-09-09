@@ -69,12 +69,13 @@ def test_parse_stages_deblur() -> None:
 
 def test_normalize_media_opts_deblur() -> None:
     """锁定 deblur / deblur_engine 透传（此前 media_ops 完全没有该选项）。"""
-    # 默认关闭、默认引擎 realesrgan；去模糊默认含去马赛克；去烧录默认也顺带 demosaic
+    # 默认模式改为 balanced：默认关闭 deblur，但走单 pass 且关闭 demosaic。
     base = normalize_media_opts({})
+    assert base["postproc_mode"] == "balanced"
     assert base["deblur"] is False
     assert base["deblur_engine"] == "realesrgan"
-    assert base["deblur_demosaic"] is True
-    assert base["dehardsub_demosaic"] is True
+    assert base["deblur_demosaic"] is False
+    assert base["dehardsub_demosaic"] is False
     # 字符串真值
     assert normalize_media_opts({"deblur": "true"})["deblur"] is True
     assert normalize_media_opts({"deblur": "off"})["deblur"] is False
@@ -87,6 +88,31 @@ def test_normalize_media_opts_deblur() -> None:
     )
     # 非法引擎 → 回落默认
     assert normalize_media_opts({"deblur_engine": "bogus"})["deblur_engine"] == "realesrgan"
+
+
+def test_normalize_media_opts_postproc_modes() -> None:
+    fast = normalize_media_opts({"postproc_mode": "fast"})
+    assert fast["postproc_mode"] == "fast"
+    assert fast["dehardsub_mode"] == "fill"
+    assert fast["dehardsub_engine"] == "opencv"
+    assert fast["dehardsub_passes"] == 1
+    assert fast["deblur_demosaic"] is False
+    assert fast["dehardsub_polish_residual_floor"] == 1.0
+    assert fast["dehardsub_dialogue_short_route"] == "flat"
+
+    balanced = normalize_media_opts({"postproc_mode": "balanced"})
+    assert balanced["postproc_mode"] == "balanced"
+    assert balanced["dehardsub_polish_residual_floor"] == 0.02
+    assert balanced["dehardsub_dialogue_short_route"] == "flat"
+
+    quality = normalize_media_opts({"postproc_mode": "quality"})
+    assert quality["postproc_mode"] == "quality"
+    assert quality["dehardsub_mode"] == "auto"
+    assert quality["dehardsub_engine"] == "sttn"
+    assert quality["dehardsub_passes"] == 2
+    assert quality["deblur_demosaic"] is True
+    assert quality["dehardsub_polish_residual_floor"] == 0.008
+    assert quality["dehardsub_dialogue_short_route"] == "auto"
 
 
 def test_run_postproc_deblur_runs_demosaic_first(tmp_path: Path, monkeypatch) -> None:
@@ -122,8 +148,42 @@ def test_run_postproc_deblur_runs_demosaic_first(tmp_path: Path, monkeypatch) ->
     mod.deblur_video = fake_deblur
     monkeypatch.setitem(sys.modules, "deblur_basicvsr", mod)
 
-    out = mo.run_postproc(tmp_path, frozenset({"deblur"}))
+    out = mo.run_postproc(
+        tmp_path,
+        frozenset({"deblur"}),
+        media_opts={"postproc_mode": "quality", "deblur": True},
+    )
     assert calls == ["demosaic", "deblur"]
+    assert "deblur" in out and out["deblur"].is_file()
+
+
+def test_run_postproc_fast_deblur_uses_ffmpeg_path(tmp_path: Path, monkeypatch) -> None:
+    import sys
+    import types
+
+    import media_ops as mo
+
+    media = tmp_path / "media"
+    media.mkdir()
+    _tiny_mp4(media / "source.mp4", seconds=0.4)
+    calls: list[str] = []
+
+    def fake_ffmpeg(src_p, dest, *, strength="medium"):
+        calls.append(f"ffmpeg:{strength}")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(Path(src_p).read_bytes())
+        return Path(dest)
+
+    mod = types.ModuleType("deblur_basicvsr")
+    mod.deblur_video_ffmpeg = fake_ffmpeg
+    monkeypatch.setitem(sys.modules, "deblur_basicvsr", mod)
+
+    out = mo.run_postproc(
+        tmp_path,
+        frozenset({"deblur"}),
+        media_opts={"postproc_mode": "fast", "deblur": True},
+    )
+    assert calls == ["ffmpeg:medium"]
     assert "deblur" in out and out["deblur"].is_file()
 
 
@@ -769,6 +829,95 @@ def test_hardsub_fill_keeps_frame(tmp_path: Path) -> None:
     assert meta["box"]["w"] < src_wh[0]
 
 
+def test_hardsub_fulltime_captions_use_full_delogo(tmp_path: Path, monkeypatch) -> None:
+    from media_ops import probe_video_wh, strip_hardsubs
+
+    media = tmp_path / "media"
+    media.mkdir()
+    src = media / "source.mp4"
+    _tiny_mp4_with_bottom_bar(src, seconds=10.0)
+    src_wh = probe_video_wh(src)
+    assert src_wh is not None
+
+    def fake_detect(*_args, **_kwargs):
+        return {
+            "detected": True,
+            "score": 0.45,
+            "hits": 2,
+            "samples": 6,
+            "frames": [
+                {"score": 0.0, "t_sec": 0.8},
+                {"score": 0.33, "t_sec": 1.6},
+                {"score": 0.05, "t_sec": 3.4},
+                {"score": 0.38, "t_sec": 7.8},
+                {"score": 0.0, "t_sec": 9.2},
+            ],
+        }
+
+    monkeypatch.setattr("media_ops.detect_hardsubs", fake_detect)
+    cleaned, meta = strip_hardsubs(
+        tmp_path,
+        video=src,
+        force=True,
+        mode="fill",
+        engine="opencv",
+    )
+    assert cleaned.is_file()
+    # 合成片段底部条全程都在 → 稠密扫描判定“几乎全程有字幕”，分段没有意义 → 全程 delogo
+    assert meta["action"] == "delogo_full"
+    assert float(meta.get("caption_coverage") or 0.0) >= 0.75
+    assert probe_video_wh(cleaned) == src_wh
+
+
+def test_hardsub_fast_fill_uses_segment_windows(tmp_path: Path, monkeypatch) -> None:
+    """字幕只在少数几秒出现 → 走分段重编码，且窗口来自稠密时间轴（非 5 点采样）。"""
+    from media_ops import probe_video_wh, strip_hardsubs
+
+    media = tmp_path / "media"
+    media.mkdir()
+    src = media / "source.mp4"
+    _tiny_mp4_with_bottom_bar(src, seconds=10.0)
+    src_wh = probe_video_wh(src)
+    assert src_wh is not None
+
+    def fake_detect(*_args, **_kwargs):
+        return {
+            "detected": True,
+            "score": 0.45,
+            "hits": 2,
+            "samples": 6,
+            "frames": [
+                {"score": 0.33, "t_sec": 1.6},
+                {"score": 0.38, "t_sec": 7.8},
+            ],
+        }
+
+    def fake_scan(*_args, **_kwargs):
+        return {
+            "hits": [1.6, 7.8],
+            "hits_n": 2,
+            "frames": 20,
+            "hit_frac": 0.1,
+            "fps": 2.0,
+            "reason": "caption_timeline",
+        }
+
+    monkeypatch.setattr("media_ops.detect_hardsubs", fake_detect)
+    monkeypatch.setattr("media_ops.scan_caption_timeline", fake_scan)
+    cleaned, meta = strip_hardsubs(
+        tmp_path,
+        video=src,
+        force=True,
+        mode="fill",
+        engine="opencv",
+    )
+    assert cleaned.is_file()
+    assert meta["action"] == "delogo_segments"
+    assert len(meta.get("fast_windows") or []) >= 1
+    assert float(meta.get("fast_window_coverage_sec") or 0.0) > 0.0
+    assert probe_video_wh(cleaned) == src_wh
+
+
 def test_run_postproc_dehardsub(tmp_path: Path) -> None:
     from media_ops import probe_video_wh, run_postproc
 
@@ -787,7 +936,13 @@ def test_run_postproc_dehardsub(tmp_path: Path) -> None:
     assert meta_path.is_file()
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     assert str(meta["action"]).startswith(("delogo_", "inpaint_", "multipass"))
+    assert float(meta.get("elapsed_sec") or 0.0) >= 0.0
     assert probe_video_wh(out["dehardsub"]) == src_wh
+    status = json.loads((media / "media_status.json").read_text(encoding="utf-8"))
+    assert status["status"] == "done"
+    assert status["current_stage"] is None
+    assert "dehardsub" in status.get("stage_timings_sec", {})
+    assert float(status.get("elapsed_sec") or 0.0) >= 0.0
 
 
 def test_multipass_cleanup_hardsub_and_mosaic(tmp_path: Path) -> None:
@@ -863,3 +1018,176 @@ def test_multipass_cleanup_hardsub_and_mosaic(tmp_path: Path) -> None:
     assert report["action"] == "multipass_cleanup"
     assert cleaned.is_file()
     assert int(report.get("pass_count") or 0) >= 1
+
+
+def test_hybrid_cleanup_skips_polish_when_residual_low(tmp_path: Path, monkeypatch) -> None:
+    import shutil
+
+    import media_ops as mo
+    import visual_cleanup as vc
+
+    media = tmp_path / "media"
+    media.mkdir()
+    src = media / "source.mp4"
+    _tiny_mp4(src, seconds=0.6, color="blue")
+    dest = media / "dehardsub" / "clean.mp4"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(
+        mo,
+        "resolve_hardsub_boxes",
+        lambda *_args, **_kwargs: [
+            {
+                "box": {"x": 24, "y": 18, "w": 180, "h": 42, "width": 320, "height": 240},
+                "source": "top_title",
+                "role": "title",
+            }
+        ],
+    )
+    monkeypatch.setattr(vc, "sample_validate_video", lambda *_args, **_kwargs: {"ok": True, "hardsub": 0.005})
+    lama_calls: list[str] = []
+
+    def fake_lama(inp, outp, boxes_l, dilate=2, mask_mode="glyph"):
+        lama_calls.append(mask_mode)
+        outp.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(inp, outp)
+        return {"engine": "lama", "frames": 1, "bytes": outp.stat().st_size}
+
+    monkeypatch.setattr(vc, "encode_lama_boxes", fake_lama)
+    meta = vc.run_multipass_cleanup(
+        src,
+        dest,
+        work_dir=tmp_path,
+        locate_mode="band",
+        max_passes=2,
+        demosaic=False,
+        dehardsub=True,
+        engine="sttn",
+        polish_residual_floor=0.02,
+    )
+    assert meta["action"] == "hybrid_cleanup"
+    assert dest.is_file()
+    encode = meta["encode"]
+    assert encode["polish_applied"] is False
+    assert float(encode["polish_probe"]["hardsub"]) == 0.005
+    assert lama_calls == []
+
+
+def test_hybrid_cleanup_uses_active_windows_for_dialogue(tmp_path: Path, monkeypatch) -> None:
+    import shutil
+
+    import media_ops as mo
+    import visual_cleanup as vc
+
+    media = tmp_path / "media"
+    media.mkdir()
+    src = media / "source.mp4"
+    _tiny_mp4(src, seconds=0.6, color="purple")
+    dest = media / "dehardsub" / "clean.mp4"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(
+        mo,
+        "resolve_hardsub_boxes",
+        lambda *_args, **_kwargs: [
+            {
+                "box": {"x": 24, "y": 160, "w": 220, "h": 48, "width": 320, "height": 240},
+                "source": "band",
+                "role": "dialogue",
+            }
+        ],
+    )
+    windows_seen: list[tuple[float, float]] = []
+    progress_path = media / "dehardsub" / "dehardsub_progress.json"
+
+    routes_seen: list[str] = []
+
+    def fake_segmented(
+        src_p,
+        out_p,
+        box,
+        *,
+        active_windows,
+        mosaic_boxes=None,
+        dialogue_short_route="auto",
+        progress_path=None,
+    ):
+        windows_seen.extend(active_windows)
+        routes_seen.append(dialogue_short_route)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_p, out_p)
+        if progress_path is not None:
+            progress_path.write_text('{"status":"done","completed_windows":2}', encoding="utf-8")
+        return {"engine": "sttn_segments", "frames": 3, "bytes": out_p.stat().st_size}
+
+    monkeypatch.setattr(vc, "_encode_sttn_active_windows", fake_segmented)
+    meta = vc.run_multipass_cleanup(
+        src,
+        dest,
+        work_dir=tmp_path,
+        locate_mode="band",
+        max_passes=1,
+        demosaic=False,
+        dehardsub=True,
+        engine="sttn",
+        active_windows=[(0.5, 1.2), (2.0, 3.1)],
+        dialogue_short_route="flat",
+        progress_path=progress_path,
+    )
+    assert meta["action"] == "hybrid_cleanup"
+    assert dest.is_file()
+    assert meta["encode"]["passes"][0]["engine"] == "sttn_segments"
+    assert windows_seen == [(0.5, 1.2), (2.0, 3.1)]
+    assert routes_seen == ["flat"]
+    assert json.loads(progress_path.read_text(encoding="utf-8"))["status"] == "done"
+
+
+def test_encode_sttn_active_windows_imports_sttn_impl(tmp_path: Path, monkeypatch) -> None:
+    import shutil
+
+    import media_ops as mo
+    import sttn_inpaint as si
+    import visual_cleanup as vc
+
+    media = tmp_path / "media"
+    media.mkdir()
+    src = media / "source.mp4"
+    _tiny_mp4(src, seconds=1.0, color="teal")
+    out = media / "clean.mp4"
+    progress = media / "progress.json"
+    calls: list[tuple[Path, Path]] = []
+
+    monkeypatch.setattr(mo, "find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(mo, "probe_duration_sec", lambda _p: 1.0)
+
+    def fake_range(_ffmpeg, src_p, dest_p, *, start, end, vf=None, crf=23, audio_k=128):
+        dest_p.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_p, dest_p)
+
+    def fake_concat(paths, dest_p):
+        dest_p.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(paths[0], dest_p)
+        return dest_p
+
+    def fake_encode(src_p, dest_p, box, *, mosaic_boxes=None):
+        calls.append((Path(src_p), Path(dest_p)))
+        dest_p.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_p, dest_p)
+        return {"engine": "sttn", "mode": "temporal_flat", "frames": 3, "bytes": dest_p.stat().st_size}
+
+    monkeypatch.setattr(mo, "_x264_out_range", fake_range)
+    monkeypatch.setattr(mo, "_concat_demuxer", fake_concat)
+    monkeypatch.setattr(si, "encode_sttn", fake_encode)
+    stats = vc._encode_sttn_active_windows(
+        src,
+        out,
+        {"x": 10, "y": 10, "w": 100, "h": 30},
+        active_windows=[(0.1, 0.6)],
+        dialogue_short_route="flat",
+        progress_path=progress,
+    )
+    assert stats is not None
+    assert stats["engine"] == "sttn_segments"
+    assert len(calls) == 1
+    assert out.is_file()
+    assert json.loads(progress.read_text(encoding="utf-8"))["status"] == "done"

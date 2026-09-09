@@ -122,15 +122,9 @@ def deblur_video_ffmpeg(
 
 
 def _ort_providers() -> list:
-    try:
-        import onnxruntime as ort
+    from ort_runtime import ort_providers
 
-        avail = ort.get_available_providers()
-        if "CUDAExecutionProvider" in avail:
-            return ["CUDAExecutionProvider", "CPUExecutionProvider"]
-        return ["CPUExecutionProvider"]
-    except Exception:
-        return ["CPUExecutionProvider"]
+    return ort_providers()
 
 
 def _load_session(engine: str):
@@ -142,10 +136,14 @@ def _load_session(engine: str):
     try:
         import onnxruntime as ort
 
+        from ort_runtime import preload_ort_cuda_dlls
+
+        preload_ort_cuda_dlls()
         so = ort.SessionOptions()
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         sess = ort.InferenceSession(str(weight), sess_options=so, providers=_ort_providers())
         _SESSION[engine] = sess
+        print(f"[deblur] onnx providers={sess.get_providers()} engine={engine}", flush=True)
         return sess
     except Exception as exc:  # noqa: BLE001
         raise DeblurUnavailable(f"onnx load failed: {exc}") from exc

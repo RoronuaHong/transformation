@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -714,6 +715,12 @@ def _tile_x_ramps(tiles: list[dict[str, int]], overlap: int = 64) -> list[Any]:
     return ramps
 
 
+# Mid-encode temp files must stay playable: classic +faststart only writes moov
+# after ffmpeg exits, so `_clean_*_writing.mp4` shows "moov atom not found".
+# frag+empty_moov needs -flush_packets 1 or the OS file stays an empty stub.
+_WRITE_MOVFLAGS = "+frag_keyframe+empty_moov+default_base_moof"
+
+
 def _open_ffmpeg_writer(
     src: Path,
     dest: Path,
@@ -724,6 +731,8 @@ def _open_ffmpeg_writer(
     from media_ops import DEFAULT_AUDIO_K, find_ffmpeg, has_audio_stream
 
     ffmpeg = find_ffmpeg()
+    # ~1s keyframes so the first media fragment lands quickly (fMP4 playability).
+    gop = max(12, min(60, int(round(float(fps) or 25.0)) or 25))
     cmd = [
         ffmpeg,
         "-y",
@@ -759,13 +768,89 @@ def _open_ffmpeg_writer(
             "18",
             "-pix_fmt",
             "yuv420p",
+            "-g",
+            str(gop),
+            "-keyint_min",
+            str(gop),
             "-movflags",
-            "+faststart",
+            _WRITE_MOVFLAGS,
+            "-flush_packets",
+            "1",
             "-shortest",
             str(dest),
         ]
     )
     return subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def _finalize_writing_mp4(writing: Path, dest: Path) -> None:
+    """Remux fragmented writing MP4 → normal +faststart dest (Windows-lock safe)."""
+    import shutil
+    import time
+
+    from media_ops import find_ffmpeg
+
+    if not writing.is_file() or writing.stat().st_size < 800:
+        raise RuntimeError(f"encode produced empty file: {writing}")
+
+    ffmpeg = find_ffmpeg()
+    staged = dest.with_name(dest.stem + "_finalizing.mp4")
+    if staged.is_file():
+        staged.unlink(missing_ok=True)
+    remux = subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(writing),
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(staged),
+        ],
+        capture_output=True,
+        timeout=600,
+    )
+    if remux.returncode == 0 and staged.is_file() and staged.stat().st_size >= 800:
+        try:
+            writing.unlink(missing_ok=True)
+        except OSError:
+            pass
+        move_from = staged
+    else:
+        err = (remux.stderr or b"").decode("utf-8", errors="replace")[:300]
+        print(f"[sttn] remux skipped ({remux.returncode}): {err}", flush=True)
+        try:
+            staged.unlink(missing_ok=True)
+        except OSError:
+            pass
+        move_from = writing
+
+    last_err: OSError | None = None
+    for _ in range(8):
+        try:
+            if dest.is_file():
+                dest.unlink()
+            move_from.replace(dest)
+            last_err = None
+            break
+        except OSError as exc:
+            last_err = exc
+            time.sleep(0.4)
+    if last_err is not None:
+        try:
+            shutil.copy2(move_from, dest)
+            if move_from.resolve() != writing.resolve():
+                move_from.unlink(missing_ok=True)
+            writing.unlink(missing_ok=True)
+        except OSError as exc:
+            raise RuntimeError(
+                f"wrote {writing} but could not replace {dest}: {exc}"
+            ) from exc
 
 
 def _fill_mosaic_native(frame: Any, mosaic_boxes: list[dict[str, int]]) -> Any:
@@ -798,6 +883,38 @@ def _fill_mosaic_native(frame: Any, mosaic_boxes: list[dict[str, int]]) -> Any:
     return out
 
 
+def spatial_sampling_policy(
+    *,
+    n_hint: int,
+    frame_w: int,
+    box_w: int,
+    has_mosaic: bool,
+) -> dict[str, int]:
+    """Tune TBE sampling for short dialogue windows vs long full videos."""
+    import math
+
+    min_hits = max(1, int(os.environ.get("VITUAL_TBE_MIN_HITS", "3") or 3))
+    sample_stride = max(1, int(os.environ.get("VITUAL_TBE_SAMPLE_STRIDE", "2") or 2))
+    max_samples = max(16, int(os.environ.get("VITUAL_TBE_MAX_SAMPLES", "96") or 96))
+    if n_hint > 0 and n_hint > max_samples:
+        sample_stride = max(sample_stride, int(math.ceil(n_hint / max_samples)))
+    short = 0 < n_hint <= 90
+    very_short = 0 < n_hint <= 45
+    wide_box = frame_w >= 1280 and box_w >= int(frame_w * 0.55)
+    if short and not has_mosaic:
+        sample_stride = max(sample_stride, 3)
+        min_hits = min(min_hits, 2)
+    if wide_box and not has_mosaic:
+        sample_stride = max(sample_stride, 4 if short else 3)
+    if very_short and not has_mosaic:
+        sample_stride = max(sample_stride, 4)
+    return {
+        "min_hits": int(max(1, min_hits)),
+        "sample_stride": int(max(1, sample_stride)),
+        "max_samples": int(max_samples),
+    }
+
+
 def _encode_spatial(
     src: Path,
     dest: Path,
@@ -812,18 +929,18 @@ def _encode_spatial(
     mosaic_boxes: list[dict[str, int]] | None = None,
 ) -> dict[str, Any]:
     """Flat-bar path: TBE plate (pass1) then per-frame paste + spatial residual (pass2)."""
-    import math
-
     import cv2
     import numpy as np
 
-    min_hits = max(1, int(os.environ.get("VITUAL_TBE_MIN_HITS", "3") or 3))
-    sample_stride = max(1, int(os.environ.get("VITUAL_TBE_SAMPLE_STRIDE", "2") or 2))
-    # Cap plate samples so long videos cannot allocate multi-GiB nanmedian stacks
-    # (e.g. 4179×131×1316×3 float32 ≈ 8 GiB on a 4.5min 1080p clip).
-    max_samples = max(16, int(os.environ.get("VITUAL_TBE_MAX_SAMPLES", "96") or 96))
-    if n_hint and n_hint > max_samples:
-        sample_stride = max(sample_stride, int(math.ceil(n_hint / max_samples)))
+    policy = spatial_sampling_policy(
+        n_hint=n_hint,
+        frame_w=frame_w,
+        box_w=int(box["w"]),
+        has_mosaic=bool(mosaic_boxes),
+    )
+    min_hits = int(policy["min_hits"])
+    sample_stride = int(policy["sample_stride"])
+    max_samples = int(policy["max_samples"])
     # Pass 1 — subsampled median TBE plate (robust vs mean ghosting).
     print(
         f"[sttn] mode=temporal_flat TBE plate box={box} min_hits={min_hits} "
@@ -866,7 +983,8 @@ def _encode_spatial(
     plate = first.copy()
     if samples:
         stack = np.stack(samples, axis=0)
-        with np.errstate(all="ignore"):
+        with np.errstate(all="ignore"), warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
             med = np.nanmedian(stack, axis=0)
         del stack
         ok_hits = hits >= float(min_hits)
@@ -934,30 +1052,7 @@ def _encode_spatial(
         except OSError:
             pass
         raise RuntimeError(f"TBE encode failed ({proc.returncode}): {err}")
-    if not writing.is_file() or writing.stat().st_size < 800:
-        raise RuntimeError(f"TBE encode produced empty file: {writing}")
-    import shutil
-    import time
-
-    last_err: OSError | None = None
-    for _ in range(8):
-        try:
-            if dest.is_file():
-                dest.unlink()
-            writing.replace(dest)
-            last_err = None
-            break
-        except OSError as exc:
-            last_err = exc
-            time.sleep(0.4)
-    if last_err is not None:
-        try:
-            shutil.copy2(writing, dest)
-            writing.unlink(missing_ok=True)
-        except OSError as exc:
-            raise RuntimeError(
-                f"TBE wrote {writing} but could not replace {dest}: {exc}"
-            ) from exc
+    _finalize_writing_mp4(writing, dest)
     return {
         "engine": "sttn",
         "mode": "temporal_flat",
@@ -1246,32 +1341,7 @@ def encode_sttn(
         except OSError:
             pass
         raise RuntimeError(f"STTN encode failed ({proc.returncode}): {err}")
-    if not writing.is_file() or writing.stat().st_size < 800:
-        raise RuntimeError(f"STTN produced empty file: {writing}")
-    # Windows often locks clean.mp4 if a player/IDE has it open — retry.
-    import shutil
-    import time
-
-    last_err: OSError | None = None
-    for _ in range(8):
-        try:
-            if dest.is_file():
-                dest.unlink()
-            writing.replace(dest)
-            last_err = None
-            break
-        except OSError as exc:
-            last_err = exc
-            time.sleep(0.4)
-    if last_err is not None:
-        # Fall back to copy; leave writing for manual recovery.
-        try:
-            shutil.copy2(writing, dest)
-            writing.unlink(missing_ok=True)
-        except OSError as exc:
-            raise RuntimeError(
-                f"STTN wrote {writing} but could not replace {dest}: {exc}"
-            ) from exc
+    _finalize_writing_mp4(writing, dest)
     return {
         "engine": "sttn",
         "mode": "tiles",

@@ -28,9 +28,16 @@ REMIX_H = 1920
 REMIX_TEMPLATE = "vertical_notes"
 DEFAULT_INTRO_SEC = 2.5
 HARDSUB_CROP_RATIO = 0.14
+# 稠密字幕时间轴扫描：全片单 pass 解码底部字幕带，按此帧率取样评分。
+# 只判“有没有字幕”用 detect_hardsubs（5 点采样）；要“字幕在哪几秒”必须用稠密扫描。
+CAPTION_SCAN_FPS = float(os.environ.get("VITUAL_CAPTION_SCAN_FPS", "2") or 2)
+CAPTION_SCAN_HIT = 0.28
+# 字幕覆盖率超过该比例 → 认为“几乎全程有字幕”，分段重编码毫无意义，直接全程处理。
+DENSE_COVERAGE_FULL = float(os.environ.get("VITUAL_CAPTION_FULL_COVERAGE", "0.75") or 0.75)
 HARDSUB_VLM_MODEL = os.environ.get("VITUAL_DEHARDSUB_VLM", "gemma4:e2b")
 DEHARDSUB_MODES = ("auto", "vlm", "band", "delogo", "fill", "crop")
 DEHARDSUB_ENGINES = ("sttn", "opencv", "lama")
+POSTPROC_MODES = ("fast", "balanced", "quality")
 DEFAULT_DEHARDSUB_ENGINE = (
     str(os.environ.get("VITUAL_DEHARDSUB_ENGINE", "sttn") or "sttn").strip().lower()
 )
@@ -102,8 +109,54 @@ def list_clip_mp4s(work_dir: Path) -> list[Path]:
     return sorted(p for p in clips.glob("range_*.mp4") if p.is_file() and p.stat().st_size > 800)
 
 
+def _pick_mode(src: dict[str, Any]) -> str:
+    raw = str(src.get("postproc_mode") or src.get("mode") or "balanced").strip().lower()
+    if raw not in POSTPROC_MODES:
+        return "balanced"
+    return raw
+
+
+def _mode_default(src: dict[str, Any], mode: str, key: str, default: Any) -> Any:
+    if key in src and src.get(key) is not None:
+        return src.get(key)
+    table: dict[str, dict[str, Any]] = {
+        "fast": {
+            "enhance_max_height": 720,
+            "dehardsub_mode": "fill",
+            "dehardsub_passes": 1,
+            "dehardsub_demosaic": False,
+            "dehardsub_engine": "opencv",
+            "deblur_demosaic": False,
+                "dehardsub_polish_residual_floor": 1.0,
+                "dehardsub_dialogue_short_route": "flat",
+        },
+        "balanced": {
+            "enhance_max_height": 720,
+            "dehardsub_mode": "band",
+            "dehardsub_passes": 1,
+            "dehardsub_demosaic": False,
+            "dehardsub_engine": "sttn",
+            "deblur_demosaic": False,
+                "dehardsub_polish_residual_floor": 0.02,
+                "dehardsub_dialogue_short_route": "flat",
+        },
+        "quality": {
+            "enhance_max_height": 1080,
+            "dehardsub_mode": "auto",
+            "dehardsub_passes": 2,
+            "dehardsub_demosaic": True,
+            "dehardsub_engine": "sttn",
+            "deblur_demosaic": True,
+                "dehardsub_polish_residual_floor": 0.008,
+                "dehardsub_dialogue_short_route": "auto",
+        },
+    }
+    return table.get(mode, {}).get(key, default)
+
+
 def normalize_media_opts(raw: dict | None = None) -> dict[str, Any]:
     src = raw if isinstance(raw, dict) else {}
+    postproc_mode = _pick_mode(src)
     strength = str(src.get("enhance_strength") or DEFAULT_STRENGTH).strip().lower()
     if strength not in STRENGTHS:
         strength = DEFAULT_STRENGTH
@@ -121,7 +174,7 @@ def normalize_media_opts(raw: dict | None = None) -> dict[str, Any]:
         crf = DEFAULT_CRF
     crf = max(18, min(32, crf))
     try:
-        max_h = int(src.get("enhance_max_height", 1080))
+        max_h = int(_mode_default(src, postproc_mode, "enhance_max_height", 1080))
     except (TypeError, ValueError):
         max_h = 1080
     max_h = max(240, min(2160, max_h))
@@ -146,25 +199,42 @@ def normalize_media_opts(raw: dict | None = None) -> dict[str, Any]:
     except (TypeError, ValueError):
         dehardsub_ratio = HARDSUB_CROP_RATIO
     dehardsub_ratio = max(0.06, min(0.28, float(dehardsub_ratio)))
-    dehardsub_mode = str(src.get("dehardsub_mode") or "auto").strip().lower()
+    dehardsub_mode = str(
+        _mode_default(src, postproc_mode, "dehardsub_mode", "auto") or "auto"
+    ).strip().lower()
     if dehardsub_mode not in DEHARDSUB_MODES:
         dehardsub_mode = "auto"
     dehardsub_vlm_model = str(
         src.get("dehardsub_vlm_model") or HARDSUB_VLM_MODEL
     ).strip() or HARDSUB_VLM_MODEL
     try:
-        dehardsub_passes = int(src.get("dehardsub_passes", DEFAULT_CLEAN_PASSES))
+        dehardsub_passes = int(
+            _mode_default(src, postproc_mode, "dehardsub_passes", DEFAULT_CLEAN_PASSES)
+        )
     except (TypeError, ValueError):
         dehardsub_passes = DEFAULT_CLEAN_PASSES
     dehardsub_passes = max(1, min(6, dehardsub_passes))
-    demosaic = src.get("dehardsub_demosaic", True)
+    demosaic = _mode_default(src, postproc_mode, "dehardsub_demosaic", True)
     if isinstance(demosaic, str):
         demosaic = demosaic.strip().lower() not in ("0", "false", "no", "off")
     dehardsub_engine = str(
-        src.get("dehardsub_engine") or DEFAULT_DEHARDSUB_ENGINE
+        _mode_default(src, postproc_mode, "dehardsub_engine", DEFAULT_DEHARDSUB_ENGINE)
+        or DEFAULT_DEHARDSUB_ENGINE
     ).strip().lower()
     if dehardsub_engine not in DEHARDSUB_ENGINES:
         dehardsub_engine = "sttn"
+    dialogue_short_route = str(
+        _mode_default(src, postproc_mode, "dehardsub_dialogue_short_route", "auto") or "auto"
+    ).strip().lower()
+    if dialogue_short_route not in ("auto", "flat", "tiles"):
+        dialogue_short_route = "auto"
+    try:
+        dehardsub_polish_residual_floor = float(
+            _mode_default(src, postproc_mode, "dehardsub_polish_residual_floor", 0.012)
+        )
+    except (TypeError, ValueError):
+        dehardsub_polish_residual_floor = 0.012
+    dehardsub_polish_residual_floor = max(0.0, min(1.0, dehardsub_polish_residual_floor))
     demosaic_engine = str(
         src.get("dehardsub_demosaic_engine")
         or src.get("deblur_demosaic_engine")
@@ -182,7 +252,7 @@ def normalize_media_opts(raw: dict | None = None) -> dict[str, Any]:
         deblur_engine = DEFAULT_DEBLUR_ENGINE
     # Product: 「去模糊」= 去马赛克 + 超分去模糊；默认开 demosaic。
     # 「去烧录字幕」也默认顺带 demosaic（dehardsub_demosaic）。
-    deblur_demosaic = src.get("deblur_demosaic", True)
+    deblur_demosaic = _mode_default(src, postproc_mode, "deblur_demosaic", True)
     if isinstance(deblur_demosaic, str):
         deblur_demosaic = deblur_demosaic.strip().lower() not in (
             "0",
@@ -212,6 +282,7 @@ def normalize_media_opts(raw: dict | None = None) -> dict[str, Any]:
         "remix_crop_hardsubs": bool(crop_raw),
         "remix_title": title,
         "remix_lang": remix_lang,
+        "postproc_mode": postproc_mode,
         "dehardsub_force": bool(force_dehardsub),
         "dehardsub_ratio": dehardsub_ratio,
         "dehardsub_mode": dehardsub_mode,
@@ -219,6 +290,8 @@ def normalize_media_opts(raw: dict | None = None) -> dict[str, Any]:
         "dehardsub_passes": dehardsub_passes,
         "dehardsub_demosaic": bool(demosaic),
         "dehardsub_engine": dehardsub_engine,
+        "dehardsub_polish_residual_floor": dehardsub_polish_residual_floor,
+        "dehardsub_dialogue_short_route": dialogue_short_route,
         "dehardsub_demosaic_engine": demosaic_engine,
         "deblur": bool(deblur),
         "deblur_engine": deblur_engine,
@@ -1638,6 +1711,7 @@ def detect_hardsubs(
         if raw is None:
             continue
         row = score_hardsub_band(raw)
+        row["t_sec"] = round(float(t), 3)
         frame_scores.append(float(row["score"]))
         details.append(row)
     if not frame_scores:
@@ -1664,6 +1738,218 @@ def detect_hardsubs(
     }
 
 
+def scan_caption_timeline(
+    video: Path,
+    *,
+    band_ratio: float = 0.18,
+    fps: float | None = None,
+    hit_threshold: float = CAPTION_SCAN_HIT,
+    width: int = 160,
+) -> dict[str, Any]:
+    """全片单 pass 稠密扫描底部字幕带，返回“字幕真实出现的时间点”列表。
+
+    detect_hardsubs 只均匀采 5 个点，回答的是“这片子有没有硬字幕”；
+    把它当成时间序列用会严重漏判：5.5 分钟连排字幕只得到 5 个 ±1.4s 窗口
+    （覆盖率 ~4%）→ 96% 的画面根本没处理。这里整片解码一次（缩到
+    160px 宽的灰度小图），逐帧评分，得到真实的字幕时间轴。
+    """
+    video = Path(video)
+    if not video.is_file():
+        return {"hits": [], "hits_n": 0, "frames": 0, "hit_frac": 0.0, "reason": "no_file"}
+    try:
+        ffmpeg = find_ffmpeg()
+    except FileNotFoundError:
+        return {"hits": [], "hits_n": 0, "frames": 0, "hit_frac": 0.0, "reason": "no_ffmpeg"}
+    scan_fps = float(fps or CAPTION_SCAN_FPS or 2.0)
+    if scan_fps <= 0:
+        scan_fps = 2.0
+    h = max(12, int(round(width * float(band_ratio) * 2.2)))
+    band_h = f"trunc(ih*{band_ratio:.3f}/2)*2"
+    vf = f"crop=iw:{band_h}:0:ih-{band_h},format=gray,fps={scan_fps:.3f},scale={width}:{h}"
+    cmd = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(video),
+        "-vf",
+        vf,
+        "-an",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "gray",
+        "pipe:1",
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True)
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"hits": [], "hits_n": 0, "frames": 0, "hit_frac": 0.0, "reason": f"error:{exc}"}
+    raw = r.stdout or b""
+    frame_len = width * h
+    if r.returncode != 0 or len(raw) < frame_len:
+        return {
+            "hits": [],
+            "hits_n": 0,
+            "frames": 0,
+            "hit_frac": 0.0,
+            "reason": "scan_failed",
+        }
+    hits: list[float] = []
+    total = 0
+    for idx in range(0, len(raw) - frame_len + 1, frame_len):
+        total += 1
+        score = float(score_hardsub_band(raw[idx : idx + frame_len]).get("score") or 0.0)
+        if score >= float(hit_threshold):
+            hits.append(round((idx // frame_len) / scan_fps, 3))
+    if not total:
+        return {"hits": [], "hits_n": 0, "frames": 0, "hit_frac": 0.0, "reason": "no_frames"}
+    return {
+        "hits": hits,
+        "hits_n": len(hits),
+        "frames": total,
+        "hit_frac": round(len(hits) / total, 4),
+        "fps": scan_fps,
+        "band_ratio": band_ratio,
+        "reason": "caption_timeline",
+    }
+
+
+def _merge_time_windows(
+    hits: list[float],
+    duration: float,
+    *,
+    pad: float = 1.4,
+    merge_gap: float = 2.5,
+    min_len: float = 2.0,
+) -> list[tuple[float, float]]:
+    if duration <= 0.1 or not hits:
+        return []
+    spans: list[tuple[float, float]] = []
+    for t in sorted(max(0.0, min(duration, float(x))) for x in hits):
+        start = max(0.0, t - pad)
+        end = min(duration, t + pad)
+        if not spans:
+            spans.append((start, end))
+            continue
+        prev_s, prev_e = spans[-1]
+        if start <= prev_e + merge_gap:
+            spans[-1] = (prev_s, max(prev_e, end))
+        else:
+            spans.append((start, end))
+    out: list[tuple[float, float]] = []
+    for start, end in spans:
+        if end - start < min_len:
+            mid = (start + end) / 2.0
+            start = max(0.0, mid - min_len / 2.0)
+            end = min(duration, start + min_len)
+        out.append((round(start, 3), round(end, 3)))
+    return out
+
+
+def _concat_demuxer(paths: list[Path], dest: Path) -> Path:
+    if not paths:
+        raise MediaOpsError("concat demuxer needs at least one clip")
+    ffmpeg = find_ffmpeg()
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    list_path = dest.with_name(f"{dest.stem}_files.txt")
+    body = []
+    for path in paths:
+        p = Path(path).resolve().as_posix().replace("'", "'\\''")
+        body.append(f"file '{p}'")
+    list_path.write_text("\n".join(body) + "\n", encoding="utf-8")
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(list_path),
+        "-c",
+        "copy",
+        str(dest),
+    ]
+    try:
+        _run_ffmpeg(cmd)
+    finally:
+        list_path.unlink(missing_ok=True)
+    if not dest.is_file() or dest.stat().st_size < 800:
+        raise RuntimeError(f"concat demuxer produced empty file: {dest}")
+    return dest
+
+
+def _render_fast_box_segments(
+    ffmpeg: str,
+    src: Path,
+    dest: Path,
+    *,
+    vf: str,
+    report: dict[str, Any],
+    hot_label: str,
+    hits: list[float] | None = None,
+) -> bool:
+    """Fast-path: only re-encode hit windows; copy the rest.
+
+    Conservative by design: this is only used for lightweight box-only routes.
+    If the timeline says captions appear almost all the time, caller should fall
+    back to the simpler full-video filter.
+
+    ``hits`` should come from :func:`scan_caption_timeline` (dense). Passing the
+    5 sparse detect points here is what produced ~4% coverage on a 5-minute clip
+    with continuous captions — the rest of the video was silently left dirty.
+    """
+    duration = probe_duration_sec(src) or 0.0
+    if hits is None:
+        hits = [
+            float(row.get("t_sec"))
+            for row in report.get("frames") or []
+            if float(row.get("score") or 0.0) >= 0.28 and row.get("t_sec") is not None
+        ]
+    windows = _merge_time_windows(hits, duration)
+    if not windows:
+        return False
+    covered = sum(max(0.0, end - start) for start, end in windows)
+    if duration <= 0.1 or covered >= duration * 0.85:
+        return False
+    seg_dir = dest.parent / "_fast_segments"
+    seg_dir.mkdir(parents=True, exist_ok=True)
+    for old in seg_dir.glob("*.mp4"):
+        old.unlink(missing_ok=True)
+
+    pieces: list[Path] = []
+    cursor = 0.0
+    part_idx = 0
+    for start, end in windows:
+        if start > cursor + 0.05:
+            clean_part = seg_dir / f"{part_idx:03d}_keep.mp4"
+            _x264_out_range(ffmpeg, src, clean_part, start=cursor, end=start, vf=None, crf=23)
+            pieces.append(clean_part)
+            part_idx += 1
+        hot_part = seg_dir / f"{part_idx:03d}_{hot_label}.mp4"
+        _x264_out_range(ffmpeg, src, hot_part, start=start, end=end, vf=vf, crf=23)
+        pieces.append(hot_part)
+        part_idx += 1
+        cursor = end
+    if cursor < duration - 0.05:
+        tail = seg_dir / f"{part_idx:03d}_keep.mp4"
+        _x264_out_range(ffmpeg, src, tail, start=cursor, end=duration, vf=None, crf=23)
+        pieces.append(tail)
+
+    _concat_demuxer(pieces, dest)
+    report["fast_windows"] = [{"start": s, "end": e} for s, e in windows]
+    report["fast_window_coverage_sec"] = round(covered, 3)
+    report["fast_window_total_sec"] = round(duration, 3)
+    report["fast_segment_count"] = len(pieces)
+    return True
+
+
 def strip_hardsubs(
     work_dir: Path,
     *,
@@ -1676,6 +1962,8 @@ def strip_hardsubs(
     demosaic: bool = True,
     engine: str | None = None,
     demosaic_engine: str | None = None,
+    polish_residual_floor: float = 0.012,
+    dialogue_short_route: str = "auto",
 ) -> tuple[Path, dict[str, Any]]:
     """Remove burned-in captions (+ optional mosaic) — keep full frame.
 
@@ -1691,9 +1979,12 @@ def strip_hardsubs(
     src = Path(video) if video else existing_source_video(work_dir)
     if src is None or not src.is_file():
         raise FileNotFoundError(f"dehardsub needs a source video in {work_dir}")
+    started = time.perf_counter()
     dest_dir = job_dehardsub_dir(work_dir)
     dest = dest_dir / "clean.mp4"
     meta_path = dest_dir / "dehardsub_meta.json"
+    progress_path = dest_dir / "dehardsub_progress.json"
+    progress_path.unlink(missing_ok=True)
     mode_s = (mode or "auto").strip().lower()
     if mode_s not in DEHARDSUB_MODES:
         mode_s = "auto"
@@ -1716,11 +2007,13 @@ def strip_hardsubs(
             "passes": max_passes,
             "demosaic": bool(demosaic),
             "engine": engine_s,
+            "progress_file": progress_path.name,
         }
     )
     if not report.get("detected") and not force and mode_s not in ("auto",):
         # auto still runs mosaic scan even if hardsub heuristic misses
         report["action"] = "skip"
+        report["elapsed_sec"] = round(time.perf_counter() - started, 3)
         _write_meta(meta_path, report)
         print(
             f"[dehardsub] skip — no burned captions "
@@ -1731,6 +2024,7 @@ def strip_hardsubs(
     # auto: always attempt multipass when forced OR hardsubs detected OR demosaic on
     if mode_s == "auto" and not report.get("detected") and not force and not demosaic:
         report["action"] = "skip"
+        report["elapsed_sec"] = round(time.perf_counter() - started, 3)
         _write_meta(meta_path, report)
         print("[dehardsub] skip — nothing to clean")
         return src, report
@@ -1748,6 +2042,31 @@ def strip_hardsubs(
 
     box: dict[str, int] = hardsub_band_box(width, height, ratio)
     action = "skip"
+    duration_sec = probe_duration_sec(src) or 0.0
+    sparse_hits = [
+        float(row.get("t_sec"))
+        for row in report.get("frames") or []
+        if float(row.get("score") or 0.0) >= 0.28 and row.get("t_sec") is not None
+    ]
+    # detect_hardsubs 只采 5 个点 → 那是“有没有字幕”的存在性信号，不是时间轴。
+    # 真正决定“字幕在哪几秒”要用稠密扫描，否则 5 分钟连排字幕只处理 14 秒。
+    scan = scan_caption_timeline(src, band_ratio=max(0.12, float(ratio)))
+    report["timeline"] = {
+        "frames": scan.get("frames"),
+        "hits": scan.get("hits_n"),
+        "hit_frac": scan.get("hit_frac"),
+        "fps": scan.get("fps"),
+        "reason": scan.get("reason"),
+    }
+    dense_hits = [float(t) for t in (scan.get("hits") or [])]
+    timeline_hits = dense_hits or sparse_hits
+    active_windows = _merge_time_windows(timeline_hits, duration_sec)
+    if active_windows:
+        report["active_windows"] = [{"start": s, "end": e} for s, e in active_windows]
+    covered_sec = sum(max(0.0, end - start) for start, end in active_windows)
+    caption_coverage = (covered_sec / duration_sec) if duration_sec > 0 else 0.0
+    report["caption_coverage"] = round(caption_coverage, 4)
+    report["caption_covered_sec"] = round(covered_sec, 3)
 
     if mode_s == "crop":
         box = hardsub_band_box(width, height, ratio)
@@ -1766,17 +2085,49 @@ def strip_hardsubs(
             src, width, height, mode="band", ratio=ratio, work_dir=work_dir
         )
         box = located["box"]
+        # located box 只覆盖采样帧里出现的字形范围；字幕/弹幕可能横向贴到画面
+        # 右缘（采样帧没盖住就残留，实测右缘 80px 的“生日快乐”漏掉）。
+        # fill 路由本来就是整条底部带处理 → 宽度放宽到全宽，高度仍贴合字形。
+        box = {**box, "x": 1, "w": width - 2}
+        box = _clamp_delogo_box(box, width, height)
         report["box"] = box
         report["box_source"] = located.get("source")
         report["locate"] = {k: located.get(k) for k in ("norm", "hits", "source")}
-        try:
-            _encode_dehardsub_fill(
-                ffmpeg, src, encode_dest, width=width, height=height, box=box
-            )
-            action = "fill"
-        except RuntimeError:
+        if caption_coverage >= DENSE_COVERAGE_FULL:
+            # 字幕几乎全程都在 → “只重编码命中窗口”省不了时间，分段反而漏掉大量画面。
+            # 直接全程 delogo（比纯色 fill 更保背景）。
             _encode_dehardsub_delogo(ffmpeg, src, encode_dest, box=box)
-            action = "delogo_fallback"
+            action = "delogo_full"
+        else:
+            try:
+                if _render_fast_box_segments(
+                    ffmpeg,
+                    src,
+                    encode_dest,
+                    vf=hardsub_delogo_vf_box(box),
+                    report=report,
+                    hot_label="delogo",
+                    hits=timeline_hits,
+                ):
+                    action = "delogo_segments"
+                elif _render_fast_box_segments(
+                    ffmpeg,
+                    src,
+                    encode_dest,
+                    vf=hardsub_fill_filter_box(width, height, box),
+                    report=report,
+                    hot_label="fill",
+                    hits=timeline_hits,
+                ):
+                    action = "fill_segments"
+                else:
+                    _encode_dehardsub_fill(
+                        ffmpeg, src, encode_dest, width=width, height=height, box=box
+                    )
+                    action = "fill"
+            except RuntimeError:
+                _encode_dehardsub_delogo(ffmpeg, src, encode_dest, box=box)
+                action = "delogo_fallback"
     else:
         # auto / vlm / band → multipass hardsub (+ mosaic)
         from visual_cleanup import run_multipass_cleanup
@@ -1795,6 +2146,10 @@ def strip_hardsubs(
                 dehardsub=bool(report.get("detected") or force or mode_s != "auto"),
                 engine=engine_s,
                 demosaic_engine=demosaic_engine_s,
+                polish_residual_floor=float(polish_residual_floor),
+                active_windows=active_windows,
+                dialogue_short_route=str(dialogue_short_route or "auto"),
+                progress_path=progress_path,
             )
             report.update(cleanup)
             box = cleanup.get("box") or box
@@ -1829,6 +2184,7 @@ def strip_hardsubs(
     report["action"] = action
     report["dest"] = dest.name
     report["bytes"] = dest.stat().st_size
+    report["elapsed_sec"] = round(time.perf_counter() - started, 3)
     report["out_size"] = f"{out_wh[0]}x{out_wh[1]}" if out_wh else None
     report["clock"] = inherit_clock(src)
     if "box" not in report:
@@ -2965,6 +3321,58 @@ def _x264_out(
         raise RuntimeError(f"ffmpeg produced empty file: {dest}")
 
 
+def _x264_out_range(
+    ffmpeg: str,
+    src: Path,
+    dest: Path,
+    *,
+    start: float,
+    end: float,
+    vf: str | None,
+    crf: int,
+    audio_k: int = DEFAULT_AUDIO_K,
+) -> None:
+    span = max(0.0, float(end) - float(start))
+    if span <= 0.03:
+        raise RuntimeError(f"invalid ffmpeg range: {start}..{end}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-ss",
+        f"{max(0.0, float(start)):.3f}",
+        "-i",
+        str(src),
+        "-t",
+        f"{span:.3f}",
+    ]
+    if vf:
+        cmd.extend(["-vf", vf])
+    cmd.extend(
+        [
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            str(int(crf)),
+            "-c:a",
+            "aac",
+            "-b:a",
+            f"{int(audio_k)}k",
+            "-movflags",
+            "+faststart",
+            str(dest),
+        ]
+    )
+    _run_ffmpeg(cmd)
+    if not dest.is_file() or dest.stat().st_size < 800:
+        raise RuntimeError(f"ffmpeg range produced empty file: {dest}")
+
+
 def enhance_video(
     src: Path,
     dest: Path,
@@ -3212,8 +3620,26 @@ def run_postproc(
     """Run dehardsub → concat → enhance → compress → remix. Missing steps are skipped."""
     from note_frames import existing_source_video
 
+    started = time.perf_counter()
     opts = normalize_media_opts(media_opts)
     produced: dict[str, Path] = {}
+    stage_timings: dict[str, float] = {}
+
+    def _write_live_status(current_stage: str | None, status: str = "running") -> None:
+        write_media_status(
+            work_dir,
+            {
+                "status": status,
+                "postproc_mode": str(opts.get("postproc_mode") or "balanced"),
+                "enabled": sorted(enabled),
+                "current_stage": current_stage,
+                "produced": {k: v.name for k, v in produced.items()},
+                "stage_timings_sec": stage_timings,
+                "elapsed_sec": round(time.perf_counter() - started, 3),
+            },
+        )
+
+    _write_live_status(None, status="running")
     source = existing_source_video(work_dir)
     if input_video is not None and Path(input_video).is_file():
         working: Path | None = Path(input_video)
@@ -3221,6 +3647,8 @@ def run_postproc(
         working = resolve_working_video(work_dir, input_from=input_from) or source
 
     if "dehardsub" in enabled:
+        stage_started = time.perf_counter()
+        _write_live_status("dehardsub", status="running")
         seed = working if working is not None else source
         if seed is None:
             raise FileNotFoundError(f"dehardsub needs a source video in {work_dir}")
@@ -3234,6 +3662,8 @@ def run_postproc(
             passes=int(opts.get("dehardsub_passes") or DEFAULT_CLEAN_PASSES),
             demosaic=bool(opts.get("dehardsub_demosaic", True)),
             engine=str(opts.get("dehardsub_engine") or DEFAULT_DEHARDSUB_ENGINE),
+            polish_residual_floor=float(opts.get("dehardsub_polish_residual_floor") or 0.012),
+            dialogue_short_route=str(opts.get("dehardsub_dialogue_short_route") or "auto"),
             demosaic_engine=str(
                 opts.get("dehardsub_demosaic_engine") or DEFAULT_DEMOSAIC_ENGINE
             ),
@@ -3241,8 +3671,12 @@ def run_postproc(
         if report.get("action") not in (None, "skip") and cleaned.is_file():
             produced["dehardsub"] = cleaned
             working = cleaned
+        stage_timings["dehardsub"] = round(time.perf_counter() - stage_started, 3)
+        _write_live_status("dehardsub", status="running")
 
     if "concat" in enabled:
+        stage_started = time.perf_counter()
+        _write_live_status("concat", status="running")
         clips = list_clip_mp4s(work_dir)
         if len(clips) < MIN_CONCAT and clip_ranges:
             clips = cut_range_clips(work_dir, clip_ranges, video=working or source)
@@ -3254,8 +3688,12 @@ def run_postproc(
         concat_videos(clips, dest, height=opts["compress_height"] or DEFAULT_COMPRESS_HEIGHT)
         produced["concat"] = dest
         working = dest
+        stage_timings["concat"] = round(time.perf_counter() - stage_started, 3)
+        _write_live_status("concat", status="running")
 
     if "deblur" in enabled:
+        stage_started = time.perf_counter()
+        _write_live_status("deblur", status="running")
         if working is None:
             raise FileNotFoundError(f"deblur needs a source video in {work_dir}")
         # 「去模糊」= 去马赛克 + 超分去模糊。缺 ONNX 时仍保留 demosaic 产物。
@@ -3279,34 +3717,28 @@ def run_postproc(
                     print(f"[postproc] deblur demosaic ok → {pre.name}")
             except Exception as exc:  # noqa: BLE001
                 print(f"[postproc] deblur demosaic skipped ({exc})")
-        try:
-            from deblur_basicvsr import DeblurUnavailable, deblur_video
+        if str(opts.get("postproc_mode") or "balanced") == "fast":
+            from deblur_basicvsr import deblur_video_ffmpeg
 
             dest = job_deblur_dir(work_dir) / "deblurred.mp4"
-            deblur_video(
-                deblur_src,
-                dest,
-                engine=str(opts.get("deblur_engine") or DEFAULT_DEBLUR_ENGINE),
-                max_height=int(opts.get("enhance_max_height") or 720),
-            )
+            deblur_video_ffmpeg(deblur_src, dest, strength=opts["enhance_strength"])
             produced["deblur"] = dest
             working = dest
-        except ImportError:
-            print("[postproc] deblur skipped (module unavailable)")
-            if deblur_src is not working and deblur_src.is_file():
-                # 无超分权重时，至少交出 demosaic 结果
-                dest = job_deblur_dir(work_dir) / "deblurred.mp4"
-                if deblur_src.resolve() != dest.resolve():
-                    import shutil
+        else:
+            try:
+                from deblur_basicvsr import DeblurUnavailable, deblur_video
 
-                    shutil.copy2(deblur_src, dest)
+                dest = job_deblur_dir(work_dir) / "deblurred.mp4"
+                deblur_video(
+                    deblur_src,
+                    dest,
+                    engine=str(opts.get("deblur_engine") or DEFAULT_DEBLUR_ENGINE),
+                    max_height=int(opts.get("enhance_max_height") or 720),
+                )
                 produced["deblur"] = dest
                 working = dest
-        except Exception as exc:  # noqa: BLE001
-            from deblur_basicvsr import DeblurUnavailable  # noqa: F401
-
-            if isinstance(exc, DeblurUnavailable):
-                print(f"[postproc] deblur skipped ({exc})")
+            except ImportError:
+                print("[postproc] deblur skipped (module unavailable)")
                 if deblur_src is not working and deblur_src.is_file():
                     dest = job_deblur_dir(work_dir) / "deblurred.mp4"
                     if deblur_src.resolve() != dest.resolve():
@@ -3315,10 +3747,27 @@ def run_postproc(
                         shutil.copy2(deblur_src, dest)
                     produced["deblur"] = dest
                     working = dest
-            else:
-                raise
+            except Exception as exc:  # noqa: BLE001
+                from deblur_basicvsr import DeblurUnavailable  # noqa: F401
+
+                if isinstance(exc, DeblurUnavailable):
+                    print(f"[postproc] deblur skipped ({exc})")
+                    if deblur_src is not working and deblur_src.is_file():
+                        dest = job_deblur_dir(work_dir) / "deblurred.mp4"
+                        if deblur_src.resolve() != dest.resolve():
+                            import shutil
+
+                            shutil.copy2(deblur_src, dest)
+                        produced["deblur"] = dest
+                        working = dest
+                else:
+                    raise
+        stage_timings["deblur"] = round(time.perf_counter() - stage_started, 3)
+        _write_live_status("deblur", status="running")
 
     if "enhance" in enabled:
+        stage_started = time.perf_counter()
+        _write_live_status("enhance", status="running")
         if working is None:
             raise FileNotFoundError(f"enhance needs a source video in {work_dir}")
         dest = job_enhance_dir(work_dir) / "enhanced.mp4"
@@ -3330,8 +3779,12 @@ def run_postproc(
         )
         produced["enhance"] = dest
         working = dest
+        stage_timings["enhance"] = round(time.perf_counter() - stage_started, 3)
+        _write_live_status("enhance", status="running")
 
     if "compress" in enabled:
+        stage_started = time.perf_counter()
+        _write_live_status("compress", status="running")
         if working is None:
             raise FileNotFoundError(f"compress needs a source video in {work_dir}")
         dest = job_compress_dir(work_dir) / "compressed.mp4"
@@ -3343,8 +3796,12 @@ def run_postproc(
         )
         produced["compress"] = dest
         working = dest
+        stage_timings["compress"] = round(time.perf_counter() - stage_started, 3)
+        _write_live_status("compress", status="running")
 
     if "remix" in enabled:
+        stage_started = time.perf_counter()
+        _write_live_status("remix", status="running")
         body = resolve_remix_body(work_dir, working=working)
         if body is None:
             raise FileNotFoundError(f"remix needs a source video in {work_dir}")
@@ -3366,7 +3823,21 @@ def run_postproc(
                     pass
         remix_vertical_notes(work_dir, dest, body=body, media_opts=remix_opts)
         produced["remix"] = dest
+        stage_timings["remix"] = round(time.perf_counter() - stage_started, 3)
+        _write_live_status("remix", status="running")
 
+    write_media_status(
+        work_dir,
+        {
+            "status": "done",
+            "postproc_mode": str(opts.get("postproc_mode") or "balanced"),
+            "enabled": sorted(enabled),
+            "current_stage": None,
+            "produced": {k: v.name for k, v in produced.items()},
+            "stage_timings_sec": stage_timings,
+            "elapsed_sec": round(time.perf_counter() - started, 3),
+        },
+    )
     return produced
 
 

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -520,6 +522,168 @@ def sample_validate_video(
     }
 
 
+def _window_coverage(windows: list[tuple[float, float]]) -> float:
+    return sum(max(0.0, float(end) - float(start)) for start, end in windows)
+
+
+def _encode_sttn_active_windows(
+    src: Path,
+    dest: Path,
+    box: dict[str, int],
+    *,
+    active_windows: list[tuple[float, float]],
+    mosaic_boxes: list[dict[str, int]] | None = None,
+    dialogue_short_route: str = "auto",
+    progress_path: Path | None = None,
+) -> dict[str, Any] | None:
+    """Run STTN only on active subtitle windows, then concat with keep segments."""
+    from sttn_inpaint import encode_sttn as _encode_sttn_impl
+
+    mops = _media()
+    src = Path(src)
+    dest = Path(dest)
+    duration = float(mops.probe_duration_sec(src) or 0.0)
+    if duration <= 0.1 or not active_windows or mosaic_boxes:
+        return None
+    windows = [
+        (max(0.0, float(start)), min(duration, float(end)))
+        for start, end in active_windows
+        if float(end) - float(start) > 0.05
+    ]
+    covered = _window_coverage(windows)
+    if not windows or covered >= duration * 0.85:
+        return None
+    ffmpeg = mops.find_ffmpeg()
+    seg_dir = dest.parent / "_sttn_segments"
+    seg_dir.mkdir(parents=True, exist_ok=True)
+    for old in seg_dir.glob("*.mp4"):
+        old.unlink(missing_ok=True)
+    pieces: list[Path] = []
+    seg_stats: list[dict[str, Any]] = []
+    cursor = 0.0
+    idx = 0
+    if progress_path is not None:
+        mops._write_meta(
+            progress_path,
+            {
+                "kind": "dehardsub_active_windows",
+                "status": "running",
+                "window_count": len(windows),
+                "window_coverage_sec": round(covered, 3),
+                "window_total_sec": round(duration, 3),
+                "completed_windows": 0,
+                "current_window": None,
+                "segments": [],
+            },
+        )
+    for start, end in windows:
+        if start > cursor + 0.05:
+            keep = seg_dir / f"{idx:03d}_keep.mp4"
+            mops._x264_out_range(ffmpeg, src, keep, start=cursor, end=start, vf=None, crf=23)
+            pieces.append(keep)
+            idx += 1
+        hot_src = seg_dir / f"{idx:03d}_hot_src.mp4"
+        hot_out = seg_dir / f"{idx:03d}_hot_clean.mp4"
+        mops._x264_out_range(ffmpeg, src, hot_src, start=start, end=end, vf=None, crf=23)
+        route = (dialogue_short_route or "auto").strip().lower()
+        forced_route = None
+        if route in ("flat", "tiles") and (end - start) <= 4.0:
+            forced_route = route
+        print(
+            f"[cleanup] active-window {len(seg_stats)+1}/{len(windows)} "
+            f"start={start:.3f} end={end:.3f} dur={end-start:.3f} "
+            f"route={forced_route or 'auto'}",
+            flush=True,
+        )
+        seg_started = time.perf_counter()
+        if progress_path is not None:
+            mops._write_meta(
+                progress_path,
+                {
+                    "kind": "dehardsub_active_windows",
+                    "status": "running",
+                    "window_count": len(windows),
+                    "window_coverage_sec": round(covered, 3),
+                    "window_total_sec": round(duration, 3),
+                    "completed_windows": len(seg_stats),
+                    "current_window": {
+                        "index": len(seg_stats) + 1,
+                        "start": round(start, 3),
+                        "end": round(end, 3),
+                        "duration": round(end - start, 3),
+                        "route": forced_route or "auto",
+                    },
+                    "segments": seg_stats,
+                },
+            )
+        env_prev = os.environ.get("VITUAL_STTN_FORCE")
+        if route == "flat" and (end - start) <= 4.0:
+            os.environ["VITUAL_STTN_FORCE"] = "flat"
+        elif route == "tiles" and (end - start) <= 4.0:
+            os.environ["VITUAL_STTN_FORCE"] = "tiles"
+        try:
+            stats = _encode_sttn_impl(hot_src, hot_out, box, mosaic_boxes=None)
+        finally:
+            if route in ("flat", "tiles") and (end - start) <= 4.0:
+                if env_prev is None:
+                    os.environ.pop("VITUAL_STTN_FORCE", None)
+                else:
+                    os.environ["VITUAL_STTN_FORCE"] = env_prev
+        stats = dict(stats)
+        stats["start"] = round(start, 3)
+        stats["end"] = round(end, 3)
+        stats["elapsed_sec"] = round(time.perf_counter() - seg_started, 3)
+        if forced_route is not None:
+            stats["forced_route"] = forced_route
+        seg_stats.append(stats)
+        if progress_path is not None:
+            mops._write_meta(
+                progress_path,
+                {
+                    "kind": "dehardsub_active_windows",
+                    "status": "running",
+                    "window_count": len(windows),
+                    "window_coverage_sec": round(covered, 3),
+                    "window_total_sec": round(duration, 3),
+                    "completed_windows": len(seg_stats),
+                    "current_window": None,
+                    "segments": seg_stats,
+                },
+            )
+        pieces.append(hot_out)
+        idx += 1
+        cursor = end
+    if cursor < duration - 0.05:
+        tail = seg_dir / f"{idx:03d}_keep.mp4"
+        mops._x264_out_range(ffmpeg, src, tail, start=cursor, end=duration, vf=None, crf=23)
+        pieces.append(tail)
+    mops._concat_demuxer(pieces, dest)
+    if progress_path is not None:
+        mops._write_meta(
+            progress_path,
+            {
+                "kind": "dehardsub_active_windows",
+                "status": "done",
+                "window_count": len(windows),
+                "window_coverage_sec": round(covered, 3),
+                "window_total_sec": round(duration, 3),
+                "completed_windows": len(seg_stats),
+                "current_window": None,
+                "segments": seg_stats,
+            },
+        )
+    return {
+        "engine": "sttn_segments",
+        "segments": seg_stats,
+        "window_count": len(windows),
+        "window_coverage_sec": round(covered, 3),
+        "window_total_sec": round(duration, 3),
+        "frames": int(sum(int(s.get("frames") or 0) for s in seg_stats)),
+        "device": seg_stats[0].get("device") if seg_stats else "cpu",
+        "bytes": dest.stat().st_size if dest.is_file() else 0,
+    }
+
+
 def _collect_mosaic_regions(video: Path, *, samples: int = 5) -> list[dict[str, Any]]:
     import cv2
 
@@ -875,7 +1039,13 @@ def encode_lama_boxes(
         cmd.append("-an")
     cmd.extend([
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-        "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-shortest", str(writing),
+        "-pix_fmt", "yuv420p",
+        # Match sttn_inpaint: fMP4 + flush so mid-run writing files open in players.
+        "-g", str(max(12, min(60, int(round(fps)) or 25))),
+        "-keyint_min", str(max(12, min(60, int(round(fps)) or 25))),
+        "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
+        "-flush_packets", "1",
+        "-shortest", str(writing),
     ])
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     assert proc.stdin is not None
@@ -951,9 +1121,9 @@ def encode_lama_boxes(
             pass
         raise RuntimeError(f"lama encode failed ({proc.returncode}): {err}")
     if writing.resolve() != dest.resolve():
-        if dest.is_file():
-            dest.unlink(missing_ok=True)
-        writing.replace(dest)
+        from sttn_inpaint import _finalize_writing_mp4
+
+        _finalize_writing_mp4(writing, dest)
     print(
         f"[lama] frames={frames_done} lama_hits={lama_frames} boxes={len(boxes_n)} mode={mode_s}",
         flush=True,
@@ -983,6 +1153,10 @@ def run_multipass_cleanup(
     engine: str = "sttn",
     demosaic_engine: str = "opencv",
     mosaic_boxes: list[dict[str, int]] | None = None,
+    polish_residual_floor: float = DEFAULT_RESIDUAL_OK,
+    active_windows: list[tuple[float, float]] | None = None,
+    dialogue_short_route: str = "auto",
+    progress_path: Path | None = None,
 ) -> dict[str, Any]:
     """Locate caption box → STTN (default) or OpenCV fill; optional mosaic pass."""
     src = Path(src)
@@ -1275,12 +1449,26 @@ def run_multipass_cleanup(
                     if (env_prev or "auto").strip().lower() == "auto":
                         _os.environ["VITUAL_STTN_FORCE"] = "tiles"
                 try:
-                    used = encode_sttn(
-                        current,
-                        out_i,
-                        box_run,
-                        mosaic_boxes=(mosaic_boxes if i == 0 else None),
+                    used = (
+                        _encode_sttn_active_windows(
+                            current,
+                            out_i,
+                            box_run,
+                            active_windows=list(active_windows or []),
+                            mosaic_boxes=(mosaic_boxes if i == 0 else None),
+                            dialogue_short_route=dialogue_short_route,
+                            progress_path=progress_path,
+                        )
+                        if role == "dialogue"
+                        else None
                     )
+                    if used is None:
+                        used = encode_sttn(
+                            current,
+                            out_i,
+                            box_run,
+                            mosaic_boxes=(mosaic_boxes if i == 0 else None),
+                        )
                     used = dict(used)
                     used["role"] = role
                     used["box"] = box_run
@@ -1308,10 +1496,14 @@ def run_multipass_cleanup(
                 if (roles[i] if i < len(roles) else "dialogue") in polish_roles
             ]
             polish = None
+            polish_probe = None
             if polish_boxes:
-                polish = _try_lama(
-                    current, sttn_out, polish_boxes, "polish", mask_mode="residual"
-                )
+                polish_probe = sample_validate_video(current, polish_boxes, samples=5, ref_video=src)
+                polish_score = float(polish_probe.get("hardsub") or polish_probe.get("combined") or 0.0)
+                if polish_score >= max(0.0, float(polish_residual_floor)):
+                    polish = _try_lama(
+                        current, sttn_out, polish_boxes, "polish", mask_mode="residual"
+                    )
             if polish is None:
                 if current.resolve() != sttn_out.resolve():
                     import shutil
@@ -1325,6 +1517,9 @@ def run_multipass_cleanup(
                 "regions": len(boxes_run),
                 "passes": pass_stats,
                 "mode": "sttn+lama",
+                "polish_probe": polish_probe,
+                "polish_residual_floor": float(polish_residual_floor),
+                "polish_applied": bool(polish is not None),
                 "frames": pass_stats[-1].get("frames") if pass_stats else 0,
                 "device": pass_stats[0].get("device") if pass_stats else "cpu",
                 "bytes": sttn_out.stat().st_size if sttn_out.is_file() else 0,

@@ -29,15 +29,9 @@ class DemosaicUnavailable(RuntimeError):
 
 
 def _ort_providers() -> list:
-    try:
-        import onnxruntime as ort
+    from ort_runtime import ort_providers
 
-        avail = ort.get_available_providers()
-        if "CUDAExecutionProvider" in avail:
-            return ["CUDAExecutionProvider", "CPUExecutionProvider"]
-        return ["CPUExecutionProvider"]
-    except Exception:
-        return ["CPUExecutionProvider"]
+    return ort_providers()
 
 
 def _load_session():
@@ -49,6 +43,9 @@ def _load_session():
     try:
         import onnxruntime as ort
 
+        from ort_runtime import preload_ort_cuda_dlls
+
+        preload_ort_cuda_dlls()
         so = ort.SessionOptions()
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         _SESSION = ort.InferenceSession(
