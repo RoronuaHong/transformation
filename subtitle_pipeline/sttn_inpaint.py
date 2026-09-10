@@ -163,6 +163,8 @@ def find_black_caption_box(
 
     Detection uses midtone gaps: caption plates are mostly near-black fill plus
     bright glyph strokes, so mid-gray scene pixels are scarce inside the plate.
+    After a candidate is found, height is re-cropped to the dark+stroke band so
+    seed-tall empty bars do not win on area alone.
     """
     import cv2
     import numpy as np
@@ -179,7 +181,9 @@ def find_black_caption_box(
     gray = cv2.cvtColor(bgr[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY).astype(np.float32)
     rh, rw = gray.shape[:2]
     mid = (gray >= 48.0) & (gray <= 160.0)
-    row_ok = mid.mean(axis=1) < 0.40
+    # Prefer rows that are plate-like (few midtones) AND mostly dark/bright ink.
+    row_darkish = ((gray < 55.0) | (gray > 150.0)).mean(axis=1) > 0.55
+    row_ok = (mid.mean(axis=1) < 0.40) & row_darkish
 
     def _runs(mask: Any, min_len: int) -> list[tuple[int, int]]:
         out: list[tuple[int, int]] = []
@@ -196,6 +200,9 @@ def find_black_caption_box(
         return out
 
     row_runs = _runs(row_ok, min_h)
+    if not row_runs:
+        # Fallback: midtone-only (older heuristic) when darkish gate is too strict.
+        row_runs = _runs(mid.mean(axis=1) < 0.40, min_h)
     if not row_runs:
         return None
 
@@ -234,13 +241,15 @@ def find_black_caption_box(
                 continue
             if stroke_frac < 0.002 and h < int(0.55 * rh):
                 continue
+            # Prefer compact plates: area alone re-selects the full seed height.
+            height_pen = 1.0 / (1.0 + 0.012 * max(0, h - 72))
             area = float(h * w)
             cx = 0.5 * float(cx0 + cx1)
             center_bonus = 1.0 + 0.45 * (
                 1.0 - abs(cx - seed_cx) / max(1.0, seed_cx)
             )
             ink_bonus = 1.0 + 60.0 * stroke_frac
-            score = area * dark_frac * ink_bonus * center_bonus
+            score = area * dark_frac * ink_bonus * center_bonus * height_pen
             if score > best_score:
                 best_score = score
                 best = {
@@ -248,6 +257,34 @@ def find_black_caption_box(
                     "y": int(y0 + ry0),
                     "w": w,
                     "h": h,
+                }
+    if best is None:
+        return None
+
+    # Secondary crop: keep rows that are dark plate or glyph strokes.
+    by0 = int(best["y"]) - y0
+    bx0 = int(best["x"]) - x0
+    by1 = by0 + int(best["h"])
+    bx1 = bx0 + int(best["w"])
+    plate = gray[by0:by1, bx0:bx1]
+    if plate.size:
+        dark_r = (plate < 55.0).mean(axis=1)
+        bright_r = (plate > 140.0).mean(axis=1)
+        keep_r = (dark_r > 0.45) | (bright_r > 0.01)
+        idxs = np.where(keep_r)[0]
+        if idxs.size >= min_h:
+            # Drop sparse leading/trailing midtone scene rows.
+            top = int(idxs[0])
+            bot = int(idxs[-1]) + 1
+            pad = 4
+            top = max(0, top - pad)
+            bot = min(plate.shape[0], bot + pad)
+            if bot - top >= min_h:
+                best = {
+                    "x": int(best["x"]),
+                    "y": int(y0 + by0 + top),
+                    "w": int(best["w"]),
+                    "h": int(bot - top),
                 }
     return best
 
@@ -348,14 +385,17 @@ def erase_glyphs_on_black_bar(
 
     roi = out[y0:y1, x0:x1]
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY).astype(np.float32)
-    bright = gray > 170.0
+    bright = gray > 140.0
+    aa = (gray > 55.0) & (gray <= 140.0)
     dark_soft = gray < 50.0
     dark_f = cv2.blur(dark_soft.astype(np.float32), (41, 17))
     ink = bright & (dark_f > 0.55)
-    if not bool(ink.any()):
+    fringe = aa & (dark_f > 0.60)
+    kill = ink | fringe
+    if not bool(kill.any()):
         return out, 0
-    glyph_kill = cv2.dilate(ink.astype(np.uint8) * 255, np.ones((3, 3), np.uint8), 2)
-    glyph_kill = cv2.bitwise_and(glyph_kill, (dark_f > 0.55).astype(np.uint8) * 255)
+    glyph_kill = cv2.dilate(kill.astype(np.uint8) * 255, np.ones((3, 3), np.uint8), 2)
+    glyph_kill = cv2.bitwise_and(glyph_kill, (dark_f > 0.50).astype(np.uint8) * 255)
     plate = glyph_kill > 0
     n = int(plate.sum())
     if n <= 0:
@@ -472,7 +512,7 @@ def classify_dialogue_route(
             if caption_band_is_black_bar(fr, seed):
                 black_hits += 1
                 flat_hits += 1
-                found_boxes.append(seed)
+                # Do NOT append the oversized seed — that re-inflates median height.
                 continue
             if band_is_flat(fr, seed):
                 flat_hits += 1
@@ -482,20 +522,25 @@ def classify_dialogue_route(
     need = max(2, int(round(0.55 * max(1, checked))))
     tight = seed
     if found_boxes:
-        xs = sorted(b["x"] for b in found_boxes)
-        ys = sorted(b["y"] for b in found_boxes)
-        x2s = sorted(b["x"] + b["w"] for b in found_boxes)
-        y2s = sorted(b["y"] + b["h"] for b in found_boxes)
+        # Keep locate WIDTH — median X from floating caption plates clips
+        # left/right glyphs on other frames. Only tighten Y/H from plates.
+        ys0 = sorted(int(b["y"]) for b in found_boxes)
+        ys1 = sorted(int(b["y"]) + int(b["h"]) for b in found_boxes)
         mid = len(found_boxes) // 2
-        x0, y0, x1, y1 = xs[mid], ys[mid], x2s[mid], y2s[mid]
-        cand = {
-            "x": int(x0),
-            "y": int(y0),
-            "w": int(max(1, x1 - x0)),
-            "h": int(max(1, y1 - y0)),
-        }
-        if float(cand["w"]) / float(max(1, cand["h"])) >= 2.0:
-            tight = cand
+        y0 = int(ys0[mid])
+        y1 = int(ys1[mid])
+        # Small pad so glyph tops/bottoms are not clipped.
+        pad = 8
+        y0 = max(int(seed["y"]), y0 - pad)
+        y1 = min(int(seed["y"]) + int(seed["h"]), y1 + pad)
+        h = max(1, y1 - y0)
+        if h >= 18:
+            tight = {
+                "x": int(seed["x"]),
+                "y": int(y0),
+                "w": int(seed["w"]),
+                "h": int(h),
+            }
 
     if black_hits >= need:
         route = "glyph_black"
@@ -514,16 +559,111 @@ def classify_dialogue_route(
     }
 
 
+def _glyphfill_batch_size(height: int, width: int) -> int:
+    env = (os.environ.get("VITUAL_GLYPHFILL_BATCH") or "").strip()
+    if env.isdigit():
+        return max(1, min(32, int(env)))
+    px = max(1, int(height) * int(width))
+    if px >= 1920 * 1080:
+        return 8
+    if px >= 1280 * 720:
+        return 12
+    return 16
+
+
+def _resolve_glyphfill_plate(
+    frame_bgr: Any,
+    seed_box: dict[str, int],
+    *,
+    height: int,
+    width: int,
+) -> dict[str, int]:
+    """ROI for glyphfill: keep seed width; optionally tighten Y from plate.
+
+    ``find_black_caption_box`` often returns a *centered floating* plate that is
+    narrower than the locate seed. Using that width drops left/right captions
+    on other frames. Width stays on the seed; Y/H may tighten onto dark rows.
+    """
+    seed_x = max(0, int(seed_box["x"]))
+    seed_y = max(0, int(seed_box["y"]))
+    seed_w = max(1, int(seed_box["w"]))
+    seed_h = max(1, int(seed_box["h"]))
+    y0, x0 = seed_y, seed_x
+    y1 = min(height, seed_y + seed_h)
+    x1 = min(width, seed_x + seed_w)
+    found = find_black_caption_box(frame_bgr, seed_box)
+    if found is not None:
+        fy0 = max(0, int(found["y"]))
+        fy1 = min(height, fy0 + max(1, int(found["h"])))
+        # Only accept height tighten when it still covers most of the seed band
+        # or is a wide plate; never shrink X/W.
+        if (fy1 - fy0) >= max(24, int(0.45 * seed_h)):
+            pad = 8
+            y0 = max(seed_y, fy0 - pad)
+            y1 = min(seed_y + seed_h, fy1 + pad)
+    return {
+        "x": int(x0),
+        "y": int(y0),
+        "w": int(max(1, x1 - x0)),
+        "h": int(max(1, y1 - y0)),
+    }
+
+def _glyph_black_kill_masks_torch(
+    frames_bgr: Any,
+    plate: dict[str, int],
+    device: Any,
+) -> tuple[Any, Any]:
+    """Batched GPU ink+AA kill masks; thresholds match the CPU OpenCV path."""
+    import torch
+    import torch.nn.functional as F
+
+    t = torch.from_numpy(frames_bgr).to(device=device, dtype=torch.float32)
+    gray = 0.114 * t[..., 0] + 0.587 * t[..., 1] + 0.299 * t[..., 2]
+    y0 = int(plate["y"])
+    x0 = int(plate["x"])
+    y1 = y0 + int(plate["h"])
+    x1 = x0 + int(plate["w"])
+    roi = gray[:, y0:y1, x0:x1]
+    dark = (roi < 55.0).to(dtype=torch.float32)
+    dark_f = F.avg_pool2d(
+        dark.unsqueeze(1), kernel_size=(41, 17), stride=1, padding=(20, 8)
+    ).squeeze(1)
+    bright = roi > 110.0
+    aa = (roi > 45.0) & (roi <= 110.0)
+    ink = bright & (dark_f > 0.40)
+    fringe = aa & (dark_f > 0.55)
+    kill = (ink | fringe).to(dtype=torch.float32)
+    for _ in range(3):
+        kill = F.max_pool2d(
+            kill.unsqueeze(1), kernel_size=5, stride=1, padding=2
+        ).squeeze(1)
+    kill = kill * (dark_f > 0.35).to(dtype=torch.float32)
+    # Opaque plate rows: any non-black pixel on a near-black row is glyph/AA.
+    row_dark = dark.mean(dim=-1, keepdim=True)  # [N,H,1]
+    plate_row = row_dark > 0.55
+    on_plate = plate_row & (roi > 35.0) & (dark_f > 0.50)
+    kill = torch.maximum(kill, on_plate.to(dtype=torch.float32))
+    kill_b = kill > 0.5
+    counts = kill_b.reshape(kill_b.shape[0], -1).sum(dim=1)
+    full = torch.zeros(
+        (frames_bgr.shape[0], frames_bgr.shape[1], frames_bgr.shape[2]),
+        device=device,
+        dtype=torch.bool,
+    )
+    full[:, y0:y1, x0:x1] = kill_b
+    return full, counts
+
+
 def encode_glyph_black_fill(
     src: Any,
     dest: Any,
     seed_box: dict[str, int],
 ) -> dict[str, Any]:
-    """VSR-style black caption bar cleanup: paint *glyph strokes* solid black.
+    """VSR-style black caption bar cleanup: paint glyph strokes solid black.
 
-    For opaque black letterbox/caption plates the recoverable background *is*
-    black. Whole-box STTN/crop/fill look like paint; Temporal TBE often leaves
-    glyph ghosts when text is dense. Glyph-only solid fill matches the plate.
+    Default: CUDA batched ink/AA masks (same thresholds as the former per-frame
+    OpenCV loop). Falls back to CPU batch if CUDA is unavailable. RapidOCR is
+    skipped on this route -- opaque black plates are covered by bright-on-dark ink.
     """
     from pathlib import Path
 
@@ -543,58 +683,110 @@ def encode_glyph_black_fill(
     writing = dest_p.with_name(f"_{dest_p.stem}_glyphfill_writing.mp4")
     proc = _open_ffmpeg_writer(src_p, writing, width, height, fps)
     assert proc.stdin is not None
+
+    use_cuda = False
+    device = None
+    try:
+        import torch
+
+        use_cuda = bool(torch.cuda.is_available())
+        if use_cuda:
+            device = torch.device("cuda:0")
+            torch.cuda.empty_cache()
+    except Exception:
+        use_cuda = False
+        device = None
+
+    batch_n = _glyphfill_batch_size(height, width)
+    if not use_cuda:
+        batch_n = max(1, min(4, batch_n))
     frames = 0
     touched = 0
     painted_px = 0
-    try:
-        while True:
-            ok, fr = cap.read()
-            if not ok:
-                break
-            mask = glyph_mask_hybrid(fr, seed_box)
-            # Tighten to opaque plate when possible — seed locate boxes often
-            # include a strip of food above the bar.
-            found = find_black_caption_box(fr, seed_box)
-            work = found if found is not None else seed_box
-            aspect = float(work["w"]) / float(max(1, work["h"]))
-            if found is None or aspect < 2.0:
-                work = seed_box
-            y0 = max(0, int(work["y"]))
-            x0 = max(0, int(work["x"]))
-            y1 = min(height, y0 + max(1, int(work["h"])))
-            x1 = min(width, x0 + max(1, int(work["w"])))
-            # Restrict OCR mask to the plate; add bright-on-dark ink fallback.
-            plate = np.zeros(fr.shape[:2], dtype=np.uint8)
-            plate[y0:y1, x0:x1] = 255
-            mask = cv2.bitwise_and(mask, plate)
-            roi = fr[y0:y1, x0:x1]
-            if roi.size:
+    plate: dict[str, int] | None = None
+    plate_refresh = max(
+        30, int(os.environ.get("VITUAL_GLYPHFILL_PLATE_REFRESH", "60") or 60)
+    )
+
+    def _flush_batch(buf: list[Any]) -> None:
+        nonlocal frames, touched, painted_px, plate
+        if not buf:
+            return
+        arr = np.stack(buf, axis=0)
+        if plate is None:
+            plate = _resolve_glyphfill_plate(
+                buf[0], seed_box, height=height, width=width
+            )
+        if use_cuda and device is not None:
+            import torch
+
+            with torch.no_grad():
+                kill, counts = _glyph_black_kill_masks_torch(arr, plate, device)
+                kill_cpu = kill.detach().cpu().numpy()
+                counts_cpu = counts.detach().cpu().numpy()
+                del kill, counts
+        else:
+            kill_cpu = np.zeros(arr.shape[:3], dtype=bool)
+            counts_cpu = np.zeros((arr.shape[0],), dtype=np.int64)
+            y0, x0 = int(plate["y"]), int(plate["x"])
+            y1, x1 = y0 + int(plate["h"]), x0 + int(plate["w"])
+            for i in range(arr.shape[0]):
+                roi = arr[i, y0:y1, x0:x1]
                 gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY).astype(np.float32)
-                bright = gray > 155.0
                 dark_f = cv2.blur((gray < 55.0).astype(np.float32), (41, 17))
-                ink = bright & (dark_f > 0.50)
-                if bool(ink.any()):
-                    ink_u8 = cv2.dilate(
-                        ink.astype(np.uint8) * 255, np.ones((5, 5), np.uint8), 2
+                bright = gray > 140.0
+                aa = (gray > 55.0) & (gray <= 140.0)
+                kill = (bright & (dark_f > 0.45)) | (aa & (dark_f > 0.60))
+                if bool(kill.any()):
+                    kill_u8 = cv2.dilate(
+                        kill.astype(np.uint8) * 255, np.ones((5, 5), np.uint8), 2
                     )
-                    # Never paint midtone food: keep only high dark support.
-                    ink_u8 = cv2.bitwise_and(
-                        ink_u8, (dark_f > 0.45).astype(np.uint8) * 255
+                    kill_u8 = cv2.bitwise_and(
+                        kill_u8, (dark_f > 0.40).astype(np.uint8) * 255
                     )
-                    mask[y0:y1, x0:x1] = np.maximum(mask[y0:y1, x0:x1], ink_u8)
-            n_px = int((mask > 0).sum())
+                    km = kill_u8 > 0
+                    kill_cpu[i, y0:y1, x0:x1] = km
+                    counts_cpu[i] = int(km.sum())
+        for i in range(arr.shape[0]):
+            fr = arr[i]
+            n_px = int(counts_cpu[i])
             if n_px > 0:
                 fr = fr.copy()
-                fr[mask > 0] = (0, 0, 0)
+                fr[kill_cpu[i]] = (0, 0, 0)
                 painted_px += n_px
                 touched += 1
             proc.stdin.write(np.ascontiguousarray(fr).tobytes())
             frames += 1
             if n and frames % 60 == 0:
                 print(
-                    f"[glyphfill] wrote {frames}/{n} touched={touched} px={painted_px}",
+                    f"[glyphfill] wrote {frames}/{n} touched={touched} px={painted_px} "
+                    f"device={'cuda' if use_cuda else 'cpu'} batch={batch_n}",
                     flush=True,
                 )
+            if frames % plate_refresh == 0:
+                plate = _resolve_glyphfill_plate(
+                    buf[min(i, len(buf) - 1)],
+                    seed_box,
+                    height=height,
+                    width=width,
+                )
+
+    print(
+        f"[glyphfill] start device={'cuda' if use_cuda else 'cpu'} "
+        f"batch={batch_n} box={seed_box}",
+        flush=True,
+    )
+    try:
+        buf: list[Any] = []
+        while True:
+            ok, fr = cap.read()
+            if not ok:
+                break
+            buf.append(fr)
+            if len(buf) >= batch_n:
+                _flush_batch(buf)
+                buf = []
+        _flush_batch(buf)
     except Exception:
         proc.kill()
         raise
@@ -604,6 +796,13 @@ def encode_glyph_black_fill(
             proc.stdin.close()
         except Exception:
             pass
+        if use_cuda:
+            try:
+                import torch
+
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
     stderr = proc.communicate(timeout=300)[1]
     if proc.returncode != 0 or frames < 1:
         err = (stderr or b"").decode("utf-8", errors="replace")[:400]
@@ -611,13 +810,19 @@ def encode_glyph_black_fill(
     _finalize_writing_mp4(writing, dest_p)
     return {
         "engine": "glyphfill",
-        "mode": "glyph_solid_black",
+        "mode": "glyph_solid_black_gpu" if use_cuda else "glyph_solid_black",
+        "device": "cuda" if use_cuda else "cpu",
+        "batch": int(batch_n),
         "frames": frames,
         "filled_frames": touched,
         "painted_px": painted_px,
         "bytes": dest_p.stat().st_size if dest_p.is_file() else 0,
         "seed_box": {k: int(seed_box[k]) for k in ("x", "y", "w", "h")},
+        "plate_box": (
+            {k: int(plate[k]) for k in ("x", "y", "w", "h")} if plate else None
+        ),
     }
+
 
 
 def encode_black_caption_fill(

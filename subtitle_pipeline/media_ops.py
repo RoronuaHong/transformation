@@ -1061,12 +1061,17 @@ def expand_dialogue_box_full_line(
         "w": min(width, max(xs1) + pad_x) - max(0, min(xs0) - pad_x),
         "h": min(height, max(ys1) + pad_y) - max(y_lo, min(ys0) - pad_y),
     }
-    # Merge with seed so we never shrink below a reasonable seed.
+    # Expand *width* with the seed so long lines aren't clipped; keep glyph height
+    # (merging seed Y re-inflates tall locate bands into STTN/glyph routes).
     sx, sy, sw, sh = int(seed["x"]), int(seed["y"]), int(seed["w"]), int(seed["h"])
     x0 = min(box["x"], sx)
-    y0 = min(box["y"], sy)
     x1 = max(box["x"] + box["w"], sx + sw)
-    y1 = max(box["y"] + box["h"], sy + sh)
+    y0 = int(box["y"])
+    y1 = int(box["y"] + box["h"])
+    # If glyph height is oddly short vs seed, allow a little downward growth only.
+    seed_bottom = sy + sh
+    if seed_bottom > y1 and (seed_bottom - y1) <= max(24, sh // 4):
+        y1 = seed_bottom
     merged = {
         "x": max(0, x0 - 6),
         "y": max(y_lo, y0 - 4),
@@ -1074,7 +1079,7 @@ def expand_dialogue_box_full_line(
         "h": min(height, y1 + 8) - max(y_lo, y0 - 4),
     }
     return clamp_hardsub_box(
-        merged, width, height, zone="bottom", max_h_ratio=0.18, max_h_px=190
+        merged, width, height, zone="bottom", max_h_ratio=0.14, max_h_px=160
     )
 
 

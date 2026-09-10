@@ -27,7 +27,7 @@ module.exports = {
     {
       name: "vitual-dehardsub-gpu",
       script: py,
-      args: "-u _run_BV1Sqgp6kEPN_gpu.py",
+      args: `-u "${path.join(pipeline, "_run_BV1Sqgp6kEPN_gpu.py")}"`,
       interpreter: "none",
       cwd: pipeline,
       instances: 1,
@@ -48,6 +48,7 @@ module.exports = {
         PYTHONUNBUFFERED: "1",
         VITUAL_REQUIRE_GPU: "1",
         VITUAL_ORT_THREADS: "4",
+        VITUAL_GLYPHFILL_BATCH: "8",
       },
     },
   ],

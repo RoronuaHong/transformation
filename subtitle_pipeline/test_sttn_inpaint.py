@@ -281,7 +281,9 @@ def test_classify_dialogue_route_black_plate(tmp_path: Path) -> None:
     info = classify_dialogue_route(src, seed, samples=5)
     assert info["ok"]
     assert info["route"] == "glyph_black"
-    assert info["box"]["w"] < seed["w"]
+    # Width stays on the locate seed so left/right glyphs are not clipped.
+    assert info["box"]["w"] == seed["w"]
+    assert info["box"]["x"] == seed["x"]
     assert info["box"]["h"] <= seed["h"]
 
 
@@ -346,6 +348,44 @@ def test_find_black_caption_box_tightens_centered_plate() -> None:
     assert found["x"] + found["w"] <= 330
     assert found["h"] >= 20
     assert found["w"] < seed["w"]
+    # Must crop height off the oversized seed (scene above the plate).
+    assert found["h"] < seed["h"]
+    assert found["y"] >= 180
+
+
+def test_glyph_black_kill_masks_torch_matches_cpu() -> None:
+    import cv2
+    import numpy as np
+    import torch
+
+    from sttn_inpaint import _glyph_black_kill_masks_torch
+
+    if not torch.cuda.is_available():
+        return
+    frame = np.zeros((120, 200, 3), dtype=np.uint8)
+    frame[:] = (90, 100, 110)
+    frame[70:110, 20:180] = (8, 8, 8)
+    cv2.putText(
+        frame,
+        "Hi",
+        (40, 100),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1.2,
+        (245, 245, 245),
+        2,
+        cv2.LINE_AA,
+    )
+    plate = {"x": 20, "y": 70, "w": 160, "h": 40}
+    batch = np.stack([frame, frame], axis=0)
+    kill, counts = _glyph_black_kill_masks_torch(
+        batch, plate, torch.device("cuda:0")
+    )
+    kill_np = kill.detach().cpu().numpy()
+    assert int(counts[0].item()) > 50
+    # Scene midtones above the plate must stay unmasked.
+    assert not bool(kill_np[0, 30, 100])
+    # White stroke on plate should be masked.
+    assert bool(kill_np[0, 95, 55]) or bool(kill_np[0].any())
 
 
 def test_erase_glyphs_on_black_bar_clears_puttext() -> None:
