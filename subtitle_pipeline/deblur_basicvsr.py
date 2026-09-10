@@ -14,6 +14,7 @@ onnxruntime 已在 venv 中（1.28.0），CUDA EP 可用时走 GPU。
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -192,8 +193,22 @@ def _load_torch_model(engine: str):
     state = raw.get("params_ema") or raw.get("params") or raw
     model = SRVGGNetCompact()
     model.load_state_dict(state, strict=True)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    require_gpu = (os.environ.get("VITUAL_REQUIRE_GPU") or "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif require_gpu:
+        raise DeblurUnavailable(
+            "torch CUDA unavailable; install CUDA torch or set VITUAL_REQUIRE_GPU=0"
+        )
+    else:
+        device = "cpu"
     model = model.to(device).eval()
+    print(f"[deblur] torch device={device} engine={engine}", flush=True)
     _TORCH_MODEL[key] = (device, model)
     return device, model
 

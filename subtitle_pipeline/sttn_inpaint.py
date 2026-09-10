@@ -148,6 +148,639 @@ def band_is_flat(bgr: Any, box: dict[str, int]) -> bool:
     return False
 
 
+def find_black_caption_box(
+    bgr: Any,
+    seed: dict[str, int],
+    *,
+    min_h: int = 18,
+    min_w: int = 80,
+) -> dict[str, int] | None:
+    """Tighten an oversized locate box onto the opaque black caption plate.
+
+    Locate often returns a tall/wide dialogue band that mixes scene pixels with a
+    smaller black subtitle plate. STTN on that mix smears into 'black paint';
+    solid-fill should use the plate only.
+
+    Detection uses midtone gaps: caption plates are mostly near-black fill plus
+    bright glyph strokes, so mid-gray scene pixels are scarce inside the plate.
+    """
+    import cv2
+    import numpy as np
+
+    H, W = bgr.shape[:2]
+    y0 = max(0, int(seed["y"]))
+    x0 = max(0, int(seed["x"]))
+    h0 = max(1, int(seed["h"]))
+    w0 = max(1, int(seed["w"]))
+    y1 = min(H, y0 + h0)
+    x1 = min(W, x0 + w0)
+    if y1 - y0 < min_h or x1 - x0 < min_w:
+        return None
+    gray = cv2.cvtColor(bgr[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY).astype(np.float32)
+    rh, rw = gray.shape[:2]
+    mid = (gray >= 48.0) & (gray <= 160.0)
+    row_ok = mid.mean(axis=1) < 0.40
+
+    def _runs(mask: Any, min_len: int) -> list[tuple[int, int]]:
+        out: list[tuple[int, int]] = []
+        start: int | None = None
+        for i, ok in enumerate(mask.tolist()):
+            if ok and start is None:
+                start = i
+            elif not ok and start is not None:
+                if i - start >= int(min_len):
+                    out.append((start, i))
+                start = None
+        if start is not None and len(mask) - start >= int(min_len):
+            out.append((start, len(mask)))
+        return out
+
+    row_runs = _runs(row_ok, min_h)
+    if not row_runs:
+        return None
+
+    best: dict[str, int] | None = None
+    best_score = -1.0
+    seed_cx = 0.5 * float(rw)
+    stroke_kernel = np.ones((3, 3), dtype=np.uint8)
+    for ry0, ry1 in row_runs:
+        band_mid = mid[ry0:ry1]
+        col_ok = band_mid.mean(axis=0) < 0.40
+        for cx0, cx1 in _runs(col_ok, min_w):
+            roi = gray[ry0:ry1, cx0:cx1]
+            glyphs = roi > 140.0
+            remain = ~glyphs
+            if float(remain.mean()) < 0.28:
+                continue
+            bg = roi[remain]
+            bg_mean = float(bg.mean())
+            dark_frac = float((bg < 48.0).mean())
+            if bg_mean > 50.0 or dark_frac < 0.62:
+                continue
+            bright = roi > 160.0
+            dark = roi < 60.0
+            near_dark = cv2.dilate(dark.astype(np.uint8), stroke_kernel) > 0
+            strokes = bright & near_dark
+            bright_frac = float(bright.mean())
+            stroke_frac = float(strokes.mean())
+            stroke_ratio = float(strokes.sum()) / float(max(1, int(bright.sum())))
+            # Solid white UI tiles (tier list) have lots of bright pixels but few
+            # stroke edges against dark fill — reject those.
+            if bright_frac > 0.12 and stroke_ratio < 0.05:
+                continue
+            h = int(ry1 - ry0)
+            w = int(cx1 - cx0)
+            if float(w) / float(max(1, h)) < 2.2:
+                continue
+            if stroke_frac < 0.002 and h < int(0.55 * rh):
+                continue
+            area = float(h * w)
+            cx = 0.5 * float(cx0 + cx1)
+            center_bonus = 1.0 + 0.45 * (
+                1.0 - abs(cx - seed_cx) / max(1.0, seed_cx)
+            )
+            ink_bonus = 1.0 + 60.0 * stroke_frac
+            score = area * dark_frac * ink_bonus * center_bonus
+            if score > best_score:
+                best_score = score
+                best = {
+                    "x": int(x0 + cx0),
+                    "y": int(y0 + ry0),
+                    "w": w,
+                    "h": h,
+                }
+    return best
+
+
+def caption_band_is_black_bar(
+    bgr: Any,
+    box: dict[str, int],
+    *,
+    max_bg_mean: float = 42.0,
+    min_dark_frac: float = 0.55,
+    max_bg_var: float = 380.0,
+) -> bool:
+    """True when caption box is mostly a solid dark letterbox (white glyphs on black).
+
+    These bands should be solid-filled, not STTN-inpainted (STTN collapses to a
+    darker smear and costs hours for an effect that looks like black paint).
+    """
+    import cv2
+    import numpy as np
+
+    if find_black_caption_box(bgr, box) is not None:
+        return True
+
+    y = max(0, int(box["y"]))
+    x = max(0, int(box["x"]))
+    h = max(1, int(box["h"]))
+    w = max(1, int(box["w"]))
+    roi = bgr[y : y + h, x : x + w]
+    if roi.size < 64:
+        return False
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    # Treat bright strokes as glyphs; score the remaining "background".
+    glyphs = gray > 140.0
+    remain = ~glyphs
+    if float(remain.mean()) < float(min_dark_frac):
+        return False
+    bg = gray[remain]
+    if float(bg.mean()) > float(max_bg_mean):
+        return False
+    if float(bg.var()) > float(max_bg_var):
+        return False
+    dark = bg < 48.0
+    return float(dark.mean()) >= 0.75
+
+
+def fill_caption_black_bar(
+    bgr: Any,
+    box: dict[str, int],
+    *,
+    color: tuple[int, int, int] = (0, 0, 0),
+) -> Any:
+    """Paint the caption box solid (default black) — correct for black letterbox bars."""
+    import numpy as np
+
+    out = bgr.copy()
+    y = max(0, int(box["y"]))
+    x = max(0, int(box["x"]))
+    h = max(1, int(box["h"]))
+    w = max(1, int(box["w"]))
+    H, W = out.shape[:2]
+    y1 = min(H, y + h)
+    x1 = min(W, x + w)
+    if y1 <= y or x1 <= x:
+        return out
+    out[y:y1, x:x1] = np.array(color, dtype=np.uint8)
+    return out
+
+
+def erase_glyphs_on_black_bar(
+    bgr: Any,
+    seed: dict[str, int],
+    *,
+    color: tuple[int, int, int] = (0, 0, 0),
+) -> tuple[Any, int]:
+    """Clear black caption plates that carry bright glyph strokes.
+
+    When a tightened wide plate box is found, solid-fill it. Otherwise only
+    remove high-confidence ink strokes (no flood into dark food/sauce).
+    """
+    import cv2
+    import numpy as np
+
+    out = bgr.copy()
+    H, W = out.shape[:2]
+    y0 = max(0, int(seed["y"]))
+    x0 = max(0, int(seed["x"]))
+    y1 = min(H, y0 + max(1, int(seed["h"])))
+    x1 = min(W, x0 + max(1, int(seed["w"])))
+    if y1 <= y0 or x1 <= x0:
+        return out, 0
+
+    found = find_black_caption_box(out, seed)
+    if found is not None:
+        aspect = float(found["w"]) / float(max(1, found["h"]))
+        if aspect >= 2.0 and int(found["w"]) >= 120:
+            out2 = fill_caption_black_bar(out, found, color=color)
+            return out2, int(found["w"]) * int(found["h"])
+
+    roi = out[y0:y1, x0:x1]
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    bright = gray > 170.0
+    dark_soft = gray < 50.0
+    dark_f = cv2.blur(dark_soft.astype(np.float32), (41, 17))
+    ink = bright & (dark_f > 0.55)
+    if not bool(ink.any()):
+        return out, 0
+    glyph_kill = cv2.dilate(ink.astype(np.uint8) * 255, np.ones((3, 3), np.uint8), 2)
+    glyph_kill = cv2.bitwise_and(glyph_kill, (dark_f > 0.55).astype(np.uint8) * 255)
+    plate = glyph_kill > 0
+    n = int(plate.sum())
+    if n <= 0:
+        return out, 0
+    roi[plate] = np.array(color, dtype=np.uint8)
+    out[y0:y1, x0:x1] = roi
+    return out, n
+
+
+def probe_dialogue_black_bar(
+    video: Any,
+    box: dict[str, int],
+    *,
+    samples: int = 7,
+) -> dict[str, Any]:
+    """Sample frames; decide whether dialogue should use solid black-bar fill."""
+    import cv2
+
+    cap = cv2.VideoCapture(str(video))
+    if not cap.isOpened():
+        return {"ok": False, "hits": 0, "samples": 0, "box": None}
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0) or 25.0
+    hits = 0
+    found_boxes: list[dict[str, int]] = []
+    idxs = (
+        [0]
+        if n <= 1
+        else [int(round(i * (n - 1) / max(1, samples - 1))) for i in range(samples)]
+    )
+    try:
+        for idx in idxs:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, float(idx))
+            ok, fr = cap.read()
+            if not ok:
+                continue
+            found = find_black_caption_box(fr, box)
+            if found is not None:
+                hits += 1
+                found_boxes.append(found)
+    finally:
+        cap.release()
+    checked = len(idxs)
+    ok = hits >= max(2, int(round(0.55 * max(1, checked))))
+    rep = None
+    if found_boxes:
+        # Median box is stabler than min/max union (avoids one oversized hit).
+        xs = sorted(b["x"] for b in found_boxes)
+        ys = sorted(b["y"] for b in found_boxes)
+        x2s = sorted(b["x"] + b["w"] for b in found_boxes)
+        y2s = sorted(b["y"] + b["h"] for b in found_boxes)
+        mid = len(found_boxes) // 2
+        x0, y0, x1, y1 = xs[mid], ys[mid], x2s[mid], y2s[mid]
+        rep = {
+            "x": int(x0),
+            "y": int(y0),
+            "w": int(max(1, x1 - x0)),
+            "h": int(max(1, y1 - y0)),
+        }
+    return {
+        "ok": bool(ok),
+        "hits": int(hits),
+        "samples": int(checked),
+        "box": rep,
+        "fps": fps,
+        "frames": n,
+    }
+
+
+def classify_dialogue_route(
+    video: Any,
+    box: dict[str, int],
+    *,
+    samples: int = 7,
+) -> dict[str, Any]:
+    """General VSR-style dialogue routing (not clip-specific).
+
+    1) Sample frames and optionally tighten onto an opaque caption plate.
+    2) Classify:
+       - ``glyph_black``: white strokes on opaque dark plate → paint strokes black
+       - ``flat``: flat UI strip → Temporal Background Exposure
+       - ``tiles``: textured live-action → STTN tiles with glyph holes
+    """
+    import cv2
+
+    seed = {k: int(box[k]) for k in ("x", "y", "w", "h")}
+    cap = cv2.VideoCapture(str(video))
+    if not cap.isOpened():
+        return {"ok": False, "route": "tiles", "box": seed, "hits": 0, "samples": 0}
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    idxs = (
+        [0]
+        if n <= 1
+        else [int(round(i * (n - 1) / max(1, samples - 1))) for i in range(samples)]
+    )
+    black_hits = 0
+    flat_hits = 0
+    checked = 0
+    found_boxes: list[dict[str, int]] = []
+    try:
+        for idx in idxs:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, float(idx))
+            ok, fr = cap.read()
+            if not ok:
+                continue
+            checked += 1
+            found = find_black_caption_box(fr, seed)
+            if found is not None:
+                black_hits += 1
+                found_boxes.append(found)
+                # Opaque dark plates are also "flat" for routing purposes.
+                flat_hits += 1
+                continue
+            if caption_band_is_black_bar(fr, seed):
+                black_hits += 1
+                flat_hits += 1
+                found_boxes.append(seed)
+                continue
+            if band_is_flat(fr, seed):
+                flat_hits += 1
+    finally:
+        cap.release()
+
+    need = max(2, int(round(0.55 * max(1, checked))))
+    tight = seed
+    if found_boxes:
+        xs = sorted(b["x"] for b in found_boxes)
+        ys = sorted(b["y"] for b in found_boxes)
+        x2s = sorted(b["x"] + b["w"] for b in found_boxes)
+        y2s = sorted(b["y"] + b["h"] for b in found_boxes)
+        mid = len(found_boxes) // 2
+        x0, y0, x1, y1 = xs[mid], ys[mid], x2s[mid], y2s[mid]
+        cand = {
+            "x": int(x0),
+            "y": int(y0),
+            "w": int(max(1, x1 - x0)),
+            "h": int(max(1, y1 - y0)),
+        }
+        if float(cand["w"]) / float(max(1, cand["h"])) >= 2.0:
+            tight = cand
+
+    if black_hits >= need:
+        route = "glyph_black"
+    elif flat_hits >= need:
+        route = "flat"
+    else:
+        route = "tiles"
+    return {
+        "ok": True,
+        "route": route,
+        "box": tight,
+        "seed_box": seed,
+        "black_hits": int(black_hits),
+        "flat_hits": int(flat_hits),
+        "samples": int(checked),
+    }
+
+
+def encode_glyph_black_fill(
+    src: Any,
+    dest: Any,
+    seed_box: dict[str, int],
+) -> dict[str, Any]:
+    """VSR-style black caption bar cleanup: paint *glyph strokes* solid black.
+
+    For opaque black letterbox/caption plates the recoverable background *is*
+    black. Whole-box STTN/crop/fill look like paint; Temporal TBE often leaves
+    glyph ghosts when text is dense. Glyph-only solid fill matches the plate.
+    """
+    from pathlib import Path
+
+    import cv2
+    import numpy as np
+
+    src_p = Path(src)
+    dest_p = Path(dest)
+    dest_p.parent.mkdir(parents=True, exist_ok=True)
+    cap = cv2.VideoCapture(str(src_p))
+    if not cap.isOpened():
+        raise RuntimeError(f"cannot open {src_p}")
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0) or 25.0
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    writing = dest_p.with_name(f"_{dest_p.stem}_glyphfill_writing.mp4")
+    proc = _open_ffmpeg_writer(src_p, writing, width, height, fps)
+    assert proc.stdin is not None
+    frames = 0
+    touched = 0
+    painted_px = 0
+    try:
+        while True:
+            ok, fr = cap.read()
+            if not ok:
+                break
+            mask = glyph_mask_hybrid(fr, seed_box)
+            # Tighten to opaque plate when possible — seed locate boxes often
+            # include a strip of food above the bar.
+            found = find_black_caption_box(fr, seed_box)
+            work = found if found is not None else seed_box
+            aspect = float(work["w"]) / float(max(1, work["h"]))
+            if found is None or aspect < 2.0:
+                work = seed_box
+            y0 = max(0, int(work["y"]))
+            x0 = max(0, int(work["x"]))
+            y1 = min(height, y0 + max(1, int(work["h"])))
+            x1 = min(width, x0 + max(1, int(work["w"])))
+            # Restrict OCR mask to the plate; add bright-on-dark ink fallback.
+            plate = np.zeros(fr.shape[:2], dtype=np.uint8)
+            plate[y0:y1, x0:x1] = 255
+            mask = cv2.bitwise_and(mask, plate)
+            roi = fr[y0:y1, x0:x1]
+            if roi.size:
+                gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY).astype(np.float32)
+                bright = gray > 155.0
+                dark_f = cv2.blur((gray < 55.0).astype(np.float32), (41, 17))
+                ink = bright & (dark_f > 0.50)
+                if bool(ink.any()):
+                    ink_u8 = cv2.dilate(
+                        ink.astype(np.uint8) * 255, np.ones((5, 5), np.uint8), 2
+                    )
+                    # Never paint midtone food: keep only high dark support.
+                    ink_u8 = cv2.bitwise_and(
+                        ink_u8, (dark_f > 0.45).astype(np.uint8) * 255
+                    )
+                    mask[y0:y1, x0:x1] = np.maximum(mask[y0:y1, x0:x1], ink_u8)
+            n_px = int((mask > 0).sum())
+            if n_px > 0:
+                fr = fr.copy()
+                fr[mask > 0] = (0, 0, 0)
+                painted_px += n_px
+                touched += 1
+            proc.stdin.write(np.ascontiguousarray(fr).tobytes())
+            frames += 1
+            if n and frames % 60 == 0:
+                print(
+                    f"[glyphfill] wrote {frames}/{n} touched={touched} px={painted_px}",
+                    flush=True,
+                )
+    except Exception:
+        proc.kill()
+        raise
+    finally:
+        cap.release()
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
+    stderr = proc.communicate(timeout=300)[1]
+    if proc.returncode != 0 or frames < 1:
+        err = (stderr or b"").decode("utf-8", errors="replace")[:400]
+        raise RuntimeError(f"glyph black fill failed ({proc.returncode}): {err}")
+    _finalize_writing_mp4(writing, dest_p)
+    return {
+        "engine": "glyphfill",
+        "mode": "glyph_solid_black",
+        "frames": frames,
+        "filled_frames": touched,
+        "painted_px": painted_px,
+        "bytes": dest_p.stat().st_size if dest_p.is_file() else 0,
+        "seed_box": {k: int(seed_box[k]) for k in ("x", "y", "w", "h")},
+    }
+
+
+def encode_black_caption_fill(
+    src: Any,
+    dest: Any,
+    seed_box: dict[str, int],
+    *,
+    fallback_box: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    """Per-frame: fill black caption plates under white glyphs (no STTN)."""
+    from pathlib import Path
+
+    import cv2
+    import numpy as np
+
+    src_p = Path(src)
+    dest_p = Path(dest)
+    dest_p.parent.mkdir(parents=True, exist_ok=True)
+    cap = cv2.VideoCapture(str(src_p))
+    if not cap.isOpened():
+        raise RuntimeError(f"cannot open {src_p}")
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0) or 25.0
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    writing = dest_p.with_name(f"_{dest_p.stem}_writing.mp4")
+    proc = _open_ffmpeg_writer(src_p, writing, width, height, fps)
+    assert proc.stdin is not None
+    frames = 0
+    touched = 0
+    painted_px = 0
+    try:
+        while True:
+            ok, fr = cap.read()
+            if not ok:
+                break
+            fr2, n_px = erase_glyphs_on_black_bar(fr, seed_box)
+            if n_px <= 0 and fallback_box is not None:
+                fr2, n_px = erase_glyphs_on_black_bar(fr, fallback_box)
+            if n_px > 0:
+                painted_px += int(n_px)
+            if n_px > 80:
+                touched += 1
+            proc.stdin.write(np.ascontiguousarray(fr2).tobytes())
+            frames += 1
+            if n and frames % 60 == 0:
+                print(
+                    f"[blackfill] wrote {frames}/{n} touched={touched} px={painted_px}",
+                    flush=True,
+                )
+    except Exception:
+        proc.kill()
+        raise
+    finally:
+        cap.release()
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
+    stderr = proc.communicate(timeout=300)[1]
+    if proc.returncode != 0 or frames < 1:
+        err = (stderr or b"").decode("utf-8", errors="replace")[:400]
+        raise RuntimeError(f"black caption fill failed ({proc.returncode}): {err}")
+    _finalize_writing_mp4(writing, dest_p)
+    return {
+        "engine": "blackfill",
+        "mode": "erase_glyphs_on_black",
+        "frames": frames,
+        "filled_frames": touched,
+        "painted_px": painted_px,
+        "bytes": dest_p.stat().st_size if dest_p.is_file() else 0,
+        "seed_box": {k: int(seed_box[k]) for k in ("x", "y", "w", "h")},
+        "fallback_box": (
+            {k: int(fallback_box[k]) for k in ("x", "y", "w", "h")}
+            if fallback_box is not None
+            else None
+        ),
+    }
+
+
+def encode_black_bar_crop(
+    src: Any,
+    dest: Any,
+    bar_box: dict[str, int],
+    *,
+    out_w: int | None = None,
+    out_h: int | None = None,
+) -> dict[str, Any]:
+    """Crop away an opaque bottom caption bar and scale back to original size.
+
+    Black letterbox captions have no recoverable background — fill/STTN both look
+    like black paint. Cropping the bar and zooming the remaining frame is the
+    clean visual for this layout.
+    """
+    from pathlib import Path
+
+    import cv2
+
+    from media_ops import find_ffmpeg
+
+    src_p = Path(src)
+    dest_p = Path(dest)
+    dest_p.parent.mkdir(parents=True, exist_ok=True)
+    cap = cv2.VideoCapture(str(src_p))
+    if not cap.isOpened():
+        raise RuntimeError(f"cannot open {src_p}")
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    cap.release()
+    if width < 16 or height < 16:
+        raise RuntimeError(f"bad video size {width}x{height}")
+
+    y0 = max(0, min(height - 2, int(bar_box.get("y", height))))
+    # Keep a couple pixels of margin above the bar so the cut is not mid-glyph.
+    keep_h = max(16, min(height - 2, y0 - 2))
+    if keep_h % 2:
+        keep_h -= 1
+    keep_h = max(16, keep_h)
+    ow = int(out_w or width)
+    oh = int(out_h or height)
+    if ow % 2:
+        ow -= 1
+    if oh % 2:
+        oh -= 1
+    # Crop top keep_h, then stretch back to original canvas (avoids letterbox pad).
+    vf = f"crop=iw:{keep_h}:0:0,scale={ow}:{oh}"
+    ffmpeg = find_ffmpeg()
+    tmp = dest_p.with_name(f"_{dest_p.stem}_crop_tmp.mp4")
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(src_p),
+        "-vf",
+        vf,
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-an",
+        str(tmp),
+    ]
+    r = __import__("subprocess").run(cmd, capture_output=True)
+    if r.returncode != 0 or not tmp.is_file():
+        err = (r.stderr or b"").decode("utf-8", errors="replace")[:400]
+        raise RuntimeError(f"black-bar crop failed: {err}")
+    tmp.replace(dest_p)
+    return {
+        "engine": "crop",
+        "mode": "black_bar_crop_scale",
+        "frames": n,
+        "keep_h": keep_h,
+        "out_size": f"{ow}x{oh}",
+        "bar_box": {k: int(bar_box[k]) for k in ("x", "y", "w", "h") if k in bar_box},
+        "bytes": dest_p.stat().st_size if dest_p.is_file() else 0,
+        "vf": vf,
+    }
+
+
 def horiz_lerp_fill(bgr: Any, hole_u8: Any) -> Any:
     """Fill hole runs by lerping nearest clean left/right pixels (keeps horizontal grain)."""
     import numpy as np

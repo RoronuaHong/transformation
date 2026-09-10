@@ -109,9 +109,9 @@ def test_normalize_media_opts_postproc_modes() -> None:
     assert quality["postproc_mode"] == "quality"
     assert quality["dehardsub_mode"] == "auto"
     assert quality["dehardsub_engine"] == "sttn"
-    assert quality["dehardsub_passes"] == 2
+    assert quality["dehardsub_passes"] == 1
     assert quality["deblur_demosaic"] is True
-    assert quality["dehardsub_polish_residual_floor"] == 0.008
+    assert quality["dehardsub_polish_residual_floor"] == 1.0
     assert quality["dehardsub_dialogue_short_route"] == "auto"
 
 

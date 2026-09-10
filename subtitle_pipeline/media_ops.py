@@ -143,12 +143,13 @@ def _mode_default(src: dict[str, Any], mode: str, key: str, default: Any) -> Any
         "quality": {
             "enhance_max_height": 1080,
             "dehardsub_mode": "auto",
-            "dehardsub_passes": 2,
+            "dehardsub_passes": 1,
             "dehardsub_demosaic": True,
             "dehardsub_engine": "sttn",
             "deblur_demosaic": True,
-                "dehardsub_polish_residual_floor": 0.008,
-                "dehardsub_dialogue_short_route": "auto",
+            # Skip eager LaMa residual polish (CPU/GPU full-pass hours); edgefill covers watermark.
+            "dehardsub_polish_residual_floor": 1.0,
+            "dehardsub_dialogue_short_route": "auto",
         },
     }
     return table.get(mode, {}).get(key, default)

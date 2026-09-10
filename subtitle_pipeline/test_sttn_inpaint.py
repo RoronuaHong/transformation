@@ -210,6 +210,217 @@ def test_band_is_flat_rejects_midtone_clothing() -> None:
     assert band_is_flat(frame, {"x": 50, "y": 170, "w": 300, "h": 50}) is False
 
 
+def test_caption_band_is_black_bar_detects_dark_ui_strip() -> None:
+    import numpy as np
+
+    from sttn_inpaint import caption_band_is_black_bar, fill_caption_black_bar
+
+    frame = np.zeros((240, 400, 3), dtype=np.uint8)
+    frame[:] = (80, 90, 100)
+    frame[180:230, 20:380] = (8, 8, 8)
+    frame[195:215, 80:300] = (245, 245, 245)
+    box = {"x": 20, "y": 180, "w": 360, "h": 50}
+    assert caption_band_is_black_bar(frame, box) is True
+    out = fill_caption_black_bar(frame, box)
+    assert int(out[200, 150].max()) < 20
+    assert int(out[100, 200].mean()) > 50
+
+
+def test_caption_band_is_black_bar_rejects_bright_scene() -> None:
+    import numpy as np
+
+    from sttn_inpaint import caption_band_is_black_bar
+
+    frame = np.zeros((240, 400, 3), dtype=np.uint8)
+    frame[180:230, 20:380] = (120, 110, 90)
+    frame[195:215, 80:300] = (245, 245, 245)
+    assert caption_band_is_black_bar(frame, {"x": 20, "y": 180, "w": 360, "h": 50}) is False
+
+
+def test_classify_dialogue_route_black_plate(tmp_path: Path) -> None:
+    import subprocess
+
+    import cv2
+    import numpy as np
+
+    from media_ops import find_ffmpeg
+    from sttn_inpaint import classify_dialogue_route
+
+    ffmpeg = find_ffmpeg()
+    src = tmp_path / "black_plate.mp4"
+    # Synthesize a short clip: midtone scene + bottom black caption bar.
+    frame = np.zeros((240, 400, 3), dtype=np.uint8)
+    frame[:] = (90, 100, 110)
+    frame[185:225, 40:360] = (6, 6, 6)
+    frame[195:215, 80:320] = (245, 245, 245)
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    raw = tmp_path / "raw.avi"
+    wr = cv2.VideoWriter(str(raw), fourcc, 10.0, (400, 240))
+    for _ in range(8):
+        wr.write(frame)
+    wr.release()
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(raw),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(src),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    seed = {"x": 10, "y": 160, "w": 380, "h": 70}
+    info = classify_dialogue_route(src, seed, samples=5)
+    assert info["ok"]
+    assert info["route"] == "glyph_black"
+    assert info["box"]["w"] < seed["w"]
+    assert info["box"]["h"] <= seed["h"]
+
+
+def test_classify_dialogue_route_textured_tiles(tmp_path: Path) -> None:
+    import subprocess
+
+    import cv2
+    import numpy as np
+
+    from media_ops import find_ffmpeg
+    from sttn_inpaint import classify_dialogue_route
+
+    ffmpeg = find_ffmpeg()
+    src = tmp_path / "textured.mp4"
+    rng = np.random.default_rng(0)
+    frame = rng.integers(40, 200, size=(240, 400, 3), dtype=np.uint8)
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    raw = tmp_path / "raw_tex.avi"
+    wr = cv2.VideoWriter(str(raw), fourcc, 10.0, (400, 240))
+    for _ in range(8):
+        wr.write(frame)
+    wr.release()
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(raw),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(src),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    info = classify_dialogue_route(
+        src, {"x": 20, "y": 170, "w": 360, "h": 50}, samples=5
+    )
+    assert info["ok"]
+    assert info["route"] == "tiles"
+
+
+def test_find_black_caption_box_tightens_centered_plate() -> None:
+    import numpy as np
+
+    from sttn_inpaint import find_black_caption_box
+
+    frame = np.zeros((240, 400, 3), dtype=np.uint8)
+    frame[:] = (90, 100, 110)
+    # Oversized seed covers scene + a smaller centered black plate.
+    frame[185:225, 80:320] = (6, 6, 6)
+    frame[195:215, 110:290] = (245, 245, 245)
+    seed = {"x": 10, "y": 160, "w": 380, "h": 70}
+    found = find_black_caption_box(frame, seed)
+    assert found is not None
+    assert found["x"] >= 70
+    assert found["x"] + found["w"] <= 330
+    assert found["h"] >= 20
+    assert found["w"] < seed["w"]
+
+
+def test_erase_glyphs_on_black_bar_clears_puttext() -> None:
+    import cv2
+    import numpy as np
+
+    from sttn_inpaint import erase_glyphs_on_black_bar
+
+    frame = np.zeros((240, 400, 3), dtype=np.uint8)
+    frame[:] = (90, 100, 110)
+    frame[180:230, 40:360] = (8, 8, 8)
+    cv2.putText(
+        frame,
+        "HELLO",
+        (70, 215),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1.4,
+        (245, 245, 245),
+        3,
+        cv2.LINE_AA,
+    )
+    out, n = erase_glyphs_on_black_bar(frame, {"x": 20, "y": 170, "w": 360, "h": 60})
+    assert n > 200
+    # Plate should be solid black; scene midtones untouched.
+    assert int(out[200, 200].max()) < 40
+    assert int(out[100, 200].mean()) > 50
+
+
+def test_encode_black_bar_crop_removes_bottom_band(tmp_path: Path) -> None:
+    import subprocess
+
+    import cv2
+    import numpy as np
+
+    from media_ops import find_ffmpeg
+    from sttn_inpaint import encode_black_bar_crop
+
+    ffmpeg = find_ffmpeg()
+    src = tmp_path / "src.mp4"
+    # 64x48, bottom 12 rows black with white mark.
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x406080:s=64x48:r=10:d=0.5",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(src),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    dest = tmp_path / "crop.mp4"
+    stats = encode_black_bar_crop(
+        src, dest, {"x": 0, "y": 36, "w": 64, "h": 12}, out_w=64, out_h=48
+    )
+    assert stats["engine"] == "crop"
+    assert dest.is_file()
+    cap = cv2.VideoCapture(str(dest))
+    ok, fr = cap.read()
+    cap.release()
+    assert ok and fr is not None
+    assert fr.shape[0] == 48 and fr.shape[1] == 64
+    # Bottom of output should no longer be the pure black band (zoomed content).
+    assert float(np.mean(fr[-6:, :, :])) > 20.0
+
+
 def test_ffmpeg_writing_mp4_is_playable_before_close(tmp_path: Path) -> None:
     """Fragmented writing temps must open mid-stream (no 'moov atom not found')."""
     import subprocess

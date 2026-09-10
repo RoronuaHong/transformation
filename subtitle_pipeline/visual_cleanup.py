@@ -1221,6 +1221,41 @@ def run_multipass_cleanup(
         }
 
     mosaic_regions: list[dict[str, Any]] = []
+    # Per-dialogue VSR routing: tighten + classify (glyph_black | flat | tiles).
+    dialogue_routes: list[dict[str, Any] | None] = []
+    plate_boxes: list[dict[str, int]] = []
+    any_glyph_black = False
+    if dehardsub and hardsub_boxes:
+        try:
+            from sttn_inpaint import classify_dialogue_route
+
+            roles0 = list(locate_meta.get("box_roles") or [])
+            for i, hb in enumerate(hardsub_boxes):
+                role_i = roles0[i] if i < len(roles0) else "dialogue"
+                if role_i != "dialogue":
+                    dialogue_routes.append(None)
+                    continue
+                route_i = classify_dialogue_route(src, hb)
+                dialogue_routes.append(route_i)
+                rb = route_i.get("box")
+                if isinstance(rb, dict) and route_i.get("route") in (
+                    "glyph_black",
+                    "flat",
+                ):
+                    plate_boxes.append({k: int(rb[k]) for k in ("x", "y", "w", "h")})
+                if route_i.get("route") == "glyph_black":
+                    any_glyph_black = True
+                print(
+                    f"[cleanup] dialogue[{i}] route={route_i.get('route')} "
+                    f"black={route_i.get('black_hits')}/{route_i.get('samples')} "
+                    f"flat={route_i.get('flat_hits')}/{route_i.get('samples')} "
+                    f"box={route_i.get('box')}",
+                    flush=True,
+                )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[cleanup] dialogue route classify skipped ({exc})", flush=True)
+            dialogue_routes = []
+
     if demosaic:
         if mosaic_boxes:
             # 显式马赛克框（绕过自动检测；真实场景可手动标注）
@@ -1233,6 +1268,36 @@ def run_multipass_cleanup(
             ]
         else:
             mosaic_regions = _collect_mosaic_regions(src)
+        # Opaque caption plates fool mosaic detectors (glyph edges → false tiles).
+        if plate_boxes and mosaic_regions:
+
+            def _overlap_frac(a: dict[str, int], b: dict[str, int]) -> float:
+                x0 = max(int(a["x"]), int(b["x"]))
+                y0 = max(int(a["y"]), int(b["y"]))
+                x1 = min(int(a["x"]) + int(a["w"]), int(b["x"]) + int(b["w"]))
+                y1 = min(int(a["y"]) + int(a["h"]), int(b["y"]) + int(b["h"]))
+                inter = max(0, x1 - x0) * max(0, y1 - y0)
+                area = max(1, int(a["w"]) * int(a["h"]))
+                return float(inter) / float(area)
+
+            before = len(mosaic_regions)
+            mosaic_regions = [
+                m
+                for m in mosaic_regions
+                if all(
+                    _overlap_frac(
+                        {k: int(m[k]) for k in ("x", "y", "w", "h")}, bx
+                    )
+                    < 0.35
+                    for bx in plate_boxes
+                )
+            ]
+            dropped = before - len(mosaic_regions)
+            if dropped:
+                print(
+                    f"[cleanup] drop {dropped} mosaic false-positives on caption plate",
+                    flush=True,
+                )
         regions.extend(mosaic_regions)
 
     if not regions:
@@ -1371,11 +1436,43 @@ def run_multipass_cleanup(
                 temps.append(out_i)
                 role = roles[i] if i < len(roles) else "dialogue"
                 box_i = {k: int(hb[k]) for k in ("x", "y", "w", "h")}
+                route_info: dict[str, Any] | None = None
+                route_kind = ""
+                if role == "dialogue":
+                    if i < len(dialogue_routes) and dialogue_routes[i]:
+                        route_info = dialogue_routes[i]
+                    else:
+                        try:
+                            from sttn_inpaint import classify_dialogue_route
+
+                            route_info = classify_dialogue_route(current, box_i)
+                        except Exception as exc:  # noqa: BLE001
+                            print(
+                                f"[cleanup] dialogue[{i}] classify failed ({exc})",
+                                flush=True,
+                            )
+                            route_info = {
+                                "ok": False,
+                                "route": "tiles",
+                                "box": box_i,
+                            }
+                    route_kind = str((route_info or {}).get("route") or "tiles")
+                    rb = (route_info or {}).get("box")
+                    if isinstance(rb, dict):
+                        box_i = {k: int(rb[k]) for k in ("x", "y", "w", "h")}
                 box_run = (
                     expand_static_overlay_box(box_i, width, height, role=role)
                     if role in ("title", "watermark")
                     else box_i
                 )
+                # Decorative chrome on dark-plate layouts often smears under edgefill;
+                # VSR focuses on caption strokes. Skip when dialogue is glyph_black.
+                if any_glyph_black and role in ("title", "watermark"):
+                    print(
+                        f"[cleanup] skip {role} edgefill (dialogue glyph_black plate)",
+                        flush=True,
+                    )
+                    continue
                 if role in ("title", "watermark"):
                     import cv2
                     import numpy as np
@@ -1428,26 +1525,47 @@ def run_multipass_cleanup(
                     pass_stats.append(used)
                     current = out_i
                     continue
-                env_prev = None
-                force_tiles = role in ("title", "watermark")
-                if role == "dialogue":
-                    try:
-                        import cv2
-                        from sttn_inpaint import band_is_flat as _bif
+                if role == "dialogue" and route_kind == "glyph_black":
+                    from sttn_inpaint import encode_glyph_black_fill
 
-                        cap_chk = cv2.VideoCapture(str(current))
-                        ok_chk, fr_chk = cap_chk.read()
-                        cap_chk.release()
-                        if ok_chk and not _bif(fr_chk, box_i):
-                            force_tiles = True
-                    except Exception:
-                        force_tiles = True
-                if force_tiles:
+                    used = encode_glyph_black_fill(current, out_i, box_run)
+                    used = dict(used)
+                    used["role"] = role
+                    used["box"] = box_run
+                    used["route"] = "glyph_black"
+                    if route_info:
+                        used["route_info"] = {
+                            k: route_info.get(k)
+                            for k in (
+                                "ok",
+                                "route",
+                                "black_hits",
+                                "flat_hits",
+                                "samples",
+                                "box",
+                                "seed_box",
+                            )
+                        }
+                    pass_stats.append(used)
+                    current = out_i
+                    continue
+                env_prev = None
+                force_mode = ""
+                if role in ("title", "watermark"):
+                    force_mode = "tiles"
+                elif role == "dialogue":
+                    # Classify after tighten — never force tiles from a single
+                    # oversized mixed seed frame (that was the quality failure mode).
+                    if route_kind == "flat":
+                        force_mode = "flat"
+                    elif route_kind == "tiles":
+                        force_mode = "tiles"
+                if force_mode:
                     import os as _os
 
                     env_prev = _os.environ.get("VITUAL_STTN_FORCE")
                     if (env_prev or "auto").strip().lower() == "auto":
-                        _os.environ["VITUAL_STTN_FORCE"] = "tiles"
+                        _os.environ["VITUAL_STTN_FORCE"] = force_mode
                 try:
                     used = (
                         _encode_sttn_active_windows(
@@ -1472,8 +1590,23 @@ def run_multipass_cleanup(
                     used = dict(used)
                     used["role"] = role
                     used["box"] = box_run
+                    if route_kind:
+                        used["route"] = route_kind
+                    if route_info:
+                        used["route_info"] = {
+                            k: route_info.get(k)
+                            for k in (
+                                "ok",
+                                "route",
+                                "black_hits",
+                                "flat_hits",
+                                "samples",
+                                "box",
+                                "seed_box",
+                            )
+                        }
                 finally:
-                    if force_tiles:
+                    if force_mode:
                         import os as _os
 
                         if env_prev is None:

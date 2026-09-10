@@ -40,12 +40,10 @@ def _load_session():
     try:
         import onnxruntime as ort
 
-        from ort_runtime import preload_ort_cuda_dlls
+        from ort_runtime import make_session_options, ort_providers
 
-        preload_ort_cuda_dlls()
-        providers = _ort_providers()
-        so = ort.SessionOptions()
-        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        providers = ort_providers()
+        so = make_session_options()
         _SESSION = ort.InferenceSession(
             str(LAMA_WEIGHTS), sess_options=so, providers=providers
         )
