@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Urban Halo · 隔离场地验证路径 · 门禁</title>
+  <style>
+    :root {
+      --bg: #eef2f1; --paper: #fff; --ink: #1a2428; --muted: #6a787c;
+      --line: #d0dbd8; --teal: #2a6f6d; --teal-soft: #e5f0ef;
+      --orange: #c45c2d; --amber-soft: #f6eddc; --red: #9a4a40; --red-soft: #f4e8e3;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: var(--ink); background: var(--bg);
+      font: 15px/1.55 "Segoe UI", "Microsoft YaHei UI", sans-serif; }
+    .page { width: min(980px, calc(100% - 28px)); margin: 0 auto; padding: 22px 0 40px; }
+    header { padding: 14px 0 18px; border-top: 5px solid var(--orange);
+      border-bottom: 1px solid var(--line); margin-bottom: 16px; }
+    header h1 { margin: 0; font-size: clamp(1.5rem, 3.4vw, 2.05rem);
+      letter-spacing: -0.03em; font-weight: 750; }
+    header p { margin: 8px 0 0; color: var(--muted); max-width: 700px; }
+    .chips { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px; }
+    .chip { padding: 3px 9px; border: 1px solid var(--teal); color: var(--teal);
+      border-radius: 999px; font: 650 0.7rem/1.4 "Cascadia Mono", Consolas, monospace; }
+    .chip.warn { border-color: #b8862d; color: #b8862d; }
+    .chip.off { border-color: var(--line); color: var(--muted); text-decoration: line-through; }
+    .rule { margin-top: 14px; padding: 14px 16px; border-radius: 12px;
+      border: 1px solid var(--teal); background: var(--teal-soft); }
+    .rule strong { display: block; margin-bottom: 6px; color: var(--teal); }
+    .rule ul { margin: 0; padding-left: 1.2rem; font-size: 0.9rem; }
+    .rule li + li { margin-top: 4px; }
+
+    .tl { margin-top: 18px; position: relative; padding-left: 34px; }
+    .tl::before { content: ""; position: absolute; left: 11px; top: 8px; bottom: 8px;
+      width: 3px; background: var(--line); border-radius: 2px; }
+    .stage { position: relative; margin-bottom: 14px; }
+    .stage::before { content: ""; position: absolute; left: -28px; top: 16px;
+      width: 15px; height: 15px; border-radius: 50%;
+      background: var(--paper); border: 3px solid var(--line); }
+    .stage.done::before { border-color: var(--teal); background: var(--teal); }
+    .stage.next::before { border-color: var(--orange); background: var(--orange); }
+
+    .card { background: var(--paper); border: 1px solid var(--line);
+      border-radius: 12px; overflow: hidden; }
+    .card.next { border-color: var(--orange); }
+    .card-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      padding: 11px 15px; border-bottom: 1px solid var(--line); background: #fbfdfc; }
+    .card.next .card-head { background: var(--amber-soft); }
+    .num { font: 750 0.72rem/1 "Cascadia Mono", Consolas, monospace;
+      padding: 4px 7px; border-radius: 6px; background: var(--teal); color: #fff; }
+    .stage.locked .num { background: var(--muted); }
+    .card-head h2 { margin: 0; font-size: 1rem; letter-spacing: -0.02em; }
+    .badge { margin-left: auto; font: 700 0.68rem/1.4 "Cascadia Mono", Consolas, monospace;
+      padding: 3px 8px; border-radius: 999px; border: 1px solid var(--teal); color: var(--teal); }
+    .badge.ok { background: var(--teal-soft); }
+    .badge.now { border-color: var(--orange); color: var(--orange); background: var(--amber-soft); }
+    .badge.hold { border-color: var(--line); color: var(--muted); }
+
+    .card-body { padding: 12px 15px 14px; }
+    .rows { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .blk h3 { margin: 0 0 5px; font: 700 0.72rem/1.3 "Cascadia Mono", Consolas, monospace;
+      letter-spacing: 0.04em; color: var(--teal); text-transform: uppercase; }
+    .blk ul { margin: 0; padding-left: 1.1rem; color: var(--muted); font-size: 0.85rem; }
+    .blk li + li { margin-top: 3px; }
+    .blk.must h3 { color: var(--ink); }
+    .blk.no h3 { color: var(--red); }
+    .blk.no li { color: #7a3a32; }
+    .nogo { margin-top: 11px; padding: 8px 11px; border-radius: 9px;
+      background: var(--red-soft); color: #7a3a32; font-size: 0.83rem; }
+    .nogo b { font-family: "Cascadia Mono", Consolas, monospace; font-size: 0.75rem; }
+
+    .panel { margin-top: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .box { background: var(--paper); border: 1px solid var(--line);
+      border-radius: 12px; padding: 14px 16px; }
+    .box h2 { margin: 0 0 10px; font-size: 0.95rem; letter-spacing: -0.02em; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line);
+      vertical-align: top; }
+    th { color: var(--teal); font-size: 0.72rem; letter-spacing: 0.04em; text-transform: uppercase; }
+    td { color: var(--muted); }
+    td b { color: var(--ink); }
+    .note { margin-top: 14px; padding: 12px 14px; border-radius: 12px;
+      background: var(--red-soft); color: #7a3a32; font-size: 0.85rem; }
+    .back { margin-top: 14px; font-size: 0.85rem; color: var(--muted); }
+    .back a { color: var(--teal); }
+    @media (max-width: 760px) { .panel, .rows { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header>
+      <h1>隔离场地验证路径 · 七阶段门禁</h1>
+      <p>
+        台架 → 系留 → 无人 → 才谈载人。每一阶段都有<b>进入门禁</b>与<b>通过判据</b>，
+        任一阶段不通过，<b>不得跳级</b>。全程仅在隔离场地，开放街道不在路径内。
+      </p>
+      <div class="chips">
+        <span class="chip">载重 150 kg 目标</span>
+        <span class="chip">非载人优先</span>
+        <span class="chip">系留为载人前强制门禁</span>
+        <span class="chip warn">门禁判据书面留档</span>
+        <span class="chip off">跳过台架直接载人</span>
+        <span class="chip off">开放街道验证</span>
+      </div>
+    </header>
+
+    <div class="rule">
+      <strong>门禁三原则</strong>
+      <ul>
+        <li><b>可并行、不可跳过：</b>低风险准备可并行推进，但载人/销售必须由前序阶段<b>全部通过</b>解锁。</li>
+        <li><b>判据先写后测：</b>进入某阶段前先把"通过判据"写清并留档，禁止事后找理由放行。</li>
+        <li><b>失败即回退：</b>任一判据不达标 → 退回上一阶段，而不是放宽判据。</li>
+      </ul>
+    </div>
+
+    <div class="tl">
+      <section class="stage done">
+        <div class="card">
+          <div class="card-head">
+            <span class="num">阶段 0</span>
+            <h2>概念冻结</h2>
+            <span class="badge ok">已完成</span>
+          </div>
+          <div class="card-body">
+            <div class="rows">
+              <div class="blk">
+                <h3>已交付</h3>
+                <ul>
+                  <li>构型冻结：坐姿舱 + 扁椭圆底 + 周向 6 涵道</li>
+                  <li>载重定义：人 + 物 ≤ 150 kg（空机另算）</li>
+                  <li>操控定义：人驾驶 + 飞控增稳（拒绝开环手拧）</li>
+                  <li>安全六层 L1–L6 写入需求基线</li>
+                </ul>
+              </div>
+              <div class="blk no">
+                <h3>明确不在本阶段</h3>
+                <ul>
+                  <li>推力 / 功率 / 桨径 / 控制增益等制造参数</li>
+                  <li>量产与销售承诺</li>
+                  <li>DIY 施工步骤</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="stage next">
+        <div class="card next">
+          <div class="card-head">
+            <span class="num">阶段 1</span>
+            <h2>非载人台架</h2>
+            <span class="badge now">唯一合理的下一步</span>
+          </div>
+          <div class="card-body">
+            <div class="rows">
+              <div class="blk">
+                <h3>进入门禁</h3>
+                <ul>
+                  <li>阶段 0 冻结完成</li>
+                  <li>有固连工装与隔离试验位</li>
+                  <li>测量与急停回路就绪，数据可记录回放</li>
+                </ul>
+              </div>
+              <div class="blk must">
+                <h3>必做 / 必测</h3>
+                <ul>
+                  <li>整机<b>固连</b>于台架，<b>人不坐</b></li>
+                  <li>升力逐级加载，测总推力 / 电流 / 电压 / 温升 / 振动</li>
+                  <li>长时间运行与反复起落循环</li>
+                  <li>六通道一致性与单通道失效行为观察</li>
+                </ul>
+              </div>
+              <div class="blk">
+                <h3>通过判据</h3>
+                <ul>
+                  <li>总升力 ≥ <b>起飞重量 × 1.3</b>，且可复现</li>
+                  <li>温升、振动、电气参数在限值内</li>
+                  <li>结构无异常（无裂纹 / 松动 / 变形）</li>
+                  <li>全过程数据留档可复盘</li>
+                </ul>
+              </div>
+              <div class="blk no">
+                <h3>No-Go</h3>
+                <ul>
+                  <li>人不得上台架或坐在机上</li>
+                  <li>不得因"看起来稳"跳过固连</li>
+                </ul>
+              </div>
+            </div>
+            <div class="nogo"><b>门禁</b> 未达 ×1.3 升力或温升超限 → 回退重新设计动力/散热，<b>不进入系留</b>。</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="stage locked">
+        <div class="card">
+          <div class="card-head">
+            <span class="num">阶段 2</span>
+            <h2>系留悬停</h2>
+            <span class="badge hold">需阶段 1 通过</span>
+          </div>
+          <div class="card-body">
+            <div class="rows">
+              <div class="blk">
+                <h3>进入门禁</h3>
+                <ul>
+                  <li>阶段 1 全部判据通过</li>
+                  <li>防坠索 / 系留装置就位</li>
+                  <li>高度与水平半径被物理限制</li>
+                </ul>
+              </div>
+              <div class="blk must">
+                <h3>必做 / 必测</h3>
+                <ul>
+                  <li>带系留离地，<b>仍不载人</b>（配重替代）</li>
+                  <li>增稳手控悬停可复现性</li>
+                  <li><b>单通道失效降级演示</b> → 只许受控下降</li>
+                  <li>急停演示 → 受控降落</li>
+                </ul>
+              </div>
+              <div class="blk">
+                <h3>通过判据</h3>
+                <ul>
+                  <li>手控增稳悬停可稳定复现</li>
+                  <li>单通道失效 <b>不翻</b>，走受控下降</li>
+                  <li>急停链路可靠触地</li>
+                  <li>系留全程有效，无超限逃逸</li>
+                </ul>
+              </div>
+              <div class="blk no">
+                <h3>No-Go</h3>
+                <ul>
+                  <li>不载人</li>
+                  <li>不解除系留</li>
+                </ul>
+              </div>
+            </div>
+            <div class="nogo"><b>门禁</b> 单通道失效出现不可控姿态或系留失效 → 回退阶段 1，<b>不许自由飞</b>。</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="stage locked">
+        <div class="card">
+          <div class="card-head">
+            <span class="num">阶段 3</span>
+            <h2>无人包线</h2>
+            <span class="badge hold">需阶段 2 通过</span>
+          </div>
+          <div class="card-body">
+            <div class="rows">
+              <div class="blk">
+                <h3>进入门禁</h3>
+                <ul>
+                  <li>阶段 2 全部判据通过</li>
+                  <li>遥控手控 + <b>地面急停</b>双通道就绪</li>
+                  <li>场地边界、风限、高度上限已定义</li>
+                </ul>
+              </div>
+              <div class="blk must">
+                <h3>必做 / 必测</h3>
+                <ul>
+                  <li>配重到目标起飞重量，<b>仍不载人</b></li>
+                  <li>隔离场地内自由悬停</li>
+                  <li>包线策略固化：限高 / 限速 / 限倾角</li>
+                  <li>风限、低电压、姿态异常的否决行为验证</li>
+                </ul>
+              </div>
+              <div class="blk">
+                <h3>通过判据</h3>
+                <ul>
+                  <li>包线内飞行可复现</li>
+                  <li>超限指令被自动否决（只许降）</li>
+                  <li>地面急停可靠触地并闭锁</li>
+                  <li>环境边界（风限）有实测支撑</li>
+                </ul>
+              </div>
+              <div class="blk no">
+                <h3>No-Go</h3>
+                <ul>
+                  <li>不载人</li>
+                  <li>不进开放街道 / 人群上空</li>
+                </ul>
+              </div>
+            </div>
+            <div class="nogo"><b>门禁</b> 包线否决或地面急停任一失效 → 回退阶段 2，<b>不得进入监管沟通</b>。</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="stage locked">
+        <div class="card">
+          <div class="card-head">
+            <span class="num">阶段 4</span>
+            <h2>监管沟通</h2>
+            <span class="badge hold">需阶段 3 通过</span>
+          </div>
+          <div class="card-body">
+            <div class="rows">
+              <div class="blk">
+                <h3>进入门禁</h3>
+                <ul>
+                  <li>阶段 3 实测数据与故障树</li>
+                  <li>安全六层与验证记录可提交</li>
+                </ul>
+              </div>
+              <div class="blk must">
+                <h3>必做</h3>
+                <ul>
+                  <li>类别认定咨询（属于哪类航空器 / 试验体）</li>
+                  <li>试飞条件、空域与场地许可</li>
+                  <li>保险与第三方责任方案</li>
+                  <li>外部技术评审</li>
+                </ul>
+              </div>
+              <div class="blk">
+                <h3>通过判据</h3>
+                <ul>
+                  <li>取得<b>书面</b>许可路径与试飞条件</li>
+                  <li>评审意见已闭环</li>
+                </ul>
+              </div>
+              <div class="blk no">
+                <h3>No-Go</h3>
+                <ul>
+                  <li>无书面许可 → 禁止载人</li>
+                </ul>
+              </div>
+            </div>
+            <div class="nogo"><b>门禁</b> 拿不到书面框架 → 项目停在无人验证，<b>不载人</b>。</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="stage locked">
+        <div class="card">
+          <div class="card-head">
+            <span class="num">阶段 5</span>
+            <h2>载人试验</h2>
+            <span class="badge hold">需 1–4 全通过 + 评审 + 许可</span>
+          </div>
+          <div class="card-body">
+            <div class="rows">
+              <div class="blk">
+                <h3>进入门禁</h3>
+                <ul>
+                  <li>阶段 1–4 <b>全部</b>通过并留档</li>
+                  <li>外部评审通过、许可在有效期内</li>
+                  <li>约束联锁、防坠、地面监控全部在位</li>
+                </ul>
+              </div>
+              <div class="blk must">
+                <h3>必做</h3>
+                <ul>
+                  <li>低高度、限速、微风窗口</li>
+                  <li>优先保留防坠 / 系留条件</li>
+                  <li>乘员 briefing 与实体急停可达性确认</li>
+                </ul>
+              </div>
+              <div class="blk">
+                <h3>通过判据</h3>
+                <ul>
+                  <li>仅在监管框架内评估，不自我发证</li>
+                </ul>
+              </div>
+              <div class="blk no">
+                <h3>No-Go</h3>
+                <ul>
+                  <li>缺任一门禁即禁止载人</li>
+                  <li>不得对外售票或宣传为体验项目</li>
+                </ul>
+              </div>
+            </div>
+            <div class="nogo"><b>门禁</b> 任一环节缺失 → 立即停飞并回退，<b>不以"低空就安全"自我放行</b>。</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="stage locked">
+        <div class="card">
+          <div class="card-head">
+            <span class="num">阶段 6</span>
+            <h2>小批量 / 许可场景</h2>
+            <span class="badge hold">需阶段 5 通过 + 持续合规</span>
+          </div>
+          <div class="card-body">
+            <div class="rows">
+              <div class="blk">
+                <h3>进入门禁</h3>
+                <ul>
+                  <li>阶段 5 通过且持续合规</li>
+                  <li>有量产一致性体系与召回机制</li>
+                </ul>
+              </div>
+              <div class="blk must">
+                <h3>范围</h3>
+                <ul>
+                  <li>仅限许可场景（隔离园区 / 科研平台等）</li>
+                  <li>持续运行数据与故障上报</li>
+                </ul>
+              </div>
+              <div class="blk">
+                <h3>通过判据</h3>
+                <ul>
+                  <li>持续合规，无未闭环重大故障</li>
+                </ul>
+              </div>
+              <div class="blk no">
+                <h3>No-Go</h3>
+                <ul>
+                  <li>开放街道永久 No-Go</li>
+                  <li>不得作为消费级"飞行座椅"销售</li>
+                </ul>
+              </div>
+            </div>
+            <div class="nogo"><b>门禁</b> 出现未闭环重大故障 → 全面停飞复盘，<b>不靠软件补丁续飞</b>。</div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="panel">
+      <div class="box">
+        <h2>场地安全矩阵（与阶段绑定）</h2>
+        <table>
+          <tr><th>阶段</th><th>必须的安全措施</th></tr>
+          <tr><td><b>台架</b></td><td>固连，人不坐</td></tr>
+          <tr><td><b>系留</b></td><td>顶/侧防坠索，限制高度与水平半径</td></tr>
+          <tr><td><b>无人包线</b></td><td>遥控手控 + 地面急停</td></tr>
+          <tr><td><b>载人讨论</b></td><td>仅当上面全过 + 外部评审 + 许可框架</td></tr>
+        </table>
+      </div>
+      <div class="box">
+        <h2>什么时候可以谈"载人"</h2>
+        <table>
+          <tr><th>前序</th><th>状态</th></tr>
+          <tr><td>阶段 1 台架</td><td>通过</td></tr>
+          <tr><td>阶段 2 系留</td><td>通过</td></tr>
+          <tr><td>阶段 3 无人包线</td><td>通过</td></tr>
+          <tr><td>阶段 4 监管</td><td>书面许可</td></tr>
+          <tr><td><b>结论</b></td><td><b>1–4 全绿才可进入阶段 5</b></td></tr>
+        </table>
+        <p style="margin:10px 0 0;color:#6a787c;font-size:0.85rem;">
+          没有场地门禁，只加护栏 = 假安全。
+        </p>
+      </div>
+    </div>
+
+    <p class="note">
+      验证路径稿，非试飞批准文件、非适航文件。不提供推力、功率、桨径、控制增益与制造步骤。
+      未经许可不得载人试飞；开放街道永久 No-Go。
+    </p>
+
+    <p class="back">
+      返回 <a href="box-lift-sitting-concept.html">概念冻结主页面</a> ·
+      相关 <a href="box-lift-hmi.html">人机界面简图</a> ·
+      <a href="box-lift-feasibility.md">可行性分析</a> ·
+      <a href="box-lift-safety.md">安全六层</a>
+    </p>
+  </main>
+</body>
+</html>

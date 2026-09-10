@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Urban Halo · 人机界面简图 · 状态与急停</title>
+  <style>
+    :root {
+      --bg: #eef2f1; --paper: #fff; --ink: #1a2428; --muted: #6a787c;
+      --line: #d0dbd8; --teal: #2a6f6d; --teal-soft: #e5f0ef;
+      --orange: #c45c2d; --amber-soft: #f6eddc; --red: #9a4a40; --red-soft: #f4e8e3;
+      --dark: #2c3a40;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: var(--ink); background: var(--bg);
+      font: 15px/1.55 "Segoe UI", "Microsoft YaHei UI", sans-serif; }
+    .page { width: min(980px, calc(100% - 28px)); margin: 0 auto; padding: 22px 0 40px; }
+    header { padding: 14px 0 18px; border-top: 5px solid var(--orange);
+      border-bottom: 1px solid var(--line); margin-bottom: 16px; }
+    header h1 { margin: 0; font-size: clamp(1.5rem, 3.4vw, 2.05rem);
+      letter-spacing: -0.03em; font-weight: 750; }
+    header p { margin: 8px 0 0; color: var(--muted); max-width: 700px; }
+    .chips { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px; }
+    .chip { padding: 3px 9px; border: 1px solid var(--teal); color: var(--teal);
+      border-radius: 999px; font: 650 0.7rem/1.4 "Cascadia Mono", Consolas, monospace; }
+    .chip.off { border-color: var(--line); color: var(--muted); text-decoration: line-through; }
+
+    figure { margin: 14px 0 0; background: var(--paper); border: 1px solid var(--line);
+      border-radius: 12px; overflow: hidden; }
+    figure svg { display: block; width: 100%; height: auto; }
+    figcaption { padding: 10px 14px 12px; font-size: 0.82rem; color: var(--muted);
+      border-top: 1px solid var(--line); }
+    figcaption b { color: var(--ink); font-weight: 650; }
+
+    .panel { margin-top: 14px; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .box { background: var(--paper); border: 1px solid var(--line);
+      border-radius: 12px; padding: 14px 16px; }
+    .box h2 { margin: 0 0 10px; font-size: 0.95rem; letter-spacing: -0.02em; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line);
+      vertical-align: top; }
+    th { color: var(--teal); font-size: 0.72rem; letter-spacing: 0.04em; text-transform: uppercase; }
+    td { color: var(--muted); }
+    td b { color: var(--ink); }
+    .sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+      margin-right: 6px; vertical-align: middle; }
+    .box ul { margin: 0; padding-left: 1.15rem; color: var(--muted); font-size: 0.86rem; }
+    .box li + li { margin-top: 5px; }
+    .box .go { color: var(--teal); }
+    .box .no { color: var(--red); }
+
+    .note { margin-top: 14px; padding: 12px 14px; border-radius: 12px;
+      background: var(--red-soft); color: #7a3a32; font-size: 0.85rem; }
+    .tip { margin-top: 14px; padding: 14px 16px; border-radius: 12px;
+      border: 1px solid var(--teal); background: var(--teal-soft); }
+    .tip strong { display: block; margin-bottom: 6px; color: var(--teal); }
+    .tip p { margin: 0; font-size: 0.9rem; }
+    .back { margin-top: 14px; font-size: 0.85rem; color: var(--muted); }
+    .back a { color: var(--teal); }
+    @media (max-width: 760px) { .panel { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header>
+      <h1>人机界面简图 · 状态灯与急停逻辑</h1>
+      <p>
+        人只发<b>意图</b>（去哪、起降、转向），机器负责<b>增稳与否决</b>。
+        界面只需回答三个问题：<b>现在能不能飞</b>、<b>要不要降落</b>、<b>怎么立刻停下来</b>。
+      </p>
+      <div class="chips">
+        <span class="chip">四态灯</span>
+        <span class="chip">实体急停</span>
+        <span class="chip">包线否决</span>
+        <span class="chip">触地卸推力</span>
+        <span class="chip off">纯屏幕触屏急停</span>
+        <span class="chip off">自动航线接管</span>
+      </div>
+    </header>
+
+    <figure>
+      <svg viewBox="0 0 480 210" xmlns="http://www.w3.org/2000/svg" aria-label="状态灯面板">
+        <rect width="480" height="210" fill="#fff"/>
+        <text x="20" y="26" fill="#2a6f6d" font-family="Cascadia Mono, monospace"
+          font-size="12" font-weight="700">STATUS LIGHTS · 四态</text>
+
+        <!-- READY -->
+        <rect x="24" y="48" width="96" height="118" rx="10" fill="#e5f0ef" stroke="#2a6f6d" stroke-width="2"/>
+        <circle cx="72" cy="84" r="18" fill="#2a6f6d"/>
+        <text x="72" y="126" text-anchor="middle" font-size="13" font-weight="700" fill="#1a2428">可飞</text>
+        <text x="72" y="146" text-anchor="middle" font-family="Cascadia Mono, monospace"
+          font-size="10" fill="#2a6f6d">READY</text>
+
+        <!-- CAUTION -->
+        <rect x="136" y="48" width="96" height="118" rx="10" fill="#f6eddc" stroke="#b8862d" stroke-width="2"/>
+        <circle cx="184" cy="84" r="18" fill="#d9a441"/>
+        <text x="184" y="126" text-anchor="middle" font-size="13" font-weight="700" fill="#1a2428">注意</text>
+        <text x="184" y="146" text-anchor="middle" font-family="Cascadia Mono, monospace"
+          font-size="10" fill="#b8862d">CAUTION</text>
+
+        <!-- LAND -->
+        <rect x="248" y="48" width="96" height="118" rx="10" fill="#f4e8e3" stroke="#c45c2d" stroke-width="2"/>
+        <circle cx="296" cy="84" r="18" fill="#c45c2d"/>
+        <path d="M296 108 v-10" stroke="#c45c2d" stroke-width="0"/>
+        <text x="296" y="126" text-anchor="middle" font-size="13" font-weight="700" fill="#1a2428">降落</text>
+        <text x="296" y="146" text-anchor="middle" font-family="Cascadia Mono, monospace"
+          font-size="10" fill="#c45c2d">LAND NOW</text>
+
+        <!-- NO-GO -->
+        <rect x="360" y="48" width="96" height="118" rx="10" fill="#f4e8e3" stroke="#9a4a40" stroke-width="2"/>
+        <circle cx="408" cy="84" r="18" fill="#9a4a40"/>
+        <path d="M398 76 L418 92 M418 76 L398 92" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
+        <text x="408" y="126" text-anchor="middle" font-size="13" font-weight="700" fill="#1a2428">禁飞</text>
+        <text x="408" y="146" text-anchor="middle" font-family="Cascadia Mono, monospace"
+          font-size="10" fill="#9a4a40">NO-GO</text>
+
+        <text x="240" y="192" text-anchor="middle" fill="#6a787c" font-size="12">
+          灯由飞控决定，不受人手柄覆盖 · 实体键在双手可及处
+        </text>
+      </svg>
+      <figcaption><b>状态灯</b> · 一眼回答"能不能飞 / 要不要落"</figcaption>
+    </figure>
+
+    <div class="panel">
+      <div class="box">
+        <h2>灯的含义与人的动作</h2>
+        <table>
+          <tr><th>灯</th><th>触发（概念）</th><th>人该做</th></tr>
+          <tr>
+            <td><span class="sw" style="background:#2a6f6d"></span><b>可飞</b></td>
+            <td>自检通过 · 约束锁好 · 电量/风限在包线内</td>
+            <td>可正常手控起降与平移</td>
+          </tr>
+          <tr>
+            <td><span class="sw" style="background:#d9a441"></span><b>注意</b></td>
+            <td>接近包线边界（电量 / 风 / 倾角 / 温升）</td>
+            <td>停止远离，<b>准备降落</b></td>
+          </tr>
+          <tr>
+            <td><span class="sw" style="background:#c45c2d"></span><b>降落</b></td>
+            <td>超限 · 单通道失效 · 低电压 · 姿态异常</td>
+            <td>禁止平移，<b>只许受控下降</b></td>
+          </tr>
+          <tr>
+            <td><span class="sw" style="background:#9a4a40"></span><b>禁飞</b></td>
+            <td>约束未锁 · 自检失败 · 轮未解锁 · 地面模式</td>
+            <td>升力不解锁，<b>不得起飞</b></td>
+          </tr>
+        </table>
+      </div>
+      <div class="box">
+        <h2>人的输入 → 机器动作</h2>
+        <table>
+          <tr><th>人的输入</th><th>效果</th></tr>
+          <tr><td><b>升力轴</b>（总距感）</td><td>上升 / 下降</td></tr>
+          <tr><td><b>俯仰 / 滚转</b></td><td>前后 / 左右平移（机身微倾）</td></tr>
+          <tr><td><b>偏航</b></td><td>原地转向</td></tr>
+          <tr><td><b>实体急停键</b></td><td>禁止平移 + 受控下降</td></tr>
+          <tr><td><b>约束带</b></td><td>未扣好 → 禁止升力解锁</td></tr>
+        </table>
+        <p style="margin:10px 0 0;color:#6a787c;font-size:0.85rem;">
+          人决定"去哪、多高、何时落地"；机器决定"这个指令是否越界"。
+        </p>
+      </div>
+    </div>
+
+    <figure>
+      <svg viewBox="0 0 480 280" xmlns="http://www.w3.org/2000/svg" aria-label="急停逻辑流程">
+        <rect width="480" height="280" fill="#fff"/>
+        <text x="20" y="26" fill="#2a6f6d" font-family="Cascadia Mono, monospace"
+          font-size="12" font-weight="700">E-STOP LOGIC · 实体急停（蛇形顺序）</text>
+
+        <!-- row 1 -->
+        <g font-size="11" fill="#1a2428">
+          <rect x="20" y="46" width="130" height="62" rx="9" fill="#f4e8e3" stroke="#c45c2d" stroke-width="2.5"/>
+          <text x="85" y="70" text-anchor="middle" font-weight="700">① 急停按下</text>
+          <text x="85" y="88" text-anchor="middle" fill="#7a3a32" font-size="10">实体键 / 地面站</text>
+
+          <rect x="175" y="46" width="130" height="62" rx="9" fill="#fff" stroke="#2c3a40" stroke-width="2"/>
+          <text x="240" y="70" text-anchor="middle" font-weight="700">② 切平移</text>
+          <text x="240" y="88" text-anchor="middle" fill="#6a787c" font-size="10">锁定水平姿态</text>
+
+          <rect x="330" y="46" width="130" height="62" rx="9" fill="#fff" stroke="#2c3a40" stroke-width="2"/>
+          <text x="395" y="70" text-anchor="middle" font-weight="700">③ 升力→缓降值</text>
+          <text x="395" y="88" text-anchor="middle" fill="#6a787c" font-size="10">受控下降，非自由落</text>
+        </g>
+
+        <!-- arrows row1 -->
+        <g stroke="#c45c2d" stroke-width="2.2" fill="none">
+          <path d="M150 77 H170" marker-end="url(#a)"/>
+          <path d="M305 77 H325" marker-end="url(#a)"/>
+          <path d="M395 108 V132" marker-end="url(#a)"/>
+        </g>
+
+        <!-- row 2 (right to left) -->
+        <g font-size="11" fill="#1a2428">
+          <rect x="330" y="136" width="130" height="62" rx="9" fill="#fff" stroke="#2c3a40" stroke-width="2"/>
+          <text x="395" y="160" text-anchor="middle" font-weight="700">④ 触地检测</text>
+          <text x="395" y="178" text-anchor="middle" fill="#6a787c" font-size="10">脚轮触地信号</text>
+
+          <rect x="175" y="136" width="130" height="62" rx="9" fill="#fff" stroke="#2c3a40" stroke-width="2"/>
+          <text x="240" y="160" text-anchor="middle" font-weight="700">⑤ 卸推力</text>
+          <text x="240" y="178" text-anchor="middle" fill="#6a787c" font-size="10">升力归零</text>
+
+          <rect x="20" y="136" width="130" height="62" rx="9" fill="#e5f0ef" stroke="#2a6f6d" stroke-width="2.5"/>
+          <text x="85" y="160" text-anchor="middle" font-weight="700">⑥ 闭锁 + 轮锁</text>
+          <text x="85" y="178" text-anchor="middle" fill="#2a6f6d" font-size="10">涵道停转 · 可安全离机</text>
+        </g>
+
+        <!-- arrows row2 -->
+        <g stroke="#c45c2d" stroke-width="2.2" fill="none">
+          <path d="M325 167 H310" marker-end="url(#a)"/>
+          <path d="M170 167 H155" marker-end="url(#a)"/>
+        </g>
+
+        <defs>
+          <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6"
+            markerHeight="6" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="#c45c2d"/>
+          </marker>
+        </defs>
+
+        <line x1="20" y1="222" x2="460" y2="222" stroke="#d0dbd8" stroke-width="1"/>
+        <text x="20" y="246" font-size="12" fill="#1a2428">
+          <tspan font-weight="700" fill="#9a4a40">急停优先级最高：</tspan>
+          覆盖一切手柄输入 · 飞控仍保持增稳，不允许"直接断电坠落"
+        </text>
+        <text x="20" y="266" font-size="12" fill="#6a787c">
+          地面站急停与机上实体键等效；任一路触发即进入同一流程
+        </text>
+      </svg>
+      <figcaption><b>急停逻辑</b> · 目标是"受控降落"，不是切断一切</figcaption>
+    </figure>
+
+    <div class="panel">
+      <div class="box">
+        <h2>人机安全分工</h2>
+        <ul>
+          <li class="go"><b>人：</b>决定起降、方向、转向、何时停；按急停；系好约束</li>
+          <li class="go"><b>机：</b>增稳 + 包线否决 + 急停执行 + 触地卸推力</li>
+          <li class="no"><b>不是：</b>去掉飞控的"更纯手动"</li>
+          <li class="no"><b>不是：</b>有了护栏或状态灯就可以上街</li>
+        </ul>
+      </div>
+      <div class="box">
+        <h2>界面设计约束（概念）</h2>
+        <ul>
+          <li>急停必须是<b>实体键</b>，非纯屏幕触控</li>
+          <li>状态灯<b>不受手柄覆盖</b>，人不能"关掉告警继续飞"</li>
+          <li>灯语与飞控状态同源，避免两套判定打架</li>
+          <li>夜间 / 强光下可读；故障态优先显示</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="tip">
+      <strong>一句话</strong>
+      <p>人有<b>飞行权</b>，机器有<b>否决权</b>；急停的终点是"稳稳落地并锁住"，不是"立刻失去动力"。</p>
+    </div>
+
+    <p class="note">
+      人机界面概念稿，非可施工电气/软件设计。不提供控制增益、线束、器件型号与制造步骤。
+      未经许可不得载人试飞；开放街道永久 No-Go。
+    </p>
+
+    <p class="back">
+      返回 <a href="box-lift-sitting-concept.html">概念冻结主页面</a> ·
+      相关 <a href="box-lift-validation-path.html">验证路径与门禁</a> ·
+      <a href="box-lift-safety.md">安全六层</a> ·
+      <a href="box-lift-how-to-fly-300jin.md">手动操控说明</a>
+    </p>
+  </main>
+</body>
+</html>

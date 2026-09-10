@@ -153,3 +153,9 @@ subtitle_pipeline/instances/
 
 # ── 本地第三方工具（claim-auto 部署 + propainter 源码包），不入库 ──
 tools/
+
+# ── Urban Halo 概念文档（例外：全局 *.md / *.html / *.jpg 被忽略）──
+!box-lift-*.html
+!box-lift-*.md
+!concept-renders/
+!concept-renders/*.jpg

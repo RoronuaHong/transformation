@@ -1,0 +1,980 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Urban Halo · 重量—功率—能量收敛速算</title>
+  <style>
+    :root {
+      --bg: #eef2f1; --paper: #fff; --ink: #1a2428; --muted: #6a787c;
+      --line: #d0dbd8; --teal: #2a6f6d; --teal-soft: #e5f0ef;
+      --orange: #c45c2d; --amber: #b8862d; --amber-soft: #f6eddc;
+      --red: #9a4a40; --red-soft: #f4e8e3; --dark: #2c3a40;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: var(--ink); background: var(--bg);
+      font: 15px/1.55 "Segoe UI", "Microsoft YaHei UI", sans-serif; }
+    .page { width: min(1120px, calc(100% - 28px)); margin: 0 auto; padding: 22px 0 40px; }
+    header { padding: 14px 0 18px; border-top: 5px solid var(--orange);
+      border-bottom: 1px solid var(--line); margin-bottom: 16px; }
+    header h1 { margin: 0; font-size: clamp(1.45rem, 3.2vw, 2rem);
+      letter-spacing: -0.03em; font-weight: 750; }
+    header p { margin: 8px 0 0; color: var(--muted); max-width: 780px; }
+    .chips { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px; }
+    .chip { padding: 3px 9px; border: 1px solid var(--teal); color: var(--teal);
+      border-radius: 999px; font: 650 0.7rem/1.4 "Cascadia Mono", Consolas, monospace; }
+
+    .presets { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+    .presets button {
+      font: 650 0.82rem/1 "Segoe UI", "Microsoft YaHei UI", sans-serif;
+      padding: 8px 13px; border-radius: 9px; cursor: pointer;
+      border: 1px solid var(--teal); background: var(--paper); color: var(--teal);
+    }
+    .presets button:hover { background: var(--teal-soft); }
+    .presets button.on { background: var(--teal); color: #fff; }
+
+    .layout { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 16px; }
+    .card { background: var(--paper); border: 1px solid var(--line);
+      border-radius: 12px; padding: 14px 16px; }
+    .card > h2 { margin: 0 0 10px; font-size: 0.95rem; letter-spacing: -0.02em; }
+
+    fieldset { border: 0; padding: 0; margin: 0 0 14px; }
+    fieldset legend { font: 700 0.72rem/1.3 "Cascadia Mono", Consolas, monospace;
+      letter-spacing: 0.05em; text-transform: uppercase; color: var(--teal);
+      padding: 0; margin-bottom: 8px; }
+    .row { display: grid; grid-template-columns: 1fr 62px; align-items: center;
+      gap: 8px; margin-bottom: 7px; }
+    .row label { font-size: 0.85rem; color: var(--ink); }
+    .row label small { display: block; color: var(--muted); font-size: 0.74rem; }
+    .row input[type=number] { width: 100%; padding: 5px 6px; font: 650 0.85rem/1
+      "Cascadia Mono", Consolas, monospace; color: var(--teal);
+      border: 1px solid var(--line); border-radius: 7px; background: #fbfdfc; text-align: right; }
+    input[type=range] { width: 100%; accent-color: var(--teal); margin: 0; }
+    .rng { grid-column: 1 / -1; margin: -2px 0 10px; }
+    select { width: 100%; padding: 6px; border: 1px solid var(--line); border-radius: 7px;
+      background: #fbfdfc; font: 650 0.85rem/1 "Segoe UI", "Microsoft YaHei UI", sans-serif;
+      color: var(--ink); }
+
+    .verdict { border-radius: 11px; padding: 12px 14px; margin-bottom: 12px;
+      font-size: 0.88rem; border: 1px solid var(--line); background: var(--paper); }
+    .verdict b { display: block; font-size: 0.95rem; margin-bottom: 4px; }
+    .verdict.ok { background: var(--teal-soft); border-color: var(--teal); color: #1d5452; }
+    .verdict.warn { background: var(--amber-soft); border-color: var(--amber); color: #6f5417; }
+    .verdict.bad { background: var(--red-soft); border-color: var(--red); color: #7a3a32; }
+
+    .kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .kpi { border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; background: #fbfdfc; }
+    .kpi .k { font: 700 0.66rem/1.3 "Cascadia Mono", Consolas, monospace;
+      color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+    .kpi .v { font: 750 1.28rem/1.25 "Cascadia Mono", Consolas, monospace;
+      color: var(--teal); margin-top: 3px; }
+    .kpi .u { font-size: 0.72rem; color: var(--muted); font-weight: 500; }
+    .kpi.hl .v { color: var(--orange); }
+    .kpi.bad .v { color: var(--red); }
+
+    .detail { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 0.85rem; }
+    .detail td { padding: 5px 0; border-bottom: 1px dashed var(--line); color: var(--muted); }
+    .detail td:last-child { text-align: right; font-family: "Cascadia Mono", Consolas, monospace;
+      color: var(--ink); font-weight: 650; }
+
+    .sens { margin-top: 16px; }
+    .card h3 { margin: 18px 0 8px; font-size: 0.86rem; color: var(--teal); letter-spacing: 0.02em; }
+    table.gap { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+    table.gap th { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line);
+      color: var(--teal); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    table.gap td { padding: 6px 8px; border-bottom: 1px solid var(--line);
+      color: var(--muted); vertical-align: top; }
+    table.gap td:first-child { color: var(--ink); font-weight: 650; white-space: nowrap; }
+    table.gap b { color: var(--ink); }
+    .lede { margin: 0 0 4px; font-size: 0.85rem; color: var(--muted); }
+    .chk { display: flex; align-items: center; gap: 7px; font-size: 0.84rem;
+      color: var(--ink); margin: 2px 0 0; cursor: pointer; }
+    .chk input { accent-color: var(--teal); }
+    .legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 0.78rem;
+      color: var(--muted); margin-top: 6px; }
+    .legend i { display: inline-block; width: 16px; height: 3px;
+      margin-right: 5px; vertical-align: middle; }
+    .optbox { margin-top: 10px; padding: 11px 13px; border-radius: 10px;
+      background: #fbfdfc; border: 1px solid var(--line); }
+    .optbox .big { font: 750 1.05rem/1.35 "Cascadia Mono", Consolas, monospace; color: var(--teal); }
+    .sub { display: block; font-size: 0.72rem; color: var(--muted); font-weight: 400; margin-top: 2px; }
+    .v-ok { color: var(--teal); } .v-warn { color: var(--amber); } .v-bad { color: var(--red); }
+    table.scan { width: 100%; border-collapse: collapse; font-size: 0.83rem;
+      font-family: "Cascadia Mono", Consolas, monospace; }
+    table.scan th { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--line);
+      color: var(--teal); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    table.scan td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--line);
+      color: var(--ink); }
+    table.scan td.s-ok { color: var(--teal); font-weight: 700; }
+    table.scan td.s-warn { color: var(--amber); font-weight: 700; }
+    table.scan td.s-bad { color: var(--red); font-weight: 700; }
+    table.scan tr.cur { background: var(--teal-soft); }
+
+    .note { margin-top: 14px; padding: 12px 14px; border-radius: 12px;
+      background: var(--red-soft); color: #7a3a32; font-size: 0.85rem; }
+    .howto { margin-top: 14px; padding: 12px 14px; border-radius: 12px;
+      border: 1px solid var(--line); background: var(--paper);
+      font-size: 0.84rem; color: var(--muted); }
+    .howto code { background: #f2f6f5; padding: 1px 5px; border-radius: 4px;
+      font-family: "Cascadia Mono", Consolas, monospace; color: var(--teal); }
+    .back { margin-top: 14px; font-size: 0.85rem; color: var(--muted); }
+    .back a { color: var(--teal); }
+    @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } .kpis { grid-template-columns: repeat(2, 1fr); } }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header>
+      <h1>重量 — 功率 — 能量 · 收敛速算</h1>
+      <p>
+        核心问题：<b>总重决定功率，功率决定电池，电池又加回总重</b>——这是个循环。
+        本页用迭代求解这个闭环；<b>若迭代发散，说明该构型在当前参数下物理上不成立</b>，加多少电池都没用。
+      </p>
+      <div class="chips">
+        <span class="chip">动量理论 + 经验系数</span>
+        <span class="chip">量级估算</span>
+        <span class="chip">收敛 / 发散判定</span>
+      </div>
+      <div class="presets">
+        <button data-preset="now">现状构型 · 6×0.5m 纯电</button>
+        <button data-preset="big">放大盘 · 6×1.2m 纯电</button>
+        <button data-preset="hybrid">混动增程 · 6×1.0m</button>
+        <button data-preset="tether">系留供电 · 6×0.5m</button>
+      </div>
+    </header>
+
+    <div class="layout">
+      <section class="card">
+        <h2>参数</h2>
+
+        <fieldset>
+          <legend>任务剖面</legend>
+          <div class="row"><label>载重 人+物 <small>kg</small></label><input type="number" id="pay" value="150" step="5"></div>
+          <input class="rng" type="range" id="pay_r" min="50" max="250" step="5" value="150">
+          <div class="row"><label>悬停时间 <small>min</small></label><input type="number" id="tHov" value="5" step="1"></div>
+          <input class="rng" type="range" id="tHov_r" min="0" max="30" step="1" value="5">
+          <div class="row"><label>平移距离 <small>km</small></label><input type="number" id="dist" value="0" step="0.5"></div>
+          <input class="rng" type="range" id="dist_r" min="0" max="20" step="0.5" value="0">
+          <div class="row"><label>巡航速度 <small>km/h</small></label><input type="number" id="speed" value="40" step="5"></div>
+          <div class="row"><label>电量余量 <small>%</small></label><input type="number" id="reserve" value="20" step="5"></div>
+        </fieldset>
+
+        <fieldset>
+          <legend>构型</legend>
+          <div class="row"><label>涵道数量 <small>个</small></label><input type="number" id="n" value="6" step="1"></div>
+          <div class="row"><label>单涵道直径 <small>m · 决定总盘面积</small></label><input type="number" id="d" value="0.5" step="0.05"></div>
+          <input class="rng" type="range" id="d_r" min="0.3" max="1.5" step="0.05" value="0.5">
+          <div class="row"><label>空机固定重 <small>kg · 结构+航电+座椅约束</small></label><input type="number" id="dryFixed" value="120" step="10"></div>
+          <input class="rng" type="range" id="dryFixed_r" min="50" max="300" step="10" value="120">
+          <div class="row"><label>推进功重比 <small>kW/kg</small></label><input type="number" id="propDensity" value="3" step="0.5"></div>
+          <label class="chk"><input type="checkbox" id="consv"> 计入结构增重 + 热管理（空机 +15%）</label>
+        </fieldset>
+
+        <fieldset>
+          <legend>效率</legend>
+          <div class="row"><label>Figure of Merit <small>悬停效率 0.4–0.85</small></label><input type="number" id="fm" value="0.65" step="0.05"></div>
+          <div class="row"><label>电机+电调效率 <small>η</small></label><input type="number" id="eta" value="0.9" step="0.01"></div>
+          <div class="row"><label>推力余量系数 <small>kT · ≥1.3</small></label><input type="number" id="kT" value="1.3" step="0.1"></div>
+        </fieldset>
+
+        <fieldset>
+          <legend>能源</legend>
+          <div class="row" style="grid-template-columns:1fr;">
+            <select id="energyMode">
+              <option value="batt200" selected>纯电锂电（包级 200 Wh/kg）</option>
+              <option value="batt350">高比能锂电（包级 350 Wh/kg）</option>
+              <option value="hybrid700">混动增程（等效 700 Wh/kg）</option>
+              <option value="hybrid1200">氢电/高能量（等效 1200 Wh/kg）</option>
+              <option value="tether">系留供电（地面供电，机上仅 UPS）</option>
+            </select>
+          </div>
+          <div class="row"><label>包级能量密度 <small>Wh/kg</small></label><input type="number" id="eDensity" value="200" step="10"></div>
+          <div class="row"><label>包级功率密度 <small>W/kg</small></label><input type="number" id="pDensity" value="1200" step="100"></div>
+        </fieldset>
+      </section>
+
+      <section class="card">
+        <h2>结果</h2>
+        <div id="verdict" class="verdict">—</div>
+        <div class="kpis">
+          <div class="kpi hl"><div class="k">总重 AUW</div><div class="v" id="kAUW">—</div><div class="u">kg</div></div>
+          <div class="kpi hl"><div class="k">悬停功率</div><div class="v" id="kP">—</div><div class="u">kW 电功率</div></div>
+          <div class="kpi"><div class="k">电池重量</div><div class="v" id="kBatt">—</div><div class="u">kg</div></div>
+          <div class="kpi"><div class="k">推进重量</div><div class="v" id="kProp">—</div><div class="u">kg</div></div>
+          <div class="kpi"><div class="k">盘载荷</div><div class="v" id="kDL">—</div><div class="u">N/m²</div></div>
+          <div class="kpi"><div class="k">载重占比</div><div class="v" id="kFrac">—</div><div class="u">% of AUW</div></div>
+        </div>
+        <table class="detail">
+          <tr><td>总盘面积 A</td><td id="dA">—</td></tr>
+          <tr><td>总推力需求（含 kT 余量）</td><td id="dT">—</td></tr>
+          <tr><td>单涵道推力</td><td id="dTn">—</td></tr>
+          <tr><td>电池容量</td><td id="dE">—</td></tr>
+          <tr><td>电池重量受限于</td><td id="dLim">—</td></tr>
+          <tr><td>迭代次数 / 收敛性</td><td id="dIter">—</td></tr>
+        </table>
+        <p style="margin:12px 0 0;color:var(--muted);font-size:0.8rem;">
+          平移段按与悬停同等功率保守估算。盘载荷参考：多旋翼 ~100–200 N/m²，直升机 ~300–500，
+          涵道 eVTOL 可到 500–1500；<b>越高越费电</b>。
+        </p>
+      </section>
+    </div>
+
+    <section class="card sens">
+      <h2>敏感性 · 涵道直径扫描（其余参数不变）</h2>
+      <table class="scan">
+        <thead><tr><th>直径 m</th><th>盘面积 m²</th><th>功率 kW</th><th>AUW kg</th><th>电池 kg</th><th>盘载荷</th><th>结论</th></tr></thead>
+        <tbody id="scanD"></tbody>
+      </table>
+      <p style="margin:10px 0 0;color:var(--muted);font-size:0.8rem;">
+        看这一列找<b>临界直径</b>：低于它迭代发散（红色），构型不成立。
+      </p>
+    </section>
+
+    <section class="card sens">
+      <h2>曲线 · 总重与功率 vs 涵道直径</h2>
+      <svg id="chart" viewBox="0 0 900 360" style="width:100%;height:auto;display:block;"></svg>
+      <div class="legend">
+        <span><i style="background:#2a6f6d"></i>总重 AUW（左轴 kg）</span>
+        <span><i style="background:#c45c2d"></i>悬停功率（右轴 kW）</span>
+        <span><i style="background:#9a4a40"></i>当前选择</span>
+      </div>
+      <p class="lede" style="margin-top:8px;">
+        左侧灰色区 = <b>发散区</b>（物理不成立）。过了临界直径后曲线<b>陡降</b>，再往右趋于平缓——
+        这就是「盘做大反而更轻」的直观形态：<b>最优点不在临界点上，而在曲线拐弯之后</b>。
+      </p>
+    </section>
+
+    <section class="card sens">
+      <h2>最优配置求解 · 给定机体上限</h2>
+      <p class="lede">
+        既然最优点不是临界点，就直接在<b>机体尺寸允许的范围内</b>搜最优。
+        涵道直径按 机体上限 ÷ 3.2 封顶，在可行域内按选定目标取最优。
+      </p>
+      <div class="row" style="max-width:440px;">
+        <label>机体外径上限 <small>m · 涵道 = 上限 / 3.2</small></label>
+        <input type="number" id="bodyMax" value="3.8" step="0.1">
+      </div>
+      <input class="rng" type="range" id="bodyMax_r" min="2" max="6" step="0.1" value="3.8" style="max-width:440px;">
+      <div class="row" style="max-width:440px;">
+        <label>优化目标</label>
+        <select id="optTarget" style="width:auto;">
+          <option value="auw">总重最小</option>
+          <option value="pwr">功率最低</option>
+        </select>
+      </div>
+      <div id="optOut" class="optbox">—</div>
+    </section>
+
+    <section class="card sens">
+      <h2>能源方案对比（当前构型与任务）</h2>
+      <table class="scan">
+        <thead><tr><th style="text-align:left">方案</th><th>Wh/kg</th><th>W/kg</th><th>AUW kg</th><th>能源重量 kg</th><th>受限于</th><th>结论</th></tr></thead>
+        <tbody id="scanE"></tbody>
+      </table>
+      <p style="margin:10px 0 0;color:var(--muted);font-size:0.8rem;">
+        注意「受限于」一列：若是<b>功率密度</b>，提高能量密度<b>不会减重</b>——紧凑构型最常踩的坑。
+        氢电能量高但<b>功率密度低</b>，短时高功率场景反而吃亏。
+      </p>
+    </section>
+
+    <section class="card sens">
+      <h2>可行域矩阵 · 任务剖面 × 能源方案</h2>
+      <p class="lede">
+        既然任务剖面还没拍板，这里把 4 种典型剖面<b>全部算了一遍</b>。
+        每格 = <b>闭环收敛所需的最小单涵道直径</b>（6 涵道），并给出该点的总重与功率。
+        机体外径按 6 涵道环形布置估算 ≈ <b>3.2 × 涵道直径</b>。
+      </p>
+      <table class="gap">
+        <tr>
+          <th>任务剖面</th><th>纯电 200</th><th>高比能 350</th><th>混动 700</th><th>氢电 1200</th><th>系留供电</th>
+        </tr>
+        <tr>
+          <td>演示<br><span class="sub">悬停 3 min</span></td>
+          <td><b class="v-warn">1.16 m</b><span class="sub">机体 3.7 m · 664 kg<br>338 kW · 功率受限</span></td>
+          <td><b class="v-warn">1.16 m</b><span class="sub">机体 3.7 m · 664 kg<br>338 kW · 功率受限</span></td>
+          <td><b class="v-warn">0.98 m</b><span class="sub">机体 3.1 m · 748 kg<br>478 kW · 功率受限</span></td>
+          <td><b class="v-bad">1.42 m</b><span class="sub">机体 4.5 m · 720 kg<br>311 kW · 功率受限</span></td>
+          <td><b class="v-ok">任意 d</b><span class="sub">总能收敛；建议 0.6–0.8 m<br>机体 1.9–2.6 m · 177–268 kW</span></td>
+        </tr>
+        <tr>
+          <td>园区短驳<br><span class="sub">1 min + 2 km</span></td>
+          <td><b class="v-warn">1.16 m</b><span class="sub">同上（与 3 min 一致）</span></td>
+          <td><b class="v-warn">1.16 m</b><span class="sub">同上</span></td>
+          <td><b class="v-warn">0.98 m</b><span class="sub">同上</span></td>
+          <td><b class="v-bad">1.42 m</b><span class="sub">同上</span></td>
+          <td><b class="v-ok">任意 d</b><span class="sub">同上</span></td>
+        </tr>
+        <tr>
+          <td>通勤<br><span class="sub">2 min + 10 km</span></td>
+          <td><b class="v-bad">1.70 m</b><span class="sub">机体 5.4 m · 739 kg<br>271 kW · <b>转能量受限</b></span></td>
+          <td><b class="v-warn">1.16 m</b><span class="sub">仍功率受限<br>机体 3.7 m</span></td>
+          <td><b class="v-warn">0.98 m</b><span class="sub">仍功率受限<br>机体 3.1 m</span></td>
+          <td><b class="v-bad">1.42 m</b><span class="sub">仍功率受限<br>机体 4.5 m</span></td>
+          <td><b class="v-ok">任意 d</b><span class="sub">同上</span></td>
+        </tr>
+        <tr>
+          <td>长航时<br><span class="sub">悬停 20 min</span></td>
+          <td><b class="v-bad">2.30 m</b><span class="sub">机体 7.4 m · 703 kg<br>185 kW · 能量受限</span></td>
+          <td><b class="v-bad">1.46 m</b><span class="sub">机体 4.7 m · 686 kg<br>282 kW · 能量受限</span></td>
+          <td><b class="v-warn">0.98 m</b><span class="sub">仍功率受限<br>机体 3.1 m</span></td>
+          <td><b class="v-bad">1.42 m</b><span class="sub">仍功率受限<br>机体 4.5 m</span></td>
+          <td><b class="v-ok">任意 d</b><span class="sub">同上</span></td>
+        </tr>
+      </table>
+
+      <h3>矩阵读出来的四件事</h3>
+      <table class="gap">
+        <tr><th>观察</th><th>含义</th></tr>
+        <tr><td>短任务下 350 与 200 <b>完全一样</b></td>
+          <td>演示 / 园区两行里，提高能量密度<b>一点用没有</b>——因为都是<b>功率受限</b>。这是 A5 最直接的实证。</td></tr>
+        <tr><td>非系留方案最小机体 <b>3.1 m</b></td>
+          <td>最好的混动也要 3.1 m；纯电 3.7 m；氢电 4.5 m。<b>想紧凑（≤2.5 m）只有系留。</b></td></tr>
+        <tr><td>混动<b>几乎不受任务时长影响</b></td>
+          <td>到 20 min 仍是功率受限（0.98 m 不变），是最稳健的方案；代价是功率 478 kW 偏高。</td></tr>
+        <tr><td>纯电随任务加长<b>急剧恶化</b></td>
+          <td>10 km 通勤要 5.4 m、20 min 要 7.4 m —— 能量受限接管后直接不现实。</td></tr>
+      </table>
+      <p class="lede" style="margin-top:10px;">
+        注：系留数学上任意直径都收敛，但盘太小会让功率荒谬（0.34 m 时需 <b>1116 kW</b>），
+        所以按功率选取 0.6–0.8 m 才是工程上合理的。
+      </p>
+    </section>
+
+    <section class="card sens">
+      <h2>两个能收敛的方向</h2>
+      <p class="lede">
+        排除「纯电 + 紧凑」后，实际只剩两条路。先看两张<b>同一比例尺</b>的对比图——
+        右边明显大一圈，这就是「要自由飞行就得接受多大」的直观答案。
+        配置前提：6 涵道、载重 150 kg、悬停 5 min、余量 20%，机体外径 ≈ 3.2 × 涵道直径。
+      </p>
+
+      <svg viewBox="0 0 900 400" xmlns="http://www.w3.org/2000/svg"
+           style="width:100%;height:auto;display:block;border:1px solid #d0dbd8;border-radius:10px;background:#fff;">
+        <text x="20" y="26" fill="#2a6f6d" font-family="Cascadia Mono, monospace" font-size="12" font-weight="700">TOP VIEW · 俯视对比（同一比例尺）</text>
+        <text x="880" y="26" text-anchor="end" fill="#6a787c" font-family="Cascadia Mono, monospace" font-size="11">1 m ≈ 45 px</text>
+        <line x1="450" y1="14" x2="450" y2="386" stroke="#d0dbd8" stroke-width="1" stroke-dasharray="4 4"/>
+
+        <text x="200" y="58" text-anchor="middle" font-size="14" font-weight="700" fill="#1a2428">A · 系留演示机</text>
+        <text x="200" y="76" text-anchor="middle" font-size="11" fill="#2a6f6d" font-family="Cascadia Mono, monospace">机体 ⌀ 2.24 m</text>
+        <circle cx="200" cy="190" r="50.4" fill="#c5ced0" stroke="#2c3a40" stroke-width="2.5"/>
+        <g fill="#e5f0ef" stroke="#2a6f6d" stroke-width="2">
+          <circle cx="200" cy="158.4" r="15.75"/><circle cx="227.4" cy="174.2" r="15.75"/>
+          <circle cx="227.4" cy="205.8" r="15.75"/><circle cx="200" cy="221.6" r="15.75"/>
+          <circle cx="172.6" cy="205.8" r="15.75"/><circle cx="172.6" cy="174.2" r="15.75"/>
+        </g>
+        <g fill="#2a6f6d">
+          <circle cx="200" cy="158.4" r="5"/><circle cx="227.4" cy="174.2" r="5"/>
+          <circle cx="227.4" cy="205.8" r="5"/><circle cx="200" cy="221.6" r="5"/>
+          <circle cx="172.6" cy="205.8" r="5"/><circle cx="172.6" cy="174.2" r="5"/>
+        </g>
+        <circle cx="200" cy="190" r="16" fill="#e8eeec" stroke="#2c3a40" stroke-width="1.5"/>
+        <circle cx="200" cy="190" r="7" fill="#fff" stroke="#c45c2d" stroke-width="1.5"/>
+        <g stroke="#c45c2d" stroke-width="1.5">
+          <line x1="149.6" y1="265" x2="250.4" y2="265"/>
+          <line x1="149.6" y1="259" x2="149.6" y2="271"/><line x1="250.4" y1="259" x2="250.4" y2="271"/>
+        </g>
+        <text x="200" y="285" text-anchor="middle" font-size="11" fill="#c45c2d" font-family="Cascadia Mono, monospace">涵道 0.70 m × 6 · 349 kg · 213 kW</text>
+        <text x="200" y="303" text-anchor="middle" font-size="11" fill="#6a787c">缆绳供电 · 只能定点</text>
+
+        <text x="620" y="58" text-anchor="middle" font-size="14" font-weight="700" fill="#1a2428">B · 混动平台</text>
+        <text x="620" y="76" text-anchor="middle" font-size="11" fill="#2a6f6d" font-family="Cascadia Mono, monospace">机体 ⌀ 3.84 m</text>
+        <circle cx="620" cy="190" r="86.4" fill="#c5ced0" stroke="#2c3a40" stroke-width="2.5"/>
+        <g fill="#e5f0ef" stroke="#2a6f6d" stroke-width="2">
+          <circle cx="620" cy="133.6" r="27"/><circle cx="668.8" cy="161.8" r="27"/>
+          <circle cx="668.8" cy="218.2" r="27"/><circle cx="620" cy="246.4" r="27"/>
+          <circle cx="571.2" cy="218.2" r="27"/><circle cx="571.2" cy="161.8" r="27"/>
+        </g>
+        <g fill="#2a6f6d">
+          <circle cx="620" cy="133.6" r="8.6"/><circle cx="668.8" cy="161.8" r="8.6"/>
+          <circle cx="668.8" cy="218.2" r="8.6"/><circle cx="620" cy="246.4" r="8.6"/>
+          <circle cx="571.2" cy="218.2" r="8.6"/><circle cx="571.2" cy="161.8" r="8.6"/>
+        </g>
+        <circle cx="620" cy="190" r="29" fill="#e8eeec" stroke="#2c3a40" stroke-width="1.5"/>
+        <circle cx="620" cy="190" r="12" fill="#fff" stroke="#c45c2d" stroke-width="1.5"/>
+        <g stroke="#c45c2d" stroke-width="1.5">
+          <line x1="533.6" y1="322" x2="706.4" y2="322"/>
+          <line x1="533.6" y1="316" x2="533.6" y2="328"/><line x1="706.4" y1="316" x2="706.4" y2="328"/>
+        </g>
+        <text x="620" y="342" text-anchor="middle" font-size="11" fill="#c45c2d" font-family="Cascadia Mono, monospace">涵道 1.20 m × 6 · 455 kg · 185 kW</text>
+        <text x="620" y="360" text-anchor="middle" font-size="11" fill="#6a787c">自由飞行 · 但不再是座椅</text>
+      </svg>
+      <p class="lede" style="margin-top:8px;">
+        参照：B 的 3.84 m 直径，约等于<b>一张双人床的宽度</b>，或比紧凑型轿车（长约 4.2 m）略小一号的圆。
+        A 的 2.24 m 还像个「带护栏的座椅」，B 已经是一台小型飞行器。
+      </p>
+
+      <svg viewBox="0 0 900 340" xmlns="http://www.w3.org/2000/svg"
+           style="width:100%;height:auto;display:block;border:1px solid #d0dbd8;border-radius:10px;background:#fff;margin-top:14px;">
+        <text x="20" y="26" fill="#2a6f6d" font-family="Cascadia Mono, monospace" font-size="12" font-weight="700">SIDE VIEW · 侧视对比（同一比例尺，含坐姿人）</text>
+        <text x="880" y="26" text-anchor="end" fill="#6a787c" font-family="Cascadia Mono, monospace" font-size="11">1 m ≈ 45 px</text>
+        <line x1="450" y1="14" x2="450" y2="326" stroke="#d0dbd8" stroke-width="1" stroke-dasharray="4 4"/>
+        <line x1="40" y1="300" x2="860" y2="300" stroke="#d0dbd8" stroke-width="2"/>
+
+        <!-- A -->
+        <g fill="#e5f0ef" stroke="#2a6f6d" stroke-width="2">
+          <rect x="149.6" y="284" width="31.5" height="16" rx="4"/>
+          <rect x="218.9" y="284" width="31.5" height="16" rx="4"/>
+        </g>
+        <rect x="149.6" y="272" width="100.8" height="12" rx="5" fill="#6f7c80"/>
+        <rect x="188" y="238" width="9" height="36" rx="4" fill="#2c3a40"/>
+        <rect x="178" y="266" width="42" height="6" rx="3" fill="#2c3a40"/>
+        <g stroke="#6a787c" fill="none" stroke-linecap="round">
+          <path d="M203 249 L203 261" stroke-width="15"/>
+          <path d="M203 261 L180 265" stroke-width="12"/>
+          <path d="M180 265 L177 292" stroke-width="10"/>
+        </g>
+        <circle cx="206" cy="239" r="9" fill="#f4f6f5" stroke="#6a787c" stroke-width="2"/>
+        <g stroke="#2c3a40" stroke-width="3" fill="none" stroke-linecap="round">
+          <path d="M168 272 L168 250 L216 250"/>
+        </g>
+        <g stroke="#c45c2d" stroke-width="1.5">
+          <line x1="272" y1="300" x2="272" y2="230"/>
+          <line x1="266" y1="230" x2="278" y2="230"/><line x1="266" y1="300" x2="278" y2="300"/>
+        </g>
+        <text x="284" y="268" font-size="11" fill="#c45c2d" font-family="Cascadia Mono, monospace">总高 ≈1.6 m</text>
+
+        <!-- B -->
+        <g fill="#e5f0ef" stroke="#2a6f6d" stroke-width="2">
+          <rect x="533.6" y="273" width="54" height="27" rx="6"/>
+          <rect x="652.4" y="273" width="54" height="27" rx="6"/>
+        </g>
+        <rect x="533.6" y="261" width="172.8" height="12" rx="5" fill="#6f7c80"/>
+        <rect x="608" y="227" width="9" height="36" rx="4" fill="#2c3a40"/>
+        <rect x="598" y="255" width="42" height="6" rx="3" fill="#2c3a40"/>
+        <g stroke="#6a787c" fill="none" stroke-linecap="round">
+          <path d="M623 238 L623 250" stroke-width="15"/>
+          <path d="M623 250 L600 254" stroke-width="12"/>
+          <path d="M600 254 L597 291" stroke-width="10"/>
+        </g>
+        <circle cx="626" cy="228" r="9" fill="#f4f6f5" stroke="#6a787c" stroke-width="2"/>
+        <g stroke="#2c3a40" stroke-width="3" fill="none" stroke-linecap="round">
+          <path d="M560 261 L560 240 L636 240"/>
+        </g>
+        <g stroke="#c45c2d" stroke-width="1.5">
+          <line x1="728" y1="300" x2="728" y2="219"/>
+          <line x1="722" y1="219" x2="734" y2="219"/><line x1="722" y1="300" x2="734" y2="300"/>
+        </g>
+        <text x="740" y="262" font-size="11" fill="#c45c2d" font-family="Cascadia Mono, monospace">总高 ≈1.8 m</text>
+        <text x="620" y="326" text-anchor="middle" font-size="11" fill="#6a787c">两者都能坐一个人；差别全在<tspan font-weight="700" fill="#c45c2d">直径</tspan>——而直径决定功率与总重</text>
+      </svg>
+      <p class="lede" style="margin-top:6px;">
+        注意侧视图的<b>高度几乎一样</b>（1.6 vs 1.8 m）——差别全在直径上。这正是为什么「看起来只是大一圈」，
+        物理上却从<b>发散</b>变成<b>收敛</b>。
+      </p>
+
+      <h3>方向 A · 系留演示机（保留紧凑外形）</h3>
+      <table class="scan">
+        <tr><th style="text-align:left">涵道 m</th><th>机体 m</th><th>总重 kg</th><th>功率 kW</th><th>推进 kg</th><th>备注</th></tr>
+        <tr><td style="text-align:left">0.50</td><td>1.60</td><td>400</td><td>367</td><td>122</td><td>功率偏高</td></tr>
+        <tr><td style="text-align:left">0.60</td><td>1.92</td><td>368</td><td>269</td><td>90</td><td></td></tr>
+        <tr><td style="text-align:left"><b>0.70</b></td><td>2.24</td><td><b>349</b></td><td><b>213</b></td><td>71</td><td class="s-ok">推荐</td></tr>
+        <tr><td style="text-align:left">0.80</td><td>2.56</td><td>337</td><td>177</td><td>59</td><td>仍紧凑</td></tr>
+        <tr><td style="text-align:left">1.00</td><td>3.20</td><td>322</td><td>132</td><td>44</td><td>已不算座椅</td></tr>
+      </table>
+      <table class="gap" style="margin-top:10px;">
+        <tr><th>维度</th><th>内容</th></tr>
+        <tr><td>优点</td><td>保住紧凑外形（<b>~2.2 m</b>）；机上能源仅 8 kg；技术门槛最低；闭环在任意直径都收敛</td></tr>
+        <tr><td>代价</td><td>缆绳供电 → <b>只能定点</b>，活动半径受限；仍需 200–270 kW 地面电源</td></tr>
+        <tr><td>适用</td><td>演示、台架/系留验证、园区定点体验（非交通工具）</td></tr>
+      </table>
+
+      <h3>方向 B · 混动自由飞行平台</h3>
+      <table class="scan">
+        <tr><th style="text-align:left">涵道 m</th><th>机体 m</th><th>总重 kg</th><th>功率 kW</th><th>推进 kg</th><th>备注</th></tr>
+        <tr><td style="text-align:left">0.98</td><td>3.14</td><td>748</td><td>478</td><td>159</td><td class="s-warn">物理下限，但很差</td></tr>
+        <tr><td style="text-align:left">1.05</td><td>3.36</td><td>556</td><td>286</td><td>95</td><td></td></tr>
+        <tr><td style="text-align:left"><b>1.20</b></td><td>3.84</td><td><b>455</b></td><td><b>185</b></td><td>62</td><td class="s-ok">推荐</td></tr>
+        <tr><td style="text-align:left">1.40</td><td>4.48</td><td>402</td><td>132</td><td>44</td><td>机体已很大</td></tr>
+      </table>
+      <table class="gap" style="margin-top:10px;">
+        <tr><th>维度</th><th>内容</th></tr>
+        <tr><td>优点</td><td><b>真正自由飞行</b>；几乎不受任务时长影响（到 20 min 仍是功率受限）</td></tr>
+        <tr><td>代价</td><td>机体 <b>3.4–3.8 m</b>（不再是座椅）；混动系统复杂、吵、重</td></tr>
+        <tr><td>适用</td><td>园区短驳、科研平台、隔离场地内载运</td></tr>
+      </table>
+
+      <h3>反直觉：d_min 只是物理下限，<b>不是</b>优选</h3>
+      <table class="gap">
+        <tr><th>配置</th><th>涵道</th><th>总重</th><th>功率</th></tr>
+        <tr><td>混动 @ 物理下限</td><td>0.98 m</td><td>748 kg</td><td>478 kW</td></tr>
+        <tr><td>混动 @ 推荐点</td><td>1.20 m</td><td><b>455 kg</b></td><td><b>185 kW</b></td></tr>
+        <tr><td>变化</td><td>盘 +22%</td><td><b>−39%</b></td><td><b>−61%</b></td></tr>
+      </table>
+      <p class="lede" style="margin-top:8px;">
+        盘做大 22%，总重反而降 39%、功率降 61%。原因：<b>盘大 → 功率低 → 电池与推进双双变轻 → 总重下降</b>。
+        所以「尽量做小」是错的，正确做法是<b>在机体尺寸允许的范围内尽量取大盘</b>。
+      </p>
+
+      <h3>纯电对照：每个尺寸点都不占优</h3>
+      <table class="scan">
+        <tr><th style="text-align:left">涵道 m</th><th>机体 m</th><th>纯电总重</th><th>纯电功率</th><th>混动总重</th><th>混动功率</th></tr>
+        <tr><td style="text-align:left">1.16 / 0.98</td><td>3.7 / 3.1</td><td>664</td><td>338</td><td>748</td><td>478</td></tr>
+        <tr><td style="text-align:left">1.20</td><td>3.84</td><td>585</td><td>270</td><td><b>455</b></td><td><b>185</b></td></tr>
+        <tr><td style="text-align:left">1.40</td><td>4.48</td><td>455</td><td>159</td><td><b>402</b></td><td><b>132</b></td></tr>
+      </table>
+      <p class="lede" style="margin-top:8px;">
+        同尺寸下混动总是更轻更省电；纯电只有在「能量密度突破 400+ Wh/kg 且任务很短」时才可能反超。
+      </p>
+
+      <h3>怎么选</h3>
+      <table class="gap">
+        <tr><th>如果你要……</th><th>选</th><th>配置</th></tr>
+        <tr><td>保住「飞行座椅」外形、能接受定点</td><td><b>A 系留</b></td><td>6 × 0.7 m，机体 2.24 m，213 kW</td></tr>
+        <tr><td>真正自由飞行、能接受 3.8 m 机体</td><td><b>B 混动</b></td><td>6 × 1.2 m，机体 3.84 m，185 kW</td></tr>
+        <tr><td>纯电 + 自由飞行</td><td class="v-bad">不推荐</td><td>同尺寸全面劣于混动，且随时长急剧恶化</td></tr>
+      </table>
+    </section>
+
+    <section class="card sens">
+      <h2>差距清单 · 从「概念冻结」到「能飞行使用」</h2>
+      <p class="lede">
+        概念稿在「画什么」层面是闭合的（外形 / 操控 / 安全 / 人机 / 验证路径都已冻结），
+        但「能不能飞」还差下列部分。分三层：<b>A = 不改就飞不起来</b>，
+        <b>B = 不改就飞不好 / 不安全</b>，<b>C = 不改就飞得起来也不能用</b>。
+        下列门槛数据基于默认参数组（纯电 200 Wh/kg / 1200 W/kg、载重 150 kg、悬停 5 min）。
+      </p>
+
+      <h3>A 类 · 不改就飞不起来（物理硬门槛）</h3>
+      <table class="gap">
+        <tr><th>部分</th><th>问题</th><th>要改什么</th></tr>
+        <tr><td>A1 总盘面积 /<br>推进布局</td>
+          <td>脚下 6 个小涵道仅 1.18 m²，盘载荷极高 → 功率爆炸 → <b>迭代发散</b>。这是杠杆最大的一项。</td>
+          <td>涵道<b>外扩 / 加大到 ≥1.2 m / 增加数量</b>；盘面积翻倍 ≈ 功率降到 0.7 倍</td></tr>
+        <tr><td>A2 能源架构</td>
+          <td>纯电被<b>功率密度</b>卡死，短时都勉强；堆能量密度不减重。</td>
+          <td>三选一：混动增程 / 氢电（注意其功率弱点）/ <b>系留供电</b></td></tr>
+        <tr><td>A3 任务剖面</td>
+          <td>只写「载重 150 kg」，没写飞多久、多远 —— 数字一变，能源结论全变。</td>
+          <td>先冻结具体剖面：悬停几分钟 / 平移几 km / 每天几架次</td></tr>
+        <tr><td>A4 重量预算闭环</td>
+          <td>只有「空机 ≥100 kg」这类量级，<b>算不出是否收敛</b>。</td>
+          <td>出重量分配表并迭代收敛（本页即在做）；很可能收敛不出「纯电 + 150 kg」</td></tr>
+        <tr><td>A5 功率密度约束</td>
+          <td>此前<b>完全没提</b>，但它比能量密度<b>更早卡死</b>系统。</td>
+          <td>明确包级<b>持续</b>放电能力（W/kg）并作为硬指标</td></tr>
+      </table>
+
+      <h3>B 类 · 不改就飞不好 / 不安全</h3>
+      <table class="gap">
+        <tr><th>部分</th><th>问题</th><th>要改什么</th></tr>
+        <tr><td>B1 涵道在脚下的气动</td>
+          <td>进气被腿 / 座 / 护栏遮挡；下洗被地面反射；吹起异物 FOD；脚离涵道太近。</td>
+          <td>改侧进 / 上吸；涵道外移出人体投影；加格栅与裙边</td></tr>
+        <tr><td>B2 单通道失效可控性</td>
+          <td>6 个坏 1 个剩 5 个，<b>不对称</b>；剩余推力与控制权限<b>从未算过</b>。</td>
+          <td>做失效配平计算（任意 1 个 / 对角 2 个失效）；大概率需加<b>整机弹道降落伞</b></td></tr>
+        <tr><td>B3 热管理</td>
+          <td>数百 kW 级持续放电；涵道是封闭腔，散热更差。</td>
+          <td>热预算 + 强制散热路径（又吃重量，要回写 A4）</td></tr>
+        <tr><td>B4 操纵品质与抗风</td>
+          <td>只写「微风隔离场地」，<b>无量化指标</b>；载人尺度惯性大。</td>
+          <td>定抗风等级、控制带宽 / 阻尼、视野（护栏遮挡）、眩晕与培训要求</td></tr>
+        <tr><td>B5 单涵道推力与结构</td>
+          <td>无推力分配与载荷路径。</td>
+          <td>由 A1 的盘面积反推单涵道推力，再做结构载荷</td></tr>
+      </table>
+
+      <h3>C 类 · 不改就「飞得起来也不能用」</h3>
+      <table class="gap">
+        <tr><th>部分</th><th>要改什么</th></tr>
+        <tr><td>C1 法规与许可</td>
+          <td>类别认定、适航 / 豁免、试飞空域、保险、外部技术评审</td></tr>
+        <tr><td>C2 制造与质检</td>
+          <td>工艺、追溯、批次一致性、召回机制</td></tr>
+        <tr><td>C3 运营边界</td>
+          <td>开放街道 <b>永久 No-Go</b>；仅限隔离 / 许可场景</td></tr>
+      </table>
+      <p class="lede" style="margin-top:8px;">
+        B / C 类在 <code style="font-family:'Cascadia Mono',monospace;">box-lift-production-readiness.md</code>
+        与 <code style="font-family:'Cascadia Mono',monospace;">box-lift-safety.md</code> 已有展开。
+      </p>
+
+      <h3>三条出路（按代价排序）</h3>
+      <table class="gap">
+        <tr><th>出路</th><th>代价</th><th>保留座椅外形</th></tr>
+        <tr><td><b>① 系留供电</b></td><td>只能定点，缆绳限制活动范围</td><td><b>可以</b></td></tr>
+        <tr><td>② 放大盘面积 ≥1.2 m</td><td>机体变成 ~3.5–4 m；仍是纯电短航时</td><td>否（变小飞碟）</td></tr>
+        <tr><td>③ 混动增程</td><td>系统重、吵、复杂；盘载荷仍偏高</td><td>否</td></tr>
+      </table>
+      <p class="lede" style="margin-top:10px;">
+        <b>若坚持「载人 + 自由飞行 + 紧凑外形」三者同时满足 → 当前物理下无解。</b>
+      </p>
+    </section>
+
+    <div class="howto">
+      <b>模型（量级，非设计文件）</b><br>
+      推力 <code>T = AUW · g · kT</code>；理想诱导功率 <code>P_ind = T^1.5 / √(2ρA)</code>；
+      轴功率 <code>P_shaft = P_ind / FM</code>；电功率 <code>P = P_shaft / η</code>；
+      推进重量 <code>= P / 推进功重比</code>；电池重量 <code>= max(能量需求 / 能量密度, P / 功率密度)</code>；
+      <code>AUW = 载重 + 空机固定 + 推进 + 电池</code>，迭代至收敛（或判定发散）。<br>
+      功率密度指<b>持续</b>放电能力（非瞬时），决定电池能否输出所需 kW；能量密度决定能撑多久。
+      系留供电时功率来自地面，不受机上功率密度约束。<br>
+      <b>未计入：</b>涵道唇口/支架损失、进气遮挡、地面效应、热管理重量、结构随载荷增重、操纵冗余裕度。
+      真实值通常<b>比本模型更差</b>。
+    </div>
+
+    <p class="note">
+      本页 = 收敛速算 + 差距清单，均为概念级，非工程设计与选型文件，不能替代 CFD / 台架实测。速算的目的只是回答一个问题：
+      <b>这个闭环收不收敛</b>。 divergent（发散）= 加电池也救不回来，必须改构型或改能源。
+    </p>
+
+    <p class="back">
+      相关 <a href="box-lift-sitting-concept.html">概念冻结</a> ·
+      <a href="box-lift-feasibility.md">可行性</a> ·
+      <a href="box-lift-battery-research.md">电池调研</a> ·
+      <a href="box-lift-validation-path.html">验证路径</a>
+    </p>
+  </main>
+
+  <script>
+  (function () {
+    var G = 9.80665, RHO = 1.225;
+
+    var ids = ['pay','tHov','dist','speed','reserve','n','d','dryFixed','propDensity','fm','eta','kT','eDensity','pDensity'];
+    var el = {};
+    ids.forEach(function (k) { el[k] = document.getElementById(k); });
+    var rng = {};
+    ['pay','tHov','dist','d','dryFixed'].forEach(function (k) { rng[k] = document.getElementById(k + '_r'); });
+
+    function bindPair(k) {
+      function fromNum() { rng[k].value = el[k].value; update(); }
+      function fromRng() { el[k].value = rng[k].value; update(); }
+      el[k].addEventListener('input', fromNum);
+      rng[k].addEventListener('input', fromRng);
+    }
+    ['pay','tHov','dist','d','dryFixed'].forEach(bindPair);
+    ['n','speed','reserve','propDensity','fm','eta','kT','eDensity','pDensity'].forEach(function (k) {
+      el[k].addEventListener('input', update);
+    });
+
+    var modeEl = document.getElementById('energyMode');
+    var MODES = {
+      batt200:    { e: 200,  p: 1200 },
+      batt350:    { e: 350,  p: 1200 },
+      hybrid700:  { e: 700,  p: 1500 },
+      hybrid1200: { e: 1200, p: 900  },
+      tether:     { e: 200,  p: 1200 }
+    };
+    modeEl.addEventListener('change', function () {
+      var m = MODES[modeEl.value] || MODES.batt200;
+      el.eDensity.value = m.e;
+      el.pDensity.value = m.p;
+      el.eDensity.disabled = (modeEl.value === 'tether');
+      el.pDensity.disabled = (modeEl.value === 'tether');
+      update();
+    });
+
+    function readP() {
+      return {
+        pay: +el.pay.value, tHov: +el.tHov.value, dist: +el.dist.value, speed: +el.speed.value,
+        reserve: +el.reserve.value, n: +el.n.value, d: +el.d.value,
+        dryFixed: +el.dryFixed.value * (document.getElementById('consv').checked ? 1.15 : 1),
+        propDensity: +el.propDensity.value, fm: +el.fm.value, eta: +el.eta.value, kT: +el.kT.value,
+        eDensity: +el.eDensity.value, pDensity: +el.pDensity.value,
+        tether: modeEl.value === 'tether'
+      };
+    }
+
+    function solve(p) {
+      var A = p.n * Math.PI * Math.pow(p.d / 2, 2);
+      var denom = Math.sqrt(2 * RHO * A) * p.fm * p.eta;
+      var tH = p.tHov / 60 + (p.speed > 0 ? p.dist / p.speed : 0);
+      var AUW = p.pay + p.dryFixed + 30;
+      var it = 0, conv = false, P = 0, mProp = 0, mBatt = 0, E = 0, lim = '—';
+
+      for (; it < 500; it++) {
+        var T = AUW * G * p.kT;
+        P = Math.pow(T, 1.5) / denom / 1000;           // kW
+        mProp = P / p.propDensity;
+        if (p.tether) {
+          mBatt = 8; lim = '系留（地面供电）';
+        } else {
+          E = P * tH * (1 + p.reserve / 100);          // kWh
+          var byE = E / (p.eDensity / 1000);
+          var byP = P / (p.pDensity / 1000);
+          lim = byP >= byE ? '功率密度' : '能量密度';
+          mBatt = Math.max(byE, byP);
+        }
+        var next = p.pay + p.dryFixed + mProp + mBatt;
+        var delta = next - AUW;
+        if (Math.abs(delta) < 0.05) { AUW = next; conv = true; it++; break; }
+        AUW = AUW + delta * 0.6;
+        if (!isFinite(AUW) || AUW > 6000) { conv = false; break; }
+      }
+      var diverged = !conv;
+      var Ttot = diverged ? NaN : AUW * G * p.kT;
+      return {
+        A: A, AUW: AUW, P: P, mProp: mProp, mBatt: mBatt, E: E, lim: lim,
+        converged: conv, diverged: diverged, iters: it,
+        Ttot: Ttot, Tn: diverged ? NaN : Ttot / p.n,
+        diskLoad: diverged ? NaN : (AUW * G) / A,
+        frac: diverged ? NaN : (p.pay / AUW) * 100
+      };
+    }
+
+    function grade(r) {
+      if (r.diverged) return 'bad';
+      if (r.diskLoad > 1000 || r.mBatt > r.AUW * 0.45) return 'bad';
+      if (r.diskLoad > 600 || r.mBatt > r.AUW * 0.3) return 'warn';
+      return 'ok';
+    }
+    function cls(g) { return g === 'ok' ? 's-ok' : (g === 'warn' ? 's-warn' : 's-bad'); }
+    function txt(g) { return g === 'ok' ? '收敛·可行' : (g === 'warn' ? '收敛·紧张' : '发散·不成立'); }
+
+    function fmt(v, n) {
+      if (!isFinite(v)) return '—';
+      return v.toFixed(n === undefined ? 0 : n);
+    }
+
+    function update() {
+      var p = readP();
+      var r = solve(p);
+      var g = grade(r);
+
+      var v = document.getElementById('verdict');
+      v.className = 'verdict ' + g;
+      if (r.diverged) {
+        v.innerHTML = '<b>发散 · 该构型在当前参数下不成立</b>' +
+          '总重 ↑ → 功率 ↑ → 电池 ↑ → 总重 ↑，正反馈死循环（迭代 ' + r.iters + ' 次未收敛，或超 6000 kg）。' +
+          '加电池只会更糟。<b>必须</b>加大盘面积、改能源，或降低载重/续航要求。';
+      } else if (g === 'bad') {
+        v.innerHTML = '<b>收敛，但余量极差</b>' +
+          '闭环勉强合上：盘载荷 ' + fmt(r.diskLoad) + ' N/m²，电池占 ' + fmt(r.mBatt / r.AUW * 100) +
+          '% 总重。工程上极难实现，且未计入热管理与结构增重。';
+      } else if (g === 'warn') {
+        v.innerHTML = '<b>收敛，但紧张</b>' +
+          '可行但余量不多：任何一项参数变差（风、热、结构增重）都会把它推回发散。建议继续放大盘面积。';
+      } else {
+        v.innerHTML = '<b>收敛 · 量级可行</b>' +
+          '闭环合上且有一定余量。仍只是<b>纸面可行</b>，下一步是台架实测推力/温升，不是直接造。';
+      }
+
+      if (!r.diverged && r.lim === '功率密度') {
+        v.innerHTML += '<br><span style="font-size:0.83rem;">瓶颈是<b>功率密度</b>（持续放电能力）而非能量密度：' +
+          '继续提高 Wh/kg 不会减重，只能<b>加大盘面积</b>或降低功率需求。</span>';
+      }
+
+      document.getElementById('kAUW').textContent = r.diverged ? '发散' : fmt(r.AUW);
+      document.getElementById('kP').textContent = r.diverged ? '∞' : fmt(r.P);
+      document.getElementById('kBatt').textContent = r.diverged ? '∞' : fmt(r.mBatt);
+      document.getElementById('kProp').textContent = r.diverged ? '∞' : fmt(r.mProp);
+      document.getElementById('kDL').textContent = r.diverged ? '—' : fmt(r.diskLoad);
+      document.getElementById('kFrac').textContent = r.diverged ? '—' : fmt(r.frac, 1);
+
+      document.getElementById('dA').textContent = fmt(r.A, 2) + ' m²';
+      document.getElementById('dT').textContent = r.diverged ? '—' : fmt(r.Ttot / 1000, 2) + ' kN';
+      document.getElementById('dTn').textContent = r.diverged ? '—' : fmt(r.Tn, 0) + ' N';
+      document.getElementById('dE').textContent = r.diverged ? '—' : fmt(r.E, 1) + ' kWh';
+      document.getElementById('dLim').textContent = r.lim;
+      document.getElementById('dIter').textContent = r.iters + ' 次 · ' + (r.converged ? '收敛' : '未收敛');
+
+      // scan diameter
+      var t1 = '', cur = +el.d.value;
+      [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.2, 1.4].forEach(function (dd) {
+        var q = Object.assign({}, p, { d: dd });
+        var s = solve(q), gg = grade(s);
+        t1 += '<tr class="' + (Math.abs(dd - cur) < 0.001 ? 'cur' : '') + '"><td>' + dd.toFixed(2) +
+          '</td><td>' + fmt(s.A, 2) + '</td><td>' + (s.diverged ? '∞' : fmt(s.P)) + '</td><td>' +
+          (s.diverged ? '发散' : fmt(s.AUW)) + '</td><td>' + (s.diverged ? '∞' : fmt(s.mBatt)) +
+          '</td><td>' + (s.diverged ? '—' : fmt(s.diskLoad)) + '</td><td class="' + cls(gg) + '">' + txt(gg) + '</td></tr>';
+      });
+      document.getElementById('scanD').innerHTML = t1;
+
+      // energy source comparison
+      var t2 = '';
+      SOURCES.forEach(function (src) {
+        var q = Object.assign({}, p, { eDensity: src.e, pDensity: src.p, tether: src.tether });
+        var s = solve(q), gg = grade(s);
+        var isCur = (!p.tether && Math.abs(src.e - p.eDensity) < 1 && Math.abs(src.p - p.pDensity) < 1) ||
+                    (p.tether && src.tether);
+        t2 += '<tr class="' + (isCur ? 'cur' : '') + '"><td style="text-align:left">' + src.name + '</td><td>' +
+          (src.tether ? '地面' : src.e) + '</td><td>' + (src.tether ? '地面' : src.p) + '</td><td>' +
+          (s.diverged ? '发散' : fmt(s.AUW)) + '</td><td>' + (s.diverged ? '∞' : fmt(s.mBatt)) +
+          '</td><td>' + (s.diverged ? '—' : s.lim) + '</td><td class="' + cls(gg) + '">' + txt(gg) + '</td></tr>';
+      });
+      document.getElementById('scanE').innerHTML = t2;
+
+      drawChart(p);
+      solveOpt(p);
+    }
+
+    var SOURCES = [
+      { name: '纯电锂电（200 Wh/kg）', e: 200, p: 1200, tether: false },
+      { name: '高比能锂（350 Wh/kg）', e: 350, p: 1200, tether: false },
+      { name: '混动增程（等效 700）', e: 700, p: 1500, tether: false },
+      { name: '氢电（1200 / 功率低）', e: 1200, p: 900, tether: false },
+      { name: '系留供电（地面供电）', e: 200, p: 1200, tether: true }
+    ];
+
+    var PRESETS = {
+      now: { d: 0.5, n: 6, e: 200, p: 1200, mode: 'batt200', pay: 150, tHov: 5, dist: 0, dryFixed: 120 },
+      big: { d: 1.2, n: 6, e: 200, p: 1200, mode: 'batt200', pay: 150, tHov: 5, dist: 0, dryFixed: 120 },
+      hybrid: { d: 1.0, n: 6, e: 700, p: 1500, mode: 'hybrid700', pay: 150, tHov: 5, dist: 0, dryFixed: 120 },
+      tether: { d: 0.5, n: 6, e: 200, p: 1200, mode: 'tether', pay: 150, tHov: 5, dist: 0, dryFixed: 120 }
+    };
+    var btns = document.querySelectorAll('.presets button');
+    btns.forEach(function (b) {
+      b.addEventListener('click', function () {
+        var q = PRESETS[b.dataset.preset];
+        el.d.value = q.d; rng.d.value = q.d;
+        el.n.value = q.n;
+        el.eDensity.value = q.e;
+        el.pDensity.value = q.p;
+        el.pay.value = q.pay; rng.pay.value = q.pay;
+        el.tHov.value = q.tHov; rng.tHov.value = q.tHov;
+        el.dist.value = q.dist; rng.dist.value = q.dist;
+        el.dryFixed.value = q.dryFixed; rng.dryFixed.value = q.dryFixed;
+        modeEl.value = q.mode;
+        el.eDensity.disabled = (q.mode === 'tether');
+        el.pDensity.disabled = (q.mode === 'tether');
+        btns.forEach(function (x) { x.classList.remove('on'); });
+        b.classList.add('on');
+        update();
+      });
+    });
+
+    var bodyMaxEl = document.getElementById('bodyMax');
+    var bodyMaxR = document.getElementById('bodyMax_r');
+    var optTargetEl = document.getElementById('optTarget');
+    var consvEl = document.getElementById('consv');
+
+    function syncBodyMax(v) { bodyMaxEl.value = v; bodyMaxR.value = v; update(); }
+    bodyMaxEl.addEventListener('input', function () { syncBodyMax(bodyMaxEl.value); });
+    bodyMaxR.addEventListener('input', function () { syncBodyMax(bodyMaxR.value); });
+    optTargetEl.addEventListener('change', update);
+    consvEl.addEventListener('change', update);
+
+    function drawChart(p) {
+      var W = 900, H = 360, PL = 66, PR = 66, PT = 26, PB = 48;
+      var iw = W - PL - PR, ih = H - PT - PB;
+      var d0 = 0.30, d1 = 2.00, st = 0.02;
+      var pts = [];
+      for (var d = d0; d <= d1 + 1e-9; d += st) {
+        var r = solve(Object.assign({}, p, { d: d }));
+        if (r.conv && r.AUW < 4000 && r.P < 4000) pts.push({ d: d, AUW: r.AUW, P: r.P });
+      }
+      var box = document.getElementById('chart');
+      if (!pts.length) {
+        box.innerHTML = '<rect width="' + W + '" height="' + H + '" fill="#fff"/>' +
+          '<text x="' + (W / 2) + '" y="' + (H / 2) + '" text-anchor="middle" fill="#9a4a40" ' +
+          'font-size="15" font-family="sans-serif">当前参数下没有收敛区间 —— 构型不成立</text>';
+        return;
+      }
+      var aMin = Math.min.apply(null, pts.map(function (x) { return x.AUW; }));
+      var aMax = Math.max.apply(null, pts.map(function (x) { return x.AUW; }));
+      var pMax = Math.max.apply(null, pts.map(function (x) { return x.P; }));
+      aMin = Math.max(0, Math.floor((aMin - 60) / 50) * 50);
+      aMax = Math.ceil((aMax + 60) / 50) * 50;
+      pMax = Math.ceil((pMax + 40) / 50) * 50;
+      function X(dd) { return PL + (dd - d0) / (d1 - d0) * iw; }
+      function YA(v) { return PT + ih - (v - aMin) / (aMax - aMin) * ih; }
+      function YP(v) { return PT + ih - (v / pMax) * ih; }
+
+      var s = '<rect width="' + W + '" height="' + H + '" fill="#fff"/>';
+      if (pts[0].d > d0) {
+        s += '<rect x="' + PL + '" y="' + PT + '" width="' + (X(pts[0].d) - PL) +
+          '" height="' + ih + '" fill="#f1f4f3"/>';
+        s += '<text x="' + ((PL + X(pts[0].d)) / 2) + '" y="' + (PT + ih / 2) +
+          '" text-anchor="middle" fill="#9a4a40" font-size="12" font-family="sans-serif">发散区</text>';
+      }
+      for (var g = 0; g <= 4; g++) {
+        var gy = PT + ih * g / 4;
+        s += '<line x1="' + PL + '" y1="' + gy + '" x2="' + (PL + iw) + '" y2="' + gy +
+          '" stroke="#e3eae8" stroke-width="1"/>';
+        s += '<text x="' + (PL - 8) + '" y="' + (gy + 4) + '" text-anchor="end" fill="#2a6f6d" ' +
+          'font-size="11" font-family="monospace">' + (aMax - (aMax - aMin) * g / 4).toFixed(0) + '</text>';
+        s += '<text x="' + (PL + iw + 8) + '" y="' + (gy + 4) + '" text-anchor="start" fill="#c45c2d" ' +
+          'font-size="11" font-family="monospace">' + (pMax - pMax * g / 4).toFixed(0) + '</text>';
+      }
+      [0.4, 0.8, 1.2, 1.6, 2.0].forEach(function (td) {
+        s += '<line x1="' + X(td) + '" y1="' + PT + '" x2="' + X(td) + '" y2="' + (PT + ih) +
+          '" stroke="#e3eae8" stroke-width="1"/>';
+        s += '<text x="' + X(td) + '" y="' + (PT + ih + 18) + '" text-anchor="middle" fill="#6a787c" ' +
+          'font-size="11" font-family="monospace">' + td.toFixed(1) + '</text>';
+      });
+      var pp = pts.map(function (x) { return X(x.d).toFixed(1) + ',' + YP(x.P).toFixed(1); }).join(' ');
+      var pa = pts.map(function (x) { return X(x.d).toFixed(1) + ',' + YA(x.AUW).toFixed(1); }).join(' ');
+      s += '<polyline points="' + pp + '" fill="none" stroke="#c45c2d" stroke-width="2.5" stroke-dasharray="6 4"/>';
+      s += '<polyline points="' + pa + '" fill="none" stroke="#2a6f6d" stroke-width="3"/>';
+
+      var cd = +el.d.value;
+      if (cd >= d0 && cd <= d1) {
+        s += '<line x1="' + X(cd) + '" y1="' + PT + '" x2="' + X(cd) + '" y2="' + (PT + ih) +
+          '" stroke="#9a4a40" stroke-width="2"/>';
+        s += '<text x="' + X(cd) + '" y="' + (PT - 8) + '" text-anchor="middle" fill="#9a4a40" ' +
+          'font-size="11" font-family="monospace">当前 ' + cd.toFixed(2) + '</text>';
+      }
+      s += '<text x="' + (PL + iw / 2) + '" y="' + (H - 10) + '" text-anchor="middle" fill="#6a787c" ' +
+        'font-size="12" font-family="sans-serif">单涵道直径 (m)　—　机体外径 ≈ 3.2 × 直径</text>';
+      s += '<text x="' + (PL - 8) + '" y="' + (PT - 8) + '" text-anchor="end" fill="#2a6f6d" ' +
+        'font-size="11" font-family="sans-serif">AUW kg</text>';
+      s += '<text x="' + (PL + iw + 8) + '" y="' + (PT - 8) + '" text-anchor="start" fill="#c45c2d" ' +
+        'font-size="11" font-family="sans-serif">kW</text>';
+      box.innerHTML = s;
+    }
+
+    function solveOpt(p) {
+      var bodyMax = +bodyMaxEl.value;
+      var target = optTargetEl.value;
+      var dCap = bodyMax / 3.2;
+      var best = null;
+      for (var d = 0.30; d <= dCap + 1e-9; d += 0.02) {
+        var r = solve(Object.assign({}, p, { d: d }));
+        if (!r.conv) continue;
+        var key = (target === 'auw') ? r.AUW : r.P;
+        if (!best || key < best.key) best = { d: d, key: key, r: r };
+      }
+      var out = document.getElementById('optOut');
+      if (!best) {
+        var dm = null;
+        for (var d2 = 0.30; d2 <= 2.5; d2 += 0.02) {
+          if (solve(Object.assign({}, p, { d: d2 })).conv) { dm = d2; break; }
+        }
+        out.innerHTML = '<b style="color:#9a4a40">该机体上限下无解</b><br>' +
+          '<span style="font-size:0.85rem;color:#6a787c;">当前参数的最小可行涵道直径 ≈ ' +
+          (dm ? dm.toFixed(2) + ' m（机体 ' + (3.2 * dm).toFixed(1) + ' m）' : '&gt; 2.5 m') +
+          '。请把上限提到该值以上，或降低载重 / 提高 FM / 提高功率密度。</span>';
+        return;
+      }
+      var r = best.r;
+      // 收益递减点：再加大 0.1 m 只能再省 < 10 kg
+      var knee = null, kneeR = null;
+      for (var kd = 0.30; kd + 0.10 <= dCap + 1e-9; kd += 0.02) {
+        var r1 = solve(Object.assign({}, p, { d: kd }));
+        var r2 = solve(Object.assign({}, p, { d: kd + 0.10 }));
+        if (r1.conv && r2.conv && (r1.AUW - r2.AUW) < 10) { knee = kd; kneeR = r1; break; }
+      }
+      var html = '';
+      if (kneeR) {
+        html += '<div style="font:700 0.72rem/1.3 \'Cascadia Mono\',monospace;color:#2a6f6d;' +
+          'letter-spacing:0.04em;">推荐 · 收益递减点</div>' +
+          '<div class="big">涵道 ' + knee.toFixed(2) + ' m × ' + p.n + '　→　机体 ≈ ' +
+          (3.2 * knee).toFixed(2) + ' m</div>' +
+          '<table class="detail" style="margin-top:4px;">' +
+          '<tr><td>总重 AUW</td><td>' + kneeR.AUW.toFixed(0) + ' kg</td></tr>' +
+          '<tr><td>悬停功率</td><td>' + kneeR.P.toFixed(0) + ' kW</td></tr>' +
+          '<tr><td>能源 / 推进</td><td>' + kneeR.mBatt.toFixed(0) + ' / ' + kneeR.mProp.toFixed(0) + ' kg</td></tr>' +
+          '<tr><td>盘载荷</td><td>' + kneeR.diskLoad.toFixed(0) + ' N/m²（' + kneeR.lim + '）</td></tr>' +
+          '</table>' +
+          '<p style="margin:8px 0 0;font-size:0.8rem;color:#6a787c;">' +
+          '超过此点后再加大 0.1 m，仅再省 <b>&lt;10 kg</b> —— 不值得把机体做得更大。</p>';
+      }
+      html += '<div style="margin-top:12px;font:700 0.72rem/1.3 \'Cascadia Mono\',monospace;' +
+        'color:#6a787c;letter-spacing:0.04em;">极限最优 · 取满机体上限</div>' +
+        '<div class="big" style="color:#c45c2d;">涵道 ' + best.d.toFixed(2) + ' m　→　机体 ' +
+        (3.2 * best.d).toFixed(2) + ' m</div>' +
+        '<table class="detail" style="margin-top:4px;">' +
+        '<tr><td>总重 AUW</td><td>' + r.AUW.toFixed(0) + ' kg</td></tr>' +
+        '<tr><td>悬停功率</td><td>' + r.P.toFixed(0) + ' kW</td></tr>' +
+        '<tr><td>盘载荷</td><td>' + r.diskLoad.toFixed(0) + ' N/m²</td></tr>' +
+        '<tr><td>优化目标</td><td>' + (target === 'auw' ? '总重最小' : '功率最低') + '</td></tr>' +
+        '</table>';
+      out.innerHTML = html;
+    }
+
+    btns[0].classList.add('on');
+    update();
+  })();
+  </script>
+</body>
+</html>
