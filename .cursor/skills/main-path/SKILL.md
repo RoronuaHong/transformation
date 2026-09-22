@@ -35,8 +35,9 @@ ollama list
 # N1 — enqueue (skip if user already has pending)
 yarn inbox --url "https://www.youtube.com/watch?v=kV7RuutRx-s" --topic ai_monetize --title "What is Artificial Intelligence? | AI Explained in 60 Seconds"
 
-# N2–N7 — 16-lang site pack, no multipass (smoke speed)
+# N2–N7 — 16-lang site pack, no multipass (smoke speed); content track only
 yarn batch:fast --requeue-failed
+# Media track (optional, separate): yarn batch:postproc   or   yarn batch:dehardsub
 
 # Quality pass (multipass ASR) before a real publish — not required for smoke:
 # yarn batch:release --requeue-failed

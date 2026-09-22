@@ -14,6 +14,8 @@ from pipeline import DEFAULT_LANGS, notes_minimally_valid
 
 def test_parse_stages_presets() -> None:
     assert "asr" in parse_stages("all")
+    assert parse_stages("content") == parse_stages("all")
+    assert "dehardsub" not in parse_stages("content")
     assert parse_stages("clips") == frozenset({"clips"})
     assert parse_stages("media") == frozenset({"frames", "clips"})
     assert parse_stages("llm") == frozenset({"translate", "notes", "localize"})
@@ -22,6 +24,16 @@ def test_parse_stages_presets() -> None:
         {"translate", "notes", "localize", "frames", "clips"}
     )
     assert parse_stages("translate,localize") == frozenset({"translate", "localize"})
+    assert parse_stages("postproc") == frozenset(
+        {"dehardsub", "deblur", "enhance", "compress"}
+    )
+    mixed = parse_stages("content,postproc")
+    assert "asr" in mixed and "dehardsub" in mixed
+    from discover.run_batch import describe_tracks
+
+    tracks = describe_tracks(mixed)
+    assert "asr" in tracks["content"]
+    assert "dehardsub" in tracks["postproc"]
 
 
 def test_resolve_media_refresh_stages() -> None:

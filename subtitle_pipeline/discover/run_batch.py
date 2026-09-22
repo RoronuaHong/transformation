@@ -72,22 +72,34 @@ ALL_STAGES = frozenset(
 POSTPROC_STAGES = frozenset(
     {"dehardsub", "deblur", "enhance", "compress", "concat", "remix", "publish"}
 )
+# Default media-post track (opt-in; not in ``all`` / ``content``).
+POSTPROC_DEFAULT = frozenset({"dehardsub", "deblur", "enhance", "compress"})
 KNOWN_STAGES = ALL_STAGES | POSTPROC_STAGES
 MEDIA_ONLY_STAGES = frozenset({"frames", "clips"}) | POSTPROC_STAGES
+
+
+def describe_tracks(enabled: frozenset[str]) -> dict[str, list[str]]:
+    """Split enabled stages into content vs media-post tracks for logs."""
+    content = sorted(enabled & ALL_STAGES)
+    postproc = sorted(enabled & POSTPROC_STAGES)
+    return {"content": content, "postproc": postproc}
 
 
 def parse_stages(raw: str | None) -> frozenset[str]:
     """Stage set for controllable batch / try refresh.
 
     Presets:
-      all | media | clips | frames
+      all | content — content track only (fetch…clips); **no** postproc
       llm  = translate,notes,localize (reuse existing SRT)
       post = llm + frames,clips
-      Or comma list: translate,notes,localize,dehardsub,enhance,compress,concat,remix,publish
-    ``all`` does **not** include dehardsub/enhance/compress/concat/remix/publish (opt-in).
+      media | clips | frames — cut-only refresh
+      postproc — dehardsub,deblur,enhance,compress (media track)
+      dehardsub | deblur | enhance | compress | concat | remix | publish
+      Or comma list: content,postproc | translate,notes,dehardsub
+    ``all`` / ``content`` do **not** include postproc (run as a second track).
     """
     s = (raw or "all").strip().lower()
-    if s in ("", "all"):
+    if s in ("", "all", "content"):
         return ALL_STAGES
     if s in ("media", "gif+mp4", "gif_mp4"):
         return frozenset({"frames", "clips"})
@@ -99,6 +111,8 @@ def parse_stages(raw: str | None) -> frozenset[str]:
         return frozenset({"translate", "notes", "localize"})
     if s in ("post", "from-srt", "from_srt"):
         return frozenset({"translate", "notes", "localize", "frames", "clips"})
+    if s in ("postproc", "media-post", "media_post"):
+        return frozenset(POSTPROC_DEFAULT)
     if s in ("dehardsub", "strip_hardsubs", "hardsub", "unburn"):
         return frozenset({"dehardsub"})
     if s in ("deblur", "enhance", "compress", "concat", "remix", "publish"):
@@ -110,6 +124,14 @@ def parse_stages(raw: str | None) -> frozenset[str]:
         parts.discard("hardsub")
         parts.discard("unburn")
         parts.add("dehardsub")
+    if "content" in parts:
+        parts.discard("content")
+        parts |= set(ALL_STAGES)
+    if "postproc" in parts or "media-post" in parts or "media_post" in parts:
+        parts.discard("postproc")
+        parts.discard("media-post")
+        parts.discard("media_post")
+        parts |= set(POSTPROC_DEFAULT)
     if "all" in parts:
         parts.discard("all")
         parts |= set(ALL_STAGES)
@@ -798,8 +820,15 @@ def process_job(
     topic_id = job["topic_id"]
     work_dir = _job_work_dir(work_root, platform, video_id)
     enabled = parse_stages(stages)
+    tracks = describe_tracks(enabled)
 
     print(f"[batch] job#{job_id} {platform}:{video_id} topic={topic_id} stages={sorted(enabled)}")
+    print(
+        f"[batch] tracks content={tracks['content'] or '-'} "
+        f"postproc={tracks['postproc'] or '-'} "
+        f"(sequence: translate→notes; lang-workers; clips)",
+        flush=True,
+    )
     if dry_run:
         print(f"[batch] dry-run → would process into {work_dir}")
         # undo claim so job stays pending
@@ -990,25 +1019,15 @@ def process_job(
     def _translate_branch() -> None:
         do_translate(args, ollama, segs, out_dir, stem, glossary)
 
-    # After source SRT is stable: fork source notes ∥ subtitle translate.
+    # After source SRT is stable: run subtitle translate, then source notes.
+    # Previously these were forked to run in parallel, but on CPU-only Ollama
+    # the two CPU-bound stages starve each other and the summary call hits its
+    # 600s timeout. Serializing keeps each stage on full CPU (translate still
+    # parallelizes internally via lang-workers) and is faster overall there.
     if do_tr and (do_sum or do_kp):
-        print("[batch] fork: source notes ∥ subtitle translate")
-        errors: list[tuple[str, BaseException]] = []
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            futs = {
-                pool.submit(_translate_branch): "translate",
-                pool.submit(_notes_branch): "notes",
-            }
-            for fut in as_completed(futs):
-                name = futs[fut]
-                try:
-                    fut.result()
-                except BaseException as e:
-                    errors.append((name, e))
-                    locked_print(f"[batch FAIL] {name}: {type(e).__name__}: {e}")
-        if errors:
-            name0, err0 = errors[0]
-            raise RuntimeError(f"fork failed ({name0}): {err0}") from err0
+        print("[batch] sequence: subtitle translate → source notes")
+        _translate_branch()
+        _notes_branch()
     elif do_tr:
         _translate_branch()
     elif do_sum or do_kp:
@@ -1184,10 +1203,11 @@ def main(argv: list[str] | None = None) -> int:
         "--stages",
         default="all",
         help=(
-            "Pipeline stages: all | llm | post | media | clips | frames | "
-            "enhance | compress | concat | "
-            "or comma list (fetch,asr,...,enhance). "
-            "all does not include enhance/compress/concat. "
+            "Pipeline stages: all|content | llm | post | media | clips | frames | "
+            "postproc | dehardsub | enhance | compress | concat | remix | "
+            "or comma list (content,postproc / fetch,asr,...,dehardsub). "
+            "content/all = text track only (no postproc). "
+            "postproc = dehardsub,deblur,enhance,compress (second track). "
             "Omit asr → reuse existing SRT; clips/media → re-cut only."
         ),
     )

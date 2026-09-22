@@ -299,38 +299,90 @@ def ensure_ollama_model(model: str, *, role: str = "chat") -> None:
     ensure_role_ready(role, model=model)
 
 
-def extract_json_object(text: str) -> dict:
+def _strip_fences(text: str) -> str:
     text = text.strip()
-    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I).strip()
+    return re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I).strip()
+
+
+def _clean_control(text: str) -> str:
+    # drop non-printable control chars (except tab/newline) that break json.loads
+    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
+
+
+def _fix_trailing_commas(text: str) -> str:
+    return re.sub(r",\s*([}\]])", r"\1", text)
+
+
+def _try_parse_dict(text: str) -> dict | None:
     try:
         data = json.loads(text)
-        if isinstance(data, dict):
-            return data
     except json.JSONDecodeError:
-        pass
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _try_parse_array(text: str) -> list | None:
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, list) else None
+
+
+def extract_json_object(text: str) -> dict:
+    """Parse a JSON object from model output, tolerating fences, control chars,
+    trailing garbage, and trailing commas.
+
+    Strategy: direct parse → grow from the first '{' to each subsequent '}'
+    (outermost-first, so stray braces inside strings don't abort) → greedy.
+    """
+    if not text:
+        return {}
+    text = _clean_control(_strip_fences(text))
+    parsed = _try_parse_dict(text)
+    if parsed is not None:
+        return parsed
+    start = text.find("{")
+    if start != -1:
+        # try endings from the LAST '}' back to the first, so we prefer the
+        # maximal valid object (drops trailing prose after the JSON).
+        for end in sorted((i for i, ch in enumerate(text) if ch == "}"), reverse=True):
+            if end <= start:
+                continue
+            sub = _fix_trailing_commas(text[start : end + 1])
+            parsed = _try_parse_dict(sub)
+            if parsed is not None:
+                return parsed
     match = re.search(r"\{[\s\S]*\}", text)
     if match:
-        return json.loads(match.group(0))
+        parsed = _try_parse_dict(match.group(0))
+        if parsed is not None:
+            return parsed
     return {}
 
 
 def extract_json_array(text: str) -> list:
-    text = text.strip()
-    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I).strip()
-    try:
-        data = json.loads(text)
-        if isinstance(data, list):
-            return data
-    except json.JSONDecodeError:
-        pass
+    """Same robustness as extract_json_object but for top-level JSON arrays."""
+    if not text:
+        return []
+    text = _clean_control(_strip_fences(text))
+    parsed = _try_parse_array(text)
+    if parsed is not None:
+        return parsed
+    start = text.find("[")
+    if start != -1:
+        for end in sorted((i for i, ch in enumerate(text) if ch == "]"), reverse=True):
+            if end <= start:
+                continue
+            sub = _fix_trailing_commas(text[start : end + 1])
+            parsed = _try_parse_array(sub)
+            if parsed is not None:
+                return parsed
     match = re.search(r"\[[\s\S]*\]", text)
     if match:
-        try:
-            data = json.loads(match.group(0))
-            if isinstance(data, list):
-                return data
-        except json.JSONDecodeError:
-            return []
+        parsed = _try_parse_array(match.group(0))
+        if parsed is not None:
+            return parsed
     return []
 
 

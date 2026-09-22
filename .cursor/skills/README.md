@@ -8,7 +8,7 @@
 | [main-path](./main-path/SKILL.md) | 译+笔记+导出验收（e2e） | WF-01 · WF-02 + SEO 旁路 |
 | [ops-api](./ops-api/SKILL.md) | 日更/后台；工作台 Try | 发现旁路 · `/api/try/*` |
 | [daily-discover](./daily-discover/SKILL.md) | Topic/query → queue | 发现旁路 |
-| [batch-local-first](./batch-local-first/SKILL.md) | 队列加工；`export-site` 命令细节 | WF-01 · WF-02 |
+| [batch-local-first](./batch-local-first/SKILL.md) | 队列加工；`export-site` 命令细节；**content / postproc 分轨** | WF-01 · WF-02 |
 | [sync-subs](./sync-subs/SKILL.md) | 字幕时间轴 | WF-01 · WF-03 |
 
 MCP A–C：`subtitle_pipeline/vitual_mcp/` · tools + resources `vitual://export/*`

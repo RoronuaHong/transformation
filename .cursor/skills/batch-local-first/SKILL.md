@@ -18,11 +18,14 @@ description: Processes pending queue jobs with ASR/translate/notes and optional 
 - After source SRT: **source notes ∥ subtitle translate** (fork). Notes localize still waits on source notes.
 - GIF/MP4 cuts: parallel ffmpeg via `VITUAL_CLIP_WORKERS` (default **2**).
 - Controllable `--stages`:
-  - `all` — full path
+  - `all` / `content` — 内容轨（fetch…clips），**不含** postproc
   - `llm` — translate+notes+localize, **reuse SRT** (no Whisper)
   - `post` — llm + frames/clips
+  - `postproc` — 媒体轨：dehardsub,deblur,enhance,compress（第二轨，opt-in）
   - `media` / `clips` / `frames` — re-cut only (needs existing notes)
-  - comma list e.g. `translate,localize`
+  - comma list e.g. `content,postproc` / `translate,localize,dehardsub`
+- Parallel already: notes∥translate fork; `--lang-workers`; `VITUAL_CLIP_WORKERS`
+- Yarn tracks: `batch:content` / `batch:fast` / `batch:postproc` / `batch:dehardsub`
 - Whisper stays local. Secrets: `llm.yaml` / `.env` are gitignored.
 - Source language in content.db / filenames must be a real code (`en`, `zh`, …), **never** `src`.
 - Config sample: `subtitle_pipeline/llm.example.yaml`.
