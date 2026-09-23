@@ -159,3 +159,7 @@ tools/
 !box-lift-*.md
 !concept-renders/
 !concept-renders/*.jpg
+
+# ── Materials Hub 文档与单页前端（例外：全局 *.md / *.html 被忽略）──
+!materials_hub/**/*.md
+!materials_hub/**/*.html
