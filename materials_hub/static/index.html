@@ -21,6 +21,8 @@
   .thumb{height:140px;background:#000;display:flex;align-items:center;justify-content:center;overflow:hidden}
   .thumb img,.thumb video{max-width:100%;max-height:100%}
   .thumb .ph{color:var(--mut);font-size:34px}
+  .thumb .pill{border:1px solid var(--line);border-radius:10px;padding:6px 14px;color:var(--mut);
+    font-size:12px;letter-spacing:.1em;text-transform:uppercase;background:rgba(255,255,255,.03)}
   .body{padding:10px;display:flex;flex-direction:column;gap:8px}
   .name{font-weight:600;word-break:break-all}
   .meta{color:var(--mut);font-size:12px}
@@ -123,7 +125,7 @@ async function load(){
   const rows = await api("/api/list?"+qs(q));
   const st = await api("/api/stats");
   THUMB_SERVER = !!(st.thumbs && st.thumbs.ffmpeg);
-  $("#stats").innerHTML = `共 ${st.total} 个 · 重复 <span id="dupLink" style="cursor:pointer;color:var(--acc)">${st.dupes}</span> 组 · ` +
+  $("#stats").innerHTML = `库内 ${st.total} 个 · 重复 <span id="dupLink" style="cursor:pointer;color:var(--acc)">${st.dupes}</span> 组 · ` +
     Object.entries(st.kinds).map(([k,v])=>`${k}:${v}`).join("  ") +
     ` · 封面 <span id="thumbInfo"></span>`;
   const dl=$("#dupLink"); if(dl) dl.onclick=openDupes;
@@ -140,7 +142,10 @@ async function load(){
         (THUMB_SERVER && !m.thumb ? `<div class="badge">封面不可用</div>` : "") + `</div>`;
     }
     else if(m.kind==="audio") thumb=`<div class="thumb"><div class="ph">♪</div></div>`;
-    else thumb=`<div class="thumb"><div class="ph">${m.ext||"?"}</div></div>`;
+    else{
+      const ex=((m.ext||"").replace(/^\./,"").slice(0,5)||"?").toUpperCase();
+      thumb=`<div class="thumb"><div class="pill">${ex}</div></div>`;
+    }
     const size=(m.size/1048576).toFixed(2)+" MB";
     c.innerHTML = thumb + `
       <div class="body">
@@ -168,6 +173,7 @@ async function load(){
   }
   refreshThumbInfo();
   renderPager(pages);
+  syncHash();
 }
 
 function renderPager(pages){
@@ -176,6 +182,32 @@ function renderPager(pages){
     : "无匹配结果";
   $("#prev").disabled = page<=1;
   $("#next").disabled = page>=pages;
+}
+
+/* ---------- URL hash 同步:筛选项可收藏 / 可分享 / 可前进后退 ---------- */
+function syncHash(){
+  const f=filters(), o={};
+  if(f.q) o.q=f.q;
+  if(f.kind) o.kind=f.kind;
+  if(f.tag) o.tag=f.tag;
+  o.size=pageSize;
+  if(page>1) o.page=page;
+  history.replaceState(null,"", "#"+qs(o));
+}
+
+function readHash(){
+  // 支持 query(?q=…)与 hash(#q=…)两种写法:hash 优先(便于分享/收藏)
+  const p = new URLSearchParams(location.search.replace(/^\?/,""));
+  const h = location.hash.replace(/^#/,"");
+  if(h) for(const [k,v] of new URLSearchParams(h)) p.set(k,v);
+  if(![...p.keys()].length) return null;
+  $("#q").value = p.get("q")||"";
+  const k=p.get("kind")||"";
+  if([...$("#kind").options].some(o=>o.value===k)) $("#kind").value=k;
+  pageSize = p.get("size")!==null ? (Number(p.get("size"))||0) : pageSize;
+  if([...$("#pageSize").options].some(o=>o.value===String(pageSize))) $("#pageSize").value=String(pageSize);
+  page = Math.max(1, Number(p.get("page"))||1);
+  return p.get("tag") || "";          // 标签下拉是异步填充的,留给调用方稍后设置
 }
 
 /* ---------- 视频封面 ----------
@@ -318,8 +350,23 @@ async function populateTags(){
   }catch(e){}
 }
 
-populateTags();
-load();
+function selectTag(t){
+  if(!t) return;
+  if([...$("#tag").options].some(o=>o.value===t)) $("#tag").value=t;
+}
+
+(async function init(){
+  const tagFromHash = readHash();     // 先按 hash 还原筛选/分页
+  await populateTags();
+  selectTag(tagFromHash);             // 标签下拉填充后才能选中
+  load();
+})();
+
+window.addEventListener("hashchange", ()=>{   // 支持浏览器前进/后退
+  const tag = readHash();
+  selectTag(tag);
+  load();
+});
 </script>
 </body>
 </html>
