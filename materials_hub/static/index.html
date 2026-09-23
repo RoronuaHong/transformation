@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>素材中心 · Materials Hub</title>
+<style>
+  :root{--bg:#0f1115;--card:#1a1d24;--line:#2a2f3a;--fg:#e6e8ec;--mut:#8b93a1;--acc:#4f8cff;--dup:#ff6b6b}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,"Microsoft YaHei",sans-serif}
+  header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  header h1{font-size:16px;margin:0;font-weight:600}
+  .tools{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-left:auto}
+  input,select,button,textarea{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit}
+  button{cursor:pointer}
+  button:hover{border-color:var(--acc)}
+  .main{padding:16px 20px}
+  .stats{color:var(--mut);font-size:13px;margin-bottom:12px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
+  .thumb{height:140px;background:#000;display:flex;align-items:center;justify-content:center;overflow:hidden}
+  .thumb img,.thumb video{max-width:100%;max-height:100%}
+  .thumb .ph{color:var(--mut);font-size:34px}
+  .body{padding:10px;display:flex;flex-direction:column;gap:8px}
+  .name{font-weight:600;word-break:break-all}
+  .meta{color:var(--mut);font-size:12px}
+  .tagin{font-size:12px}
+  .desc{font-size:12px;width:100%;resize:vertical;min-height:42px}
+  .row{display:flex;gap:6px}
+  .row button{flex:1;font-size:12px;padding:5px}
+  .del{border-color:var(--dup);color:var(--dup)}
+  .dup{color:var(--dup);font-size:11px}
+  #drop{position:fixed;inset:0;background:rgba(79,140,255,.15);border:3px dashed var(--acc);display:none;align-items:center;justify-content:center;font-size:22px;color:var(--acc);z-index:50}
+</style>
+</head>
+<body>
+<header>
+  <h1>素材中心</h1>
+  <div class="tools">
+    <input id="q" placeholder="搜索名称/标签/描述…" style="width:220px">
+    <select id="kind">
+      <option value="">全部类型</option>
+      <option value="images">图片</option>
+      <option value="videos">视频</option>
+      <option value="docs">文档</option>
+      <option value="audio">音频</option>
+      <option value="subs">字幕</option>
+      <option value="other">其他</option>
+    </select>
+    <select id="tag">
+      <option value="">全部标签</option>
+    </select>
+    <button id="refresh">刷新</button>
+    <button id="ingest">整理 ingest/</button>
+    <button id="scan">扫描 materials/</button>
+    <button id="exportJson">导出 JSON</button>
+    <button id="exportCsv">导出 CSV</button>
+    <button id="pick">上传</button>
+    <input id="file" type="file" multiple hidden>
+  </div>
+</header>
+
+<div class="main">
+  <div class="stats" id="stats">加载中…</div>
+  <div class="grid" id="grid"></div>
+</div>
+<div id="drop">松手即可上传</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const api = (p,o)=>fetch(p,o).then(r=>r.json());
+
+async function load(){
+  const q=$("#q").value.trim(), kind=$("#kind").value, tag=$("#tag").value;
+  const rows = await api("/api/list?q="+encodeURIComponent(q)+"&kind="+encodeURIComponent(kind)+"&tag="+encodeURIComponent(tag));
+  const st = await api("/api/stats");
+  $("#stats").textContent = `共 ${st.total} 个 · 重复 ${st.dupes} 组 · ` +
+    Object.entries(st.kinds).map(([k,v])=>`${k}:${v}`).join("  ");
+  const grid=$("#grid"); grid.innerHTML="";
+  for(const m of rows){
+    const c=document.createElement("div"); c.className="card";
+    let thumb;
+    if(m.kind==="images") thumb=`<div class="thumb"><img src="/api/file/${m.id}" loading="lazy"></div>`;
+    else if(m.kind==="videos") thumb=`<div class="thumb"><video src="/api/file/${m.id}" muted controls></video></div>`;
+    else if(m.kind==="audio") thumb=`<div class="thumb"><div class="ph">♪</div></div>`;
+    else thumb=`<div class="thumb"><div class="ph">${m.ext||"?"}</div></div>`;
+    const size=(m.size/1048576).toFixed(2)+" MB";
+    c.innerHTML = thumb + `
+      <div class="body">
+        <div class="name" title="${m.name}">${m.name}</div>
+        <div class="meta">${m.kind} · ${size} · ${m.created_at}</div>
+        <input class="tagin" placeholder="标签,逗号分隔" value="${m.tags||""}">
+        <textarea class="desc" placeholder="描述…">${m.description||""}</textarea>
+        <div class="row">
+          <button class="save">保存</button>
+          <button class="del">删除</button>
+        </div>
+      </div>`;
+    const tagin=c.querySelector(".tagin"), desc=c.querySelector(".desc");
+    c.querySelector(".save").onclick=async()=>{
+      await api("/api/tag",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:m.id,tags:tagin.value})});
+      await api("/api/describe",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:m.id,description:desc.value})});
+      load();
+    };
+    c.querySelector(".del").onclick=async()=>{
+      if(confirm("删除 "+m.name+" ?")){ await api("/api/remove",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:m.id})}); load(); }
+    };
+    grid.appendChild(c);
+  }
+}
+
+$("#q").oninput=debounce(load,250);
+$("#kind").onchange=load;
+$("#tag").onchange=load;
+$("#refresh").onclick=load;
+$("#ingest").onclick=async()=>{ await api("/api/ingest",{method:"POST"}); load(); };
+$("#scan").onclick=async()=>{ await api("/api/scan",{method:"POST"}); load(); };
+$("#pick").onclick=()=>$("#file").click();
+$("#exportJson").onclick=()=>window.open("/api/export?fmt=json");
+$("#exportCsv").onclick=()=>window.open("/api/export?fmt=csv");
+$("#file").onchange=e=>upload(e.target.files);
+
+async function upload(files){
+  for(const f of files){
+    const fd=new FormData(); fd.append("file",f);
+    await fetch("/api/upload",{method:"POST",body:fd});
+  }
+  load();
+}
+
+const drop=$("#drop");
+["dragenter","dragover"].forEach(ev=>document.addEventListener(ev,e=>{e.preventDefault();drop.style.display="flex";}));
+["dragleave","drop"].forEach(ev=>document.addEventListener(ev,e=>{e.preventDefault();if(ev==="drop"||e.target===drop)drop.style.display="none";}));
+drop.ondrop=e=>{ e.preventDefault(); drop.style.display="none"; upload(e.dataTransfer.files); };
+
+function debounce(fn,ms){let t;return(...a)=>{clearTimeout(t);t=setTimeout(()=>fn(...a),ms);};}
+
+async function populateTags(){
+  try{
+    const tags = await api("/api/tags");
+    const sel = $("#tag");
+    for(const t of tags){
+      const o = document.createElement("option");
+      o.value = t.tag; o.textContent = `${t.tag} (${t.count})`;
+      sel.appendChild(o);
+    }
+  }catch(e){}
+}
+
+populateTags();
+load();
+</script>
+</body>
+</html>
