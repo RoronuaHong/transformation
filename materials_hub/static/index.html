@@ -65,6 +65,11 @@
       <option value="subs">字幕</option>
       <option value="other">其他</option>
     </select>
+    <select id="mode" title="检索方式">
+      <option value="auto">自动(语义+关键词)</option>
+      <option value="lexical">精确关键词</option>
+      <option value="semantic">纯语义</option>
+    </select>
     <select id="tag">
       <option value="">全部标签</option>
     </select>
@@ -75,6 +80,7 @@
     <button id="exportJson">导出 JSON</button>
     <button id="exportCsv">导出 CSV</button>
     <button id="thumbs">生成封面</button>
+    <button id="embed">构建语义索引</button>
     <button id="pick">上传</button>
     <input id="file" type="file" multiple hidden>
   </div>
@@ -122,7 +128,8 @@ let THUMB_SERVER=false;            // 服务端能否抽帧(ffmpeg 可用)
 const thumbCache=new Map();        // id -> dataURL:浏览器截帧结果,避免重复抽
 let page=1, pageSize=48, totalRows=0;   // 分页状态
 
-const filters = ()=>({q:$("#q").value.trim(), kind:$("#kind").value, tag:$("#tag").value});
+const filters = ()=>({q:$("#q").value.trim(), kind:$("#kind").value,
+                      tag:$("#tag").value, mode:$("#mode").value});
 const qs = o => Object.entries(o).map(([k,v])=>`${k}=${encodeURIComponent(v)}`).join("&");
 function reload(){ page=1; load(); }    // 筛选条件变化时回到第 1 页
 
@@ -143,7 +150,8 @@ async function load(){
     ` · 封面 <span id="thumbInfo"></span> · ` +
     (ex.broken
       ? `外部引用 ${ex.external} 条,<span id="brokenLink" style="cursor:pointer;color:var(--dup)">失效 ${ex.broken}</span>`
-      : `外部引用 ${ex.external||0} 条,引用完整`);
+      : `外部引用 ${ex.external||0} 条,引用完整`) +
+    ` · 语义 <span id="embedInfo"></span>`;
   const dl=$("#dupLink"); if(dl) dl.onclick=openDupes;
   const bl=$("#brokenLink"); if(bl) bl.onclick=openBroken;
   const grid=$("#grid"); grid.innerHTML="";
@@ -210,6 +218,7 @@ function syncHash(){
   if(f.q) o.q=f.q;
   if(f.kind) o.kind=f.kind;
   if(f.tag) o.tag=f.tag;
+  if(f.mode && f.mode!=="auto") o.mode=f.mode;
   o.size=pageSize;
   if(page>1) o.page=page;
   history.replaceState(null,"", "#"+qs(o));
@@ -224,6 +233,8 @@ function readHash(){
   $("#q").value = p.get("q")||"";
   const k=p.get("kind")||"";
   if([...$("#kind").options].some(o=>o.value===k)) $("#kind").value=k;
+  const md=p.get("mode")||"";
+  if([...$("#mode").options].some(o=>o.value===md)) $("#mode").value=md;
   pageSize = p.get("size")!==null ? (Number(p.get("size"))||0) : pageSize;
   if([...$("#pageSize").options].some(o=>o.value===String(pageSize))) $("#pageSize").value=String(pageSize);
   page = Math.max(1, Number(p.get("page"))||1);
@@ -273,32 +284,58 @@ function clientThumb(v){
   try{ v.load(); }catch(e){}
 }
 
-let thumbJobActive=false;
+let thumbJobActive=false, embedJobActive=false;
 
-async function refreshThumbInfo(){
+async function refreshThumbInfo(){          // 同时刷新封面与语义索引状态(共用一次 /api/stats)
   let st;
   try{ st = await api("/api/stats"); }catch(e){ return; }
+
   const t = st.thumbs||{}, j = st.thumb_job||{};
-  const el = $("#thumbInfo"); if(!el) return;
-  let txt = t.ffmpeg
-    ? `服务端抽帧(缓存 ${t.cached}${t.failed?` · 不可用 ${t.failed}`:""})`
-    : "浏览器截帧(本机无 ffmpeg)";
-  if(j.running) txt += ` · 生成中 ${j.done}/${j.total}`;
-  el.textContent = txt;
-  const btn=$("#thumbs"); if(btn) btn.disabled = !t.ffmpeg || !!j.running;
-  if(j.running){
-    thumbJobActive=true;
-    setTimeout(refreshThumbInfo,2000);
-  }else if(thumbJobActive){      // 批量生成结束 → 重渲染一次,换上服务端封面
-    thumbJobActive=false;
+  const el = $("#thumbInfo");
+  if(el){
+    let txt = t.ffmpeg
+      ? `服务端抽帧(缓存 ${t.cached}${t.failed?` · 不可用 ${t.failed}`:""})`
+      : "浏览器截帧(本机无 ffmpeg)";
+    if(j.running) txt += ` · 生成中 ${j.done}/${j.total}`;
+    el.textContent = txt;
+  }
+  const tbtn=$("#thumbs"); if(tbtn) tbtn.disabled = !t.ffmpeg || !!j.running;
+
+  const e = st.embed||{}, ej = e.job||{};
+  const eel = $("#embedInfo");
+  if(eel){
+    let etxt;
+    if(!e.available) etxt = "未启用(无本地 embedding 模型)";
+    else etxt = `${e.model} ${e.embedded}/${e.total}`;
+    if(ej.running) etxt += ` · 构建中 ${ej.done}/${ej.total}`;
+    else if(ej.error && e.available) etxt += ` · ${ej.error}`;
+    eel.textContent = etxt;
+  }
+  const ebtn=$("#embed"); if(ebtn) ebtn.disabled = !e.available || !!ej.running;
+
+  if(j.running){ thumbJobActive=true; setTimeout(refreshThumbInfo,2000); }
+  else if(thumbJobActive){ thumbJobActive=false; load(); }
+  if(ej.running){
+    embedJobActive=true;
+    setTimeout(refreshThumbInfo,1500);
+  }else if(embedJobActive){                 // 语义索引构建完毕 → 重搜一次
+    embedJobActive=false;
     load();
   }
 }
+
+const refreshEmbedInfo = refreshThumbInfo;  // 「构建语义索引」按钮复用同一刷新
 
 $("#q").oninput=debounce(reload,250);
 $("#kind").onchange=reload;
 $("#tag").onchange=reload;
 $("#refresh").onclick=load;
+$("#mode").onchange=reload;                       // 切换检索方式
+$("#embed").onclick=async()=>{
+  const r = await api("/api/embed",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+  if(r.available===false){ alert(r.hint||"未发现本地 embedding 模型"); return; }
+  refreshEmbedInfo();
+};
 $("#prev").onclick=()=>{ if(page>1){ page--; load(); } };
 $("#next").onclick=()=>{ const pages=Math.max(1,Math.ceil(totalRows/pageSize)); if(page<pages){ page++; load(); } };
 $("#pageSize").onchange=e=>{ pageSize=Number(e.target.value)||0; page=1; load(); };

@@ -5,6 +5,7 @@
 """
 import os
 import re
+import json
 import sqlite3
 import shutil
 import hashlib
@@ -96,6 +97,17 @@ def _init_db():
     )
     con.execute("CREATE INDEX IF NOT EXISTS idx_sha ON materials(sha256)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_kind ON materials(kind)")
+    # 语义索引:向量以 float32 BLOB 存库,sig 用于检测文档文本变化(增量重建)
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS embeddings(
+            mid TEXT PRIMARY KEY,
+            model TEXT,
+            dim INTEGER,
+            sig TEXT,
+            vec BLOB,
+            updated_at TEXT
+        )"""
+    )
     for col, ddl in [("location", "TEXT DEFAULT 'internal'"),
                      ("external_path", "TEXT DEFAULT ''")]:
         try:
@@ -152,13 +164,38 @@ def _tokens(s):
 _FIELD_WEIGHT = {"name": 3.0, "tags": 2.5, "description": 1.5, "rel_path": 1.0}
 
 
+def _path_tokens(p):
+    """路径分词,只取末 3 段。
+
+    必要性(实测):外部引用的 rel_path 是**绝对路径**,里面含工作区/项目名
+    (如 `…\\Vitual\\subtitle_pipeline\\…`),于是查"字幕/subtitle"时 **341 条全部命中**,
+    命中数直接失去意义。末 3 段保留了阶段目录(media/dehardsub/deblur/mosaic)与 job id,
+    去掉的是工作区前缀。"""
+    parts = [x for x in re.split(r"[\\/]+", p or "") if x and x != ":"]
+    return _tokens(" ".join(parts[-3:]))
+
+
 def _score(q_tokens, m):
-    """加权语义近似打分:query token 与素材各字段 token 重叠累计。"""
+    """加权近似打分:query token 与素材各字段 token 重叠累计。
+
+    含一层**松匹配**:英文/数字 token 长度 ≥5 时,互为子串也算命中(权重 0.6)。
+    实测必要性:数据里是 `demosaic`,查 `mosaic` 时严格分词匹配不上;
+    `dehardsub` 同理。松匹配只在严格匹配为 0 时才尝试,避免误召回放大。"""
     sc = 0.0
     for field, w in _FIELD_WEIGHT.items():
-        ov = len(q_tokens & _tokens(m.get(field, "")))
+        dt = _path_tokens(m.get(field, "")) if field == "rel_path" else _tokens(m.get(field, ""))
+        ov = q_tokens & dt
         if ov:
-            sc += w * ov
+            sc += w * len(ov)
+            continue
+        loose = 0
+        for qt in q_tokens:
+            if len(qt) < 5 or qt[:2] in ("c:", "b:"):
+                continue
+            if any(qt in d for d in dt):
+                loose += 1
+        if loose:
+            sc += w * 0.6 * loose
     return sc
 
 
@@ -193,19 +230,354 @@ def query_materials(q="", kind="", tag=""):
     return [m for _, m in scored]
 
 
-def search(q="", kind="", tag="", limit=None, offset=0):
-    """检索:自然语言问句 → 字段加权语义近似打分排序,支持分页。
+def _ranked(q="", kind="", tag="", mode="auto"):
+    """统一检索入口:返回 (结果列表, 是否用了语义)。
+    没有 q 时就是 kind/tag 过滤 + 时间倒序(与旧行为一致)。"""
+    if not q:
+        return query_materials("", kind, tag), False
+    q2 = expand_query(q)                 # 中文问句补上语料英文词汇
+    lex = query_materials(q2, kind, tag)
+    if mode == "lexical" or not embed_probe()["ok"]:
+        return lex, False
+    # 语义检索在「kind/tag 过滤后的整个语料」上排名,才能召回词法完全没命中的条目
+    base = query_materials("", kind, tag)
+    return semantic_rank(q2, base, lex)
+
+
+def search(q="", kind="", tag="", limit=None, offset=0, mode="auto"):
+    """检索:自然语言问句 → 排序后返回,支持分页。
+    mode="auto"     有 embedding 模型且素材已建向量 → 稠密+词法混合;
+                    否则纯词法加权(与旧行为一致)
+    mode="lexical"  强制词法;mode="semantic" 强制语义(无向量时自动回退词法)
     limit=None 表示不分页;offset 在排序之后生效(全局偏移,非页内)。"""
-    rows = query_materials(q, kind, tag)
+    rows, _ = _ranked(q, kind, tag, mode)
     if offset > 0 or limit is not None:
         end = None if limit is None else offset + limit
         rows = rows[offset:end]
     return rows
 
 
-def count_materials(q="", kind="", tag=""):
-    """当前筛选条件下的命中总数(配合分页使用)。"""
-    return len(query_materials(q, kind, tag))
+def count_materials(q="", kind="", tag="", mode="auto"):
+    """当前条件下的命中总数(配合分页使用;语义模式下与排序结果集一致)。"""
+    return len(_ranked(q, kind, tag, mode)[0])
+
+
+# ---------- 语义检索(本地 ollama embedding,零依赖) ----------
+_EMBED_CACHE = {"probed": False, "model": "", "url": "", "ok": False, "err": ""}
+
+
+def _embed_url():
+    return os.environ.get("VITUAL_EMBED_URL", "http://127.0.0.1:11434").rstrip("/")
+
+
+def _http_json(url, payload=None, timeout=90):
+    import urllib.request
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    req = urllib.request.Request(url, data=data,
+                                 headers={"Content-Type": "application/json"} if data else {})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def embed_probe(refresh=False):
+    """探测本地 embedding 能力:ollama 是否有 embedding 模型。
+    结果缓存(_EMBED_CACHE),避免每次检索都探测。"""
+    if _EMBED_CACHE["probed"] and not refresh:
+        return _EMBED_CACHE
+    _EMBED_CACHE.update(probed=True, ok=False, model="", url=_embed_url(), err="")
+    want = os.environ.get("VITUAL_EMBED_MODEL", "").strip()
+    try:
+        tags = _http_json(_embed_url() + "/api/tags", timeout=8)
+    except Exception as e:              # 服务没起 / 端口不通 → 明确记下原因
+        _EMBED_CACHE["err"] = f"{type(e).__name__}: {e}"
+        return _EMBED_CACHE
+    cands = []
+    for m in tags.get("models", []):
+        caps = m.get("capabilities") or []
+        if "embedding" in caps or (m.get("name", "").split(":")[0] in ("nomic-embed-text", "bge-m3", "mxbai-embed-large")):
+            cands.append(m["name"])
+    if want:
+        # 显式指定优先;名称可省略 tag(ollama 会补 :latest)
+        hit = next((c for c in cands if c == want or c.split(":")[0] == want), None)
+        if hit:
+            cands = [hit] + [c for c in cands if c != hit]
+        else:
+            cands = [want] + cands
+    if cands:
+        _EMBED_CACHE.update(ok=True, model=cands[0])
+    return _EMBED_CACHE
+
+
+def embed_ready():
+    return embed_probe()["ok"]
+
+
+def embed_texts(texts, model=None):
+    """批量取 embedding。失败返回 None(调用方回退词法检索)。
+    优先 /api/embed(批量),不支持则退回 /api/embeddings(逐条)。"""
+    if not texts:
+        return []
+    info = embed_probe()
+    if not info["ok"]:
+        return None
+    model = model or info["model"]
+    url = _embed_url()
+    try:
+        r = _http_json(url + "/api/embed", {"model": model, "input": list(texts)})
+        if isinstance(r.get("embeddings"), list) and len(r["embeddings"]) == len(texts):
+            return r["embeddings"]
+    except Exception:
+        pass
+    out = []
+    for t in texts:                      # 老版本 ollama:逐条
+        try:
+            r = _http_json(url + "/api/embeddings", {"model": model, "prompt": t})
+            out.append(r["embedding"])
+        except Exception:
+            return None
+    return out if len(out) == len(texts) else None
+
+
+def doc_text(m):
+    """把一条素材拼成用于 embedding 的文档文本。
+
+    经验要点(实测:库内两两余弦均值会从 0.76 降到更可分的水平):
+    1. **去掉模板词** —— `sp` 每条都有,只会把所有向量拉向同一方向;
+       `type:`/`lang:`/`job:` 这类维度标签保留(有区分度)。
+    2. **文件名/目录名按下划线连字符拆词** —— `clean_lama_writing.mp4` →
+       `clean lama writing`,模型才能对上 lama/clean 这些词。
+    3. **外部引用的目录段含阶段语义**(dehardsub/deblur/mosaic/probe),取末几段。
+    4. nomic-embed-text 要求文档加 `search_document:` 前缀(查询用 `search_query:`)。
+    """
+    stem, ext = os.path.splitext(m.get("name", ""))
+    words = re.sub(r"[_\-.]+", " ", stem)
+    if ext:
+        words += " " + ext.lstrip(".")      # 扩展名也是语义(srt/ass/mp4/png),别丢
+    p = m.get("external_path") or m.get("rel_path") or ""
+    dirs = [d for d in os.path.dirname(p).replace("\\", "/").split("/") if d]
+    stage = re.sub(r"[_\-.]+", " ", " ".join(dirs[-4:]))   # 同样避开工作区前缀(见 _path_tokens)
+    tags = [t.strip() for t in (m.get("tags") or "").split(",") if t.strip() and t.strip() != "sp"]
+    parts = [words, " ".join(tags), m.get("description", ""), m.get("kind", ""), stage]
+    return "search_document: " + " | ".join(x for x in parts if x)
+
+
+def _text_sig(t):
+    return hashlib.sha1(t.encode("utf-8")).hexdigest()[:16]
+
+
+def _vec_to_blob(v):
+    import array
+    a = array.array("f", v)
+    return a.tobytes()
+
+
+def _blob_to_vec(b):
+    import array
+    a = array.array("f")
+    a.frombytes(b)
+    return a.tolist()
+
+
+def build_embeddings(force=False, limit=0, progress=None):
+    """增量构建/刷新语义索引。返回统计 dict。无 ollama embedding 模型时返回 available=False。"""
+    info = embed_probe(refresh=True)
+    if not info["ok"]:
+        return {"available": False, "model": "", "total": 0, "embedded": 0, "skipped": 0}
+    model = info["model"]
+    ms = all_materials()
+    con = _con()
+    con.row_factory = sqlite3.Row
+    have = {r["mid"]: (r["model"], r["sig"]) for r in con.execute(
+        "SELECT mid, model, sig FROM embeddings").fetchall()}
+    con.close()
+    todo = []
+    for m in ms:
+        txt = doc_text(m)
+        sig = _text_sig(txt)
+        if not force and have.get(m["id"]) == (model, sig):
+            continue
+        todo.append((m["id"], txt, sig))
+    total = len(ms)
+    skipped = total - len(todo)
+    if limit:
+        todo = todo[:limit]
+    done = 0
+    for i in range(0, len(todo), 16):
+        chunk = todo[i:i + 16]
+        vecs = embed_texts([t for _, t, _ in chunk], model=model)
+        if vecs is None:
+            break
+        con = _con()
+        for (mid, _t, sig), v in zip(chunk, vecs):
+            con.execute("INSERT OR REPLACE INTO embeddings(mid,model,dim,sig,vec,updated_at)"
+                        " VALUES(?,?,?,?,?,?)",
+                        (mid, model, len(v), sig, _vec_to_blob(v),
+                         datetime.datetime.now().isoformat(timespec="seconds")))
+        con.commit()
+        con.close()
+        done += len(chunk)
+        if progress:
+            progress(done, len(todo))
+    return {"available": True, "model": model, "total": total,
+            "embedded": done, "skipped": skipped, "pending": len(todo) - done}
+
+
+def embed_status():
+    """语义索引状态:模型 / 已索引数 / 覆盖率。"""
+    info = embed_probe()
+    con = _con()
+    con.row_factory = sqlite3.Row
+    n = con.execute("SELECT COUNT(*) c FROM embeddings WHERE model=?", (info["model"],)).fetchone()["c"]
+    total = con.execute("SELECT COUNT(*) c FROM materials").fetchone()["c"]
+    con.close()
+    return {"available": info["ok"], "model": info["model"], "url": info["url"],
+            "embedded": n, "total": total, "err": info.get("err", ""),
+            "coverage": round(n / total, 3) if total else 0.0}
+
+
+def _normalize(v):
+    import math
+    n = math.sqrt(sum(x * x for x in v)) or 1.0
+    return [x / n for x in v]
+
+
+def load_vectors(mids, model):
+    if not mids:
+        return {}
+    out = {}
+    con = _con()
+    con.row_factory = sqlite3.Row
+    q = ("SELECT mid, vec FROM embeddings WHERE model=? AND mid IN (%s)"
+         % ",".join("?" * len(mids)))
+    for r in con.execute(q, [model] + list(mids)).fetchall():
+        out[r["mid"]] = _blob_to_vec(r["vec"])
+    con.close()
+    return out
+
+
+def semantic_rank(q, base_rows, lexical_rows=None):
+    """稠密 + 词法混合排序,返回 (排序后的结果, 是否真的用了语义)。
+
+    两个关键工程处理:
+    * **去均值居中**(mean-centering):句向量普遍各向异性(本库实测两两余弦均值 0.76),
+      直接算余弦时"所有东西都像所有东西"。减去语料均值向量后相关/无关才拉得开。
+    * **RRF 融合**稠密排名与词法排名,规避两套分数的量纲差异;
+      且语料里没做向量的条目仍靠词法参与,不会凭空消失。
+    结果集 = 稠密相似度过线的 ∪ 词法命中的(过线阈值可用 VITUAL_EMBED_MIN_COS 调)。
+    """
+    info = embed_probe()
+    if not info["ok"] or not base_rows:
+        return (lexical_rows if lexical_rows is not None else base_rows), False
+    vecs = load_vectors([m["id"] for m in base_rows], info["model"])
+    if not vecs:
+        return (lexical_rows if lexical_rows is not None else base_rows), False
+    qv = embed_texts(["search_query: " + q])
+    if not qv:
+        return (lexical_rows if lexical_rows is not None else base_rows), False
+
+    dim = len(next(iter(vecs.values())))
+    ids = list(vecs)
+    mean = [0.0] * dim
+    for mid in ids:                       # 语料均值向量(用于居中)
+        v = vecs[mid]
+        for d in range(dim):
+            mean[d] += v[d]
+    n = len(ids)
+    mean = [x / n for x in mean]
+
+    def centered(v):
+        return _normalize([v[d] - mean[d] for d in range(dim)])
+
+    qn = centered(qv[0])
+    dense = {mid: sum(a * b for a, b in zip(qn, centered(vecs[mid]))) for mid in ids}
+    qt = _tokens(q)
+    lexical = {m["id"]: _score(qt, m) for m in base_rows}
+
+    def ranks(sc):
+        return {k: i for i, k in enumerate(sorted(sc, key=lambda k: -sc[k]))}
+
+    dr, lr = ranks(dense), ranks(lexical)
+    BIG = 10 ** 6
+    K = int(os.environ.get("VITUAL_RRF_K", "60"))        # RRF 常数
+    # 词法权重 >1 的含义:**精确关键词命中永远排在纯语义发现之前**,
+    # 语义只负责"词法完全没命中时"的召回(实测该策略兼顾精度与召回)。
+    wl = float(os.environ.get("VITUAL_HYBRID_WLEX", "1.0"))
+
+    def fused(m):
+        mid = m["id"]
+        return -(wl / (K + lr.get(mid, BIG)) + 1.0 / (K + dr.get(mid, BIG)))
+
+    try:
+        min_cos = float(os.environ.get("VITUAL_EMBED_MIN_COS", "0.25"))
+    except ValueError:
+        min_cos = 0.25
+    lex_ids = {m["id"] for m in (lexical_rows if lexical_rows is not None else [])}
+    keep = [m for m in base_rows
+            if dense.get(m["id"], -1) >= min_cos or m["id"] in lex_ids]
+    if not keep:
+        return (lexical_rows or []), True
+    return sorted(keep, key=fused), True
+
+
+# 中文 → 语料英文词汇的领域同义词表。
+# 必要性:本库元数据是英文(dehardsub/deblur/codeformer/type:subs…),而通常可离线拿到的
+# 本地 embedding 模型(nomic-embed-text 等)是**英文单语**,中文问句既匹配不上词法、
+# 语义也召不回(实测 P@5=0)。手工维护一张领域词表,秒级生效且完全确定,不依赖大模型。
+QUERY_SYNONYMS = {
+    # 注意「实体词」与「文件类型词」要分开:
+    #   "字幕"        → 指被处理的画面(hardsub/dehardsub),不该把 .srt 顶上来
+    #   "字幕文件/文本" → 才指字幕文本本身(srt/ass)
+    "字幕": ["subs", "subtitle", "hardsub", "dehardsub"],
+    "字幕文件": ["subs", "srt", "ass"],
+    "字幕文本": ["subs", "srt", "ass"],
+    "文本文件": ["subs", "srt", "ass"],
+    "去字幕": ["dehardsub", "hardsub"],
+    "软字幕": ["subs", "subtitle"],
+    "硬字幕": ["hardsub", "dehardsub"],
+    "模糊": ["deblur", "blur"],
+    "清晰": ["clean", "deblur"],
+    "锐化": ["deblur", "sharpen"],
+    "马赛克": ["mosaic"],
+    "人脸": ["face", "codeformer", "gfpgan"],
+    "修复": ["restore", "codeformer", "fix"],
+    "增强": ["enhance", "upscale", "esrgan"],
+    "对比": ["cmp", "compare", "comparison"],
+    "渲染": ["render"],
+    "基准": ["benchmark"],
+    "探针": ["probe"],
+    "片段": ["segments", "segment", "clip"],
+    "音频": ["audio", "wav", "m4a"],
+    "音轨": ["audio", "wav", "m4a"],
+    "视频": ["video", "mp4"],
+    "图片": ["image", "png", "jpg"],
+    "笔记": ["notes"],
+    "翻译": ["translate", "lang"],
+    "下载": ["download"],
+    "实例": ["instance"],
+    "源文件": ["src", "source"],
+    "调试": ["debug", "probe"],
+    "画质": ["quality"],
+    "结果": ["out", "final"],
+}
+
+
+def expand_query(q):
+    """中文问句 → 追加语料里的英文对应词汇(纯英文查询原样返回)。
+    只做「加词」不做「改词」,原有命中只会更靠前,不会消失。"""
+    if not q:
+        return q
+    extra = []
+    for zh, ens in QUERY_SYNONYMS.items():
+        if zh in q:
+            extra.extend(ens)
+    if not extra:
+        return q
+    seen, add = set(), []
+    for w in extra:
+        if w not in seen:
+            seen.add(w)
+            add.append(w)
+    return q + " " + " ".join(add)
 
 
 def distinct_tags():

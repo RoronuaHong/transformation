@@ -92,9 +92,10 @@ Web 面板 /api/file/<id> ───┘ 按需读 external_path 预览(图片直�
 
 **一轮完整同步**(推荐挂后台或任务计划):
 ```bash
-python bridge_subtitle.py --thumbs --prune      # 登记 + 补封面 + 引用巡检
-python bridge_subtitle.py --state               # 查看上次同步时间/新增/引用完整性
+python bridge_subtitle.py --thumbs --embed --prune   # 登记 + 补封面 + 刷新语义索引 + 引用巡检
+python bridge_subtitle.py --state                    # 查看上次同步时间/新增/引用完整性
 ```
+`--embed` 让新登记的产物**立刻可被自然语言搜到**(需要本机 ollama 有 embedding 模型;没有会自动跳过)。
 同步结果写入 `index/bridge_state.json`,便于运维核对"上次什么时候同步的、新增了多少"。
 
 ## 7. 取舍与后续

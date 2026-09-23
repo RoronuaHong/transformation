@@ -12,6 +12,7 @@
 - [运行](#运行)
 - [Web 面板用法](#web-面板用法)
 - [检索 / 分面检索](#检索示例)
+- [语义检索(本地 embedding)](#语义检索本地-embedding)
 - [联动 subtitle_pipeline](#联动-subtitle_pipeline快速上手)
 - [运维:备份 / 重建 / 迁移](#运维备份--重建--迁移)
 - [引用完整性与健康检查](#引用完整性与健康检查)
@@ -24,7 +25,9 @@
 ## 功能(对应需求四件套)
 - **目录规范**:固定结构,素材按类型归档。
 - **自动采集整理**:SHA-256 去重、自动分类、命名规范化;可扫描 `ingest/` 或 `materials/` 全树,也可只读联动外部项目。
-- **索引 + 检索**:SQLite 索引 + **零依赖加权语义近似检索**(中文按字 / bigram 分词、英数按词,字段加权打分)。自然语言问一句即可命中,不要求连续子串;支持按类型筛选、按标签过滤。
+- **索引 + 检索**:SQLite 索引 + **两段式检索**——
+  ① 词法层:中文按字 / bigram 分词、英数按词,字段加权打分,配**领域同义词表**(中文→语料英文词)与**长词松匹配**;
+  ② 语义层:接本地 ollama embedding 做**稠密+词法混合**排序。支持按类型筛选、按标签过滤、分页。
 - **管理面板(Web/UI)**:浏览器可视化浏览、上传(含拖拽)、打标签、编辑描述、预览、视频封面、删除、去重整理、导出、引用巡检。
 - **引用完整性与健康检查**:外部引用指向的原文件被上游删除/移动时能**被发现**(面板红字提示 + 逐卡标注 + `/api/health`),并可一键清理失效索引(绝不触碰磁盘)。
 
@@ -66,8 +69,11 @@ sp | <platform> | job:<id> | type:<media|subs|notes|benchmark|render|test> | lan
 ### 分类(kind)与扩展名
 `images` · `videos` · `docs` · `audio` · **`subs`(srt/ass/vtt/ssa/sub/sbv)** · `other`。
 
-### 检索打分
+### 检索打分(词法层)
 字段权重:`name 3.0` > `tags 2.5` > `description 1.5` > `rel_path 1.0`。query 与各字段 token 重叠累计得分,按分排序;无 query 时按时间倒序。
+另外两条提升召回的规则(都经真实语料实测):
+1. **领域同义词表**:中文词映射到语料里的英文词(如「字幕」→ subs/hardsub/dehardsub)。仅「加词」不改词,原命中不会消失。
+2. **长词松匹配**:英文/数字 token ≥5 字符时互为子串也算命中(权重 0.6)。必要性:数据里是 `demosaic`,查 `mosaic` 严格分词匹配不上。
 
 ## 目录结构
 ```
@@ -101,7 +107,7 @@ python server.py        # 启动面板,打开 http://localhost:8000
 > **ffmpeg 可选**:找得到就用它抽视频封面,找不到自动降级为浏览器截帧。探测顺序见[预览与缩略图策略](#预览与缩略图策略)。
 
 ## Web 面板用法
-- **搜索框**:自然语言 / 关键词,实时(输入即搜),按相关度排序。
+- **搜索框**:自然语言 / 关键词,实时(输入即搜),按相关度排序(默认混合检索,可切「精确关键词 / 纯语义」)。
 - **类型下拉**:按 `kind` 筛选(图片/视频/文档/音频/其他)。
 - **上传**:点「上传」或把文件**拖拽**到页面 → 落到 `ingest/` 并整理入库。
 - **标签 / 描述**:每张卡片可编辑,点「保存」写回索引。
@@ -117,7 +123,8 @@ python server.py        # 启动面板,打开 http://localhost:8000
 - **引用巡检**:状态栏「失效 N」红字可点,弹窗列出源文件已消失的外部引用,可「清理全部」(只删索引)。
 
 ## 检索示例
-- 自然语言:`python cli.py search "bilibili 的足球比赛字幕"` → 命中标题含相关词、带 `bilibili` 标签的素材。
+- 自然语言:`python cli.py search --file q.txt`(文件内容「去除字幕只留背景」)→ 命中 `dehardsub` 阶段的成片(纯词法在这里是 0 命中,语义补召回)。
+- 中文/英文关键词都行;命令行中文受 Windows 终端编码影响时用 `--file` 或 `--stdin`(见下)。
 - 标签筛选:`job:BV1aDb56iEvu`(某 B 站视频全套素材)、`type:benchmark`(基准视频)、`type:render`(渲染预览)、`lang:zh`(中文字幕/笔记)。
 - 组合:在面板里先选 `类型=视频`,再搜 `render` 或 `benchmark`。
 - 空 query:直接按时间倒序列出(等同浏览全部)。
@@ -140,6 +147,10 @@ python cli.py dupes                # 列出重复文件(SHA-256 相同)
 python cli.py list                 # 列出全部素材
 python cli.py thumbs               # 批量生成视频封面(逐条打印进度;无 ffmpeg 会提示)
 python cli.py thumbs --purge       # 清空封面缓存与失败标记
+python cli.py embed                # 增量构建语义检索索引
+python cli.py embed --force        # 全量重建;--status 只看状态
+python cli.py search --file q.txt  # 中文查询建议走文件(Windows 终端 GBK 代码页会弄坏命令行中文)
+python cli.py search --stdin       # 或从标准输入读查询
 ```
 
 ## 联动 subtitle_pipeline(快速上手)
@@ -190,6 +201,10 @@ core.make_thumb(mid)                # 抽帧生成视频封面(缓存;失败留 
 core.thumbs_status()                # {ffmpeg, exe, cached, failed, dir}
 core.missing_thumbnail_ids()        # 还没有封面的视频 id(默认跳过已知损坏)
 core.purge_thumbs()                 # 清空封面缓存与失败标记
+core.embed_status()                 # 语义索引状态(模型/已索引/覆盖率)
+core.build_embeddings(force=False)  # 增量构建语义索引
+core.expand_query("去除字幕")        # 中文 → 语料英文词的同义词扩展
+core.search(q, mode="lexical")      # 强制纯词法;mode="semantic" 强制语义
 core.external_stats()               # {internal, external, broken}
 core.broken_externals()             # 失效的外部引用列表
 core.prune_broken_externals()       # 清理失效引用索引(不动磁盘)
@@ -200,8 +215,8 @@ core.health()                       # 健康快照(总量/种类/重复/引用/�
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/` · `/index.html` | 管理面板 |
-| GET | `/api/list?q=&kind=&tag=&limit=&offset=` | 检索 / 列表(`limit` 省略=不分页;`offset` 在排序后生效;视频项带 `thumb` 标记) |
-| GET | `/api/count?q=&kind=&tag=` | 当前筛选命中总数(配合分页算总页数) |
+| GET | `/api/list?q=&kind=&tag=&limit=&offset=&mode=` | 检索 / 列表(`limit` 省略=不分页;`mode=auto\|lexical\|semantic`;视频项带 `thumb` 标记) |
+| GET | `/api/count?q=&kind=&tag=&mode=` | 当前条件下命中总数(配合分页算总页数) |
 | GET | `/api/stats` | 总数 / 重复组 / 各 kind 数量 / 封面状态 / 批量任务进度 / 外部引用与失效数 |
 | GET | `/api/health` | 健康检查快照(`ok` / 引用完整性 / 封面进度 / 索引体积),适合监控轮询 |
 | GET | `/api/broken` | 失效外部引用明细(原文件已不存在) |
@@ -214,6 +229,7 @@ core.health()                       # 健康快照(总量/种类/重复/引用/�
 | POST | `/api/ingest` | 整理 `ingest/` |
 | POST | `/api/scan` | 扫描 `materials/` 全树 |
 | POST | `/api/thumbs` | `{}` 后台批量抽帧;`{"limit":N}` 限量;`{"purge":true}` 清缓存与失败标记 |
+| POST | `/api/embed` | `{}` 增量构建语义索引;`{"force":true}` 全量重建;`{"limit":N}` 限量(后台任务,进度见 `/api/stats` 的 `embed.job`) |
 | POST | `/api/tag` | `{id, tags}` 更新标签 |
 | POST | `/api/describe` | `{id, description}` 更新描述 |
 | POST | `/api/remove` | `{id}` 删除 |
@@ -227,9 +243,57 @@ core.health()                       # 健康快照(总量/种类/重复/引用/�
 - **备份**:优先备份原始素材文件;`hub.db` 可随时重建,不必单独备份。需要可移植快照时用面板「导出 JSON / CSV」(`/api/export`)。
 - **重建**:索引损坏或想重置,直接删 `index/hub.db`,然后
   `python bridge_subtitle.py`(重建外部引用)+ `python cli.py scan`(重建内部素材)。`sha256` 保证幂等,不会重复。
-  `index/thumbs/`(封面缓存)同样是派生的,删掉后重新「生成封面」即可。
+  `index/thumbs/`(封面缓存)与 `embeddings` 表(语义向量)同样是派生的:删掉后重新「生成封面」/`python cli.py embed` 即可。
 - **迁移**:把 `materials/` 与原项目一起拷贝,重跑上面的重建命令即可,无需迁移数据库。
 > 这条"索引可丢弃、可重建"的原则,是本地素材库能长期稳定运维的关键。
+
+## 语义检索(本地 embedding)
+**前提**:本机有 ollama 且装了 embedding 模型(离线即可)。默认自动发现带 `embedding` 能力的模型,
+例如 `ollama pull nomic-embed-text`(768 维,约 270MB);也可用 `VITUAL_EMBED_MODEL` 指定。
+没有模型时**不报错**,检索自动退回纯词法(面板「构建语义索引」按钮会置灰并在状态栏写明原因)。
+
+**建索引**(增量,文档文本没变就跳过):
+```bash
+python cli.py embed              # 或面板「构建语义索引」按钮
+python cli.py embed --force      # 全量重建
+python cli.py embed --status     # 只看状态
+python bridge_subtitle.py --embed          # 随同步流程一起刷新(新素材立刻可搜)
+python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全自动
+```
+
+**混合排序怎么做的**
+1. 向量以 float32 BLOB 存在 `embeddings` 表(带文档指纹,支持增量重建);
+2. 查询时对**整个(kind/tag 过滤后的)语料**算稠密相似度,**减去语料均值向量再算余弦**(去均值居中)——
+   不做这步的话句向量各向异性严重(本库实测两两余弦均值 0.76),"什么都像什么";
+3. 稠密排名与词法排名用 **RRF 融合**(词法权重默认 1.0),因此**语义只负责补召回,不会埋掉精确关键词命中**;
+4. 结果集 = 稠密相似度过线(默认 0.25)∪ 词法命中的,再按融合分排序。
+
+**实测(本库 344 条真实素材,9 个中文查询,ground truth 按真实目录/类型标注)**
+
+| 阶段 | P@5 | R@20 |
+|---|---|---|
+| 原始词法(中文查询) | 0.00 | 0.00 |
+| + 领域同义词表 | 0.44 | 0.52 |
+| + 长词松匹配 | 0.53 | 0.63 |
+| **+ 语义混合** | **0.71** | **0.71** |
+
+个别查询收益更明显:「把模糊画面变清晰」0.20 → 0.80(P@5)、「按时间切的片段」0.00 → 0.16(R@20)。
+
+**环境变量**
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `VITUAL_EMBED_URL` | `http://127.0.0.1:11434` | ollama 地址 |
+| `VITUAL_EMBED_MODEL` | 自动发现 | 指定 embedding 模型 |
+| `VITUAL_EMBED_MIN_COS` | `0.25` | 稠密相似度入选阈值(居中后) |
+| `VITUAL_RRF_K` / `VITUAL_HYBRID_WLEX` | `60` / `1.0` | RRF 常数 / 词法权重(调大更偏精确关键词) |
+
+**已知限制(实测结论,别指望它做多语检索)**
+- `nomic-embed-text` 是**英文单语**模型,中文查询真正起作用的是**同义词表 + 松匹配**这一层;
+  换多语模型(如 `bge-m3`)后中文语义会更好。
+- 中文单字匹配会带来少量误召回(例如查询里的「赛」命中了无关的中文文件名)。
+- 语义检索需要 ollama 常驻;关掉后自动回退词法,不影响使用。
+- 想只用精确关键词:面板检索方式切「精确关键词」,或 `?mode=lexical`。
 
 ## 引用完整性与健康检查
 外部引用的代价是「索引可能指向已经不存在的文件」——上游清理产物、移动目录后就会发生。素材中心把这件事当一等公民对待:
@@ -279,12 +343,12 @@ core.health()                       # 健康快照(总量/种类/重复/引用/�
 **已知限制**
 - **本地单用户**:服务监听 `0.0.0.0:8000` 但无认证/权限;仅本机或可信局域网使用,勿直接暴露公网。
 - **无版本管理**:素材更新会覆盖索引记录,不保留历史版本。
-- **非真·语义检索**:当前为加权关键词近似(见下)。
+- **语义检索依赖本地 ollama**:没有 embedding 模型时自动退回纯词法;当前可用模型是英文单语的,中文靠同义词表兜(见[语义检索](#语义检索本地-embedding))。
 - **封面依赖 ffmpeg**:本机找不到 ffmpeg 时自动降级为浏览器截帧(可用但较慢);源文件损坏(如上游写入中断的 mp4)抽不出封面,只会标记不重试。
 - **封面缓存不入库**:`index/thumbs/` 是派生数据,删除无副作用(重跑生成即可)。
 
 **后续可扩展**
-- **真·语义 Embedding 检索**(可选增强):接本地 sentence-transformers / CLIP(图片),离线需预置权重;`search()` 已按分数排序,接入后替换 `_score` 即可(外部素材同样可语义搜)。
+- **多语 embedding / 图片语义**:换成 `bge-m3` 等多语模型可显著改善中文语义;再用 CLIP 类模型可支持"按画面内容搜图"(当前语义只覆盖元数据文本)。
 - **转码代理**(依赖 ffmpeg):为超大视频生成低码率预览版,提速浏览。
 - **远程采集**:加网络抓取源(需明确站点与授权)。
 - **多库隔离**:按项目分库。
@@ -297,6 +361,9 @@ core.health()                       # 健康快照(总量/种类/重复/引用/�
 - **索引库坏了影响原文件吗?** 不影响。`hub.db` 是派生索引,可随时丢弃重建(见运维)。
 - **外部文件被上游删了/搬走了怎么办?** 状态栏会红字提示「失效 N」,点开弹窗可一键清理;命令行用 `python bridge_subtitle.py --prune`(加 `--dry-run` 只看不删)。清理只删索引记录,**不会删任何磁盘文件**。
 - **怎么判断索引指向的文件都还在?** `GET /api/health` 的 `ok` 字段即答案(或看状态栏是否显示「引用完整」)。
-- **能用自然语言搜吗?** 能。检索按字段加权做近似匹配,问句不必含连续子串;精确过滤用 `type:` / `job:` / `lang:` 标签。
+- **能用自然语言搜吗?** 能。默认走「词法(同义词+松匹配)+ 语义」混合排序,问句不必含连续子串;精确过滤用 `type:` / `job:` / `lang:` 标签。
+- **语义检索要不要额外装东西?** 不用装 Python 包。只要本机 ollama 里有 embedding 模型(`ollama pull nomic-embed-text`)即可,全离线;没有就自动退回词法。
+- **为什么中文查询要靠同义词表?** 因为手边能离线拿到的 embedding 模型(nomic-embed-text)是英文单语的,而本库元数据也是英文;词表把中文意图映射到语料词汇,实测把中文查询 P@5 从 0.00 拉到 0.44,再叠加语义到 0.71。
+- **检索结果变了?** 若新增了大量素材,记得 `python cli.py embed`(或面板按钮 / `bridge --embed`)刷新语义索引;未建向量的条目仍走词法,不会丢。
 - **视频封面是怎么来的?** 服务端用自动发现的 ffmpeg 抽第 1 秒的帧,存 `index/thumbs/<id>.jpg` 复用;本机确实没有 ffmpeg 时,前端用 `<video> + canvas` 截帧兜底。两种模式都只对进入视口的卡片生效。
 - **为什么有几个视频显示「封面不可用」?** 那些源文件本身损坏(典型报错 `moov atom not found`,多为上游写入中断的 mp4)。抽帧失败会留 `.fail` 标记不再重试;**源文件修好后**用 `POST /api/thumbs {"purge":true}` 清标记再生成即可。

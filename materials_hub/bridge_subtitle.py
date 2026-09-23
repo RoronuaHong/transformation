@@ -14,14 +14,15 @@
   python bridge_subtitle.py --root <SP_ROOT>      # 指定 subtitle_pipeline 根
   python bridge_subtitle.py --limit 20            # 只登记前 20 个(试跑)
   python bridge_subtitle.py --thumbs              # 登记后顺便给新增视频补封面
+  python bridge_subtitle.py --embed               # 登记后刷新语义检索索引(增量)
   python bridge_subtitle.py --prune               # 顺带清理失效的外部引用(源文件已消失)
   python bridge_subtitle.py --watch               # 轮询守护:每 30s 增量登记新素材(Ctrl+C 退出)
   python bridge_subtitle.py --watch --interval 60 --scope batch  # 自定义间隔/范围
   python bridge_subtitle.py --state               # 只打印上次同步状态
 
-推荐的"一次跑完"组合(登记 + 封面 + 巡检):
-  python bridge_subtitle.py --thumbs --prune
-  python bridge_subtitle.py --watch --interval 60 --thumbs --prune
+推荐的"一次跑完"组合(登记 + 封面 + 语义索引 + 巡检):
+  python bridge_subtitle.py --thumbs --embed --prune
+  python bridge_subtitle.py --watch --interval 60 --thumbs --embed --prune
 """
 import os
 import re
@@ -204,6 +205,18 @@ def do_prune(dry_run=False):
     return len(bad)
 
 
+def do_embed():
+    """增量刷新语义检索索引(新登记的素材立刻可被自然语言搜到)。"""
+    info = core.embed_status()
+    if not info["available"]:
+        print("[embed] 未发现本地 embedding 模型,跳过(可用 cli.py embed 单独检查)")
+        return 0
+    r = core.build_embeddings()
+    print("[embed] 模型 %s:本次索引 %d 条(共 %s)" %
+          (info["model"], r.get("embedded", 0), core.embed_status()["embedded"]))
+    return r.get("embedded", 0)
+
+
 def write_state(st):
     try:
         os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
@@ -223,11 +236,13 @@ def print_state():
         print(json.dumps(json.load(f), ensure_ascii=False, indent=2))
 
 
-def sync_once(scope, root, dry, limit, want_thumbs, want_prune):
-    """一轮完整同步:登记 → 补封面 → 引用巡检 → 记录状态。"""
+def sync_once(scope, root, dry, limit, want_thumbs, want_prune, want_embed=False):
+    """一轮完整同步:登记 → 补封面 → 语义索引 → 引用巡检 → 记录状态。"""
     st = run(scope, root, dry, limit)
     if want_thumbs and not dry:
         st["thumbs_made"] = do_thumbs(st["new_ids"])
+    if want_embed and not dry:
+        st["embedded"] = do_embed()
     if want_prune:
         st["pruned"] = do_prune(dry)
     if not dry:
@@ -241,10 +256,11 @@ def main():
     watch = "--watch" in args
     thumbs = "--thumbs" in args
     prune = "--prune" in args
+    embed = "--embed" in args
     if "--state" in args:
         print_state()
         return
-    flags = ("--dry-run", "--watch", "--thumbs", "--prune")
+    flags = ("--dry-run", "--watch", "--thumbs", "--prune", "--embed")
     rem = [a for a in args if a not in flags]
     scope, root, limit, interval = "all", DEFAULT_ROOT, 0, 30
     i = 0
@@ -264,16 +280,16 @@ def main():
     print("subtitle_pipeline 根:", root)
     if watch:
         print(f"[watch] 每 {interval}s 增量同步(登记"
-              + ("+封面" if thumbs else "") + ("+巡检" if prune else "")
-              + "), Ctrl+C 退出")
+              + ("+封面" if thumbs else "") + ("+语义" if embed else "")
+              + ("+巡检" if prune else "") + "), Ctrl+C 退出")
         try:
             while True:
-                sync_once(scope, root, False, limit, thumbs, prune)
+                sync_once(scope, root, False, limit, thumbs, prune, embed)
                 time.sleep(interval)
         except KeyboardInterrupt:
             print("\n[watch] 已停止")
         return
-    sync_once(scope, root, dry, limit, thumbs, prune)
+    sync_once(scope, root, dry, limit, thumbs, prune, embed)
 
 
 if __name__ == "__main__":

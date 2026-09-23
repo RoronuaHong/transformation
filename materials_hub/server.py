@@ -17,13 +17,29 @@ from core import (
     update_description, remove_material, duplicates, sanitize_name,
     distinct_tags, make_thumb, thumb_path, thumbs_status, purge_thumbs,
     missing_thumbnail_ids, thumb_failure_reason, health, broken_externals,
-    prune_broken_externals, external_stats,
+    prune_broken_externals, external_stats, build_embeddings, embed_status,
 )
 
 PORT = 8000
 
 # 批量生成封面的后台任务状态(抽帧耗时,放后台线程 + 前端轮询进度)
 _THUMB_JOB = {"running": False, "total": 0, "done": 0, "made": 0, "error": ""}
+# 语义索引构建任务状态(同样放后台,避免长请求把浏览器挂住)
+_EMBED_JOB = {"running": False, "total": 0, "done": 0, "embedded": 0, "error": ""}
+
+
+def _run_embed_job(force=False, limit=0):
+    try:
+        def prog(done, total):
+            _EMBED_JOB["done"], _EMBED_JOB["total"] = done, total
+        r = build_embeddings(force=force, limit=limit, progress=prog)
+        _EMBED_JOB["embedded"] = r.get("embedded", 0)
+        if not r.get("available"):
+            _EMBED_JOB["error"] = "embed-unavailable"
+    except Exception as e:
+        _EMBED_JOB["error"] = str(e)
+    finally:
+        _EMBED_JOB["running"] = False
 
 
 def _run_thumb_job(limit=0):
@@ -128,9 +144,10 @@ class Handler(BaseHTTPRequestHandler):
             kw = q.get("q", [""])[0]
             lim = q.get("limit", [""])[0]
             off = q.get("offset", [""])[0]
+            mode = q.get("mode", ["auto"])[0]
             limit = int(lim) if lim.isdigit() else None   # 不传 limit = 不分页
             offset = int(off) if off.isdigit() else 0
-            rows = search(kw, kind, tag, limit=limit, offset=offset)
+            rows = search(kw, kind, tag, limit=limit, offset=offset, mode=mode)
             for m in rows:
                 # 给视频标注封面是否已就绪,前端据此决定要不要请求 poster
                 if m["kind"] == "videos":
@@ -145,7 +162,8 @@ class Handler(BaseHTTPRequestHandler):
             q = urllib.parse.parse_qs(u.query)
             return self._json({"total": count_materials(q.get("q", [""])[0],
                                                          q.get("kind", [""])[0],
-                                                         q.get("tag", [""])[0])})
+                                                         q.get("tag", [""])[0],
+                                                         q.get("mode", ["auto"])[0])})
         if p == "/api/stats":
             ms = all_materials()
             kinds = {}
@@ -153,7 +171,8 @@ class Handler(BaseHTTPRequestHandler):
                 kinds[m["kind"]] = kinds.get(m["kind"], 0) + 1
             return self._json({"total": len(ms), "dupes": len(duplicates()), "kinds": kinds,
                                "thumbs": thumbs_status(), "thumb_job": dict(_THUMB_JOB),
-                               "external": external_stats()})
+                               "external": external_stats(),
+                               "embed": {**embed_status(), "job": dict(_EMBED_JOB)}})
         if p == "/api/health":
             return self._json(health())
         if p == "/api/broken":
@@ -298,6 +317,26 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/describe":
             update_description(body.get("id"), body.get("description", ""))
             return self._json({"ok": True})
+        if p == "/api/embed":
+            # {} 增量构建语义索引;{"force":true} 全量重建;{"limit":N} 限量
+            try:
+                opt = json.loads(raw or b"{}")
+            except Exception:
+                opt = {}
+            info = embed_status()
+            if not info["available"]:
+                return self._json({"available": False, "err": info.get("err", ""),
+                                   "hint": "未发现本地 embedding 模型;" 
+                                           "ollama pull nomic-embed-text 或用 VITUAL_EMBED_MODEL 指定"})
+            if _EMBED_JOB["running"]:
+                return self._json({"running": True, "job": dict(_EMBED_JOB)})
+            _EMBED_JOB.update(running=True, total=0, done=0, embedded=0, error="")
+            threading.Thread(target=_run_embed_job,
+                             args=(bool(opt.get("force")), int(opt.get("limit") or 0)),
+                             daemon=True).start()
+            return self._json({"running": True, "job": dict(_EMBED_JOB),
+                               "model": info["model"]})
+
         if p == "/api/remove":
             remove_material(body.get("id"))
             return self._json({"ok": True})
