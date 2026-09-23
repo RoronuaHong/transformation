@@ -14,6 +14,7 @@
 - [检索 / 分面检索](#检索示例)
 - [联动 subtitle_pipeline](#联动-subtitle_pipeline快速上手)
 - [运维:备份 / 重建 / 迁移](#运维备份--重建--迁移)
+- [引用完整性与健康检查](#引用完整性与健康检查)
 - [预览与缩略图策略](#预览与缩略图策略)
 - [Python API](#python-apicore)
 - [HTTP API](#http-apiserverpy)
@@ -24,7 +25,8 @@
 - **目录规范**:固定结构,素材按类型归档。
 - **自动采集整理**:SHA-256 去重、自动分类、命名规范化;可扫描 `ingest/` 或 `materials/` 全树,也可只读联动外部项目。
 - **索引 + 检索**:SQLite 索引 + **零依赖加权语义近似检索**(中文按字 / bigram 分词、英数按词,字段加权打分)。自然语言问一句即可命中,不要求连续子串;支持按类型筛选、按标签过滤。
-- **管理面板(Web/UI)**:浏览器可视化浏览、上传(含拖拽)、打标签、编辑描述、预览、视频封面、删除、去重整理、导出。
+- **管理面板(Web/UI)**:浏览器可视化浏览、上传(含拖拽)、打标签、编辑描述、预览、视频封面、删除、去重整理、导出、引用巡检。
+- **引用完整性与健康检查**:外部引用指向的原文件被上游删除/移动时能**被发现**(面板红字提示 + 逐卡标注 + `/api/health`),并可一键清理失效索引(绝不触碰磁盘)。
 
 > 另见 `INTEGRATION.md` 了解与 subtitle_pipeline 的联动设计(可行性、目录落点、标签映射、数据流)。
 
@@ -81,8 +83,9 @@ materials_hub/
 ├─ ingest/            # 待整理队列(丢这里,点「整理」或跑 ingest)
 ├─ trash/             # 去重/删除移入的回收区
 └─ index/
-   ├─ hub.db          # SQLite 索引库(派生,可重建)
-   └─ thumbs/         # 视频封面缓存 <id>.jpg / <id>.jpg.fail(派生,可重建)
+   ├─ hub.db             # SQLite 索引库(派生,可重建)
+   ├─ thumbs/            # 视频封面缓存 <id>.jpg / <id>.jpg.fail(派生,可重建)
+   └─ bridge_state.json  # 上次同步状态(时间 / 新增 / 引用完整性,供运维查看)
 ```
 > 仓库默认不入库 `*.md` / `*.html`;素材中心的文档与单页前端已在 `.gitignore` 末尾加 `!materials_hub/**` 白名单,可随代码一起版本化(参照 `kb/docs`、`box-lift` 先例)。`index/hub.db` 为生成物,不入库。
 
@@ -111,6 +114,7 @@ python server.py        # 启动面板,打开 http://localhost:8000
 - **状态栏**:显示总数、重复组数、各 kind 数量、封面缓存状态(服务端抽帧 / 浏览器截帧)。
 - **重复清理**:点状态栏的「重复 N 组」或工具条「重复清理」,弹出按 SHA-256 相同的重复分组,可逐条删除冗余(保留需要的那份)。
 - **生成封面**:工具条「生成封面」→ 后台批量抽帧全部视频封面,状态栏实时显示进度;抽不出封面的(源文件损坏)会标注「封面不可用」。
+- **引用巡检**:状态栏「失效 N」红字可点,弹窗列出源文件已消失的外部引用,可「清理全部」(只删索引)。
 
 ## 检索示例
 - 自然语言:`python cli.py search "bilibili 的足球比赛字幕"` → 命中标题含相关词、带 `bilibili` 标签的素材。
@@ -149,6 +153,10 @@ python bridge_subtitle.py --root <SP_ROOT>               # 指定 subtitle_pipel
 python bridge_subtitle.py --limit 20                     # 试登记前 20 个
 python bridge_subtitle.py --watch                        # 轮询守护:每 30s 增量登记新素材(Ctrl+C 退出)
 python bridge_subtitle.py --watch --interval 60 --scope batch  # 自定义间隔/范围
+python bridge_subtitle.py --thumbs                       # 登记后给新增视频补封面
+python bridge_subtitle.py --prune                        # 顺带清理失效的外部引用
+python bridge_subtitle.py --state                        # 打印上次同步状态
+python bridge_subtitle.py --thumbs --prune               # 推荐:一次跑完 登记 + 封面 + 巡检
 ```
 - **幂等**:重复运行会跳过已登记(同 sha256)的素材。
 - **重做**:想清空重建,删 `index/hub.db` 后重跑 `python bridge_subtitle.py`(仅重建外部引用;`materials/` 下的内部素材需再 `python cli.py scan`)。
@@ -182,6 +190,10 @@ core.make_thumb(mid)                # 抽帧生成视频封面(缓存;失败留 
 core.thumbs_status()                # {ffmpeg, exe, cached, failed, dir}
 core.missing_thumbnail_ids()        # 还没有封面的视频 id(默认跳过已知损坏)
 core.purge_thumbs()                 # 清空封面缓存与失败标记
+core.external_stats()               # {internal, external, broken}
+core.broken_externals()             # 失效的外部引用列表
+core.prune_broken_externals()       # 清理失效引用索引(不动磁盘)
+core.health()                       # 健康快照(总量/种类/重复/引用/封面/体积)
 ```
 
 ## HTTP API(server.py)
@@ -190,7 +202,9 @@ core.purge_thumbs()                 # 清空封面缓存与失败标记
 | GET | `/` · `/index.html` | 管理面板 |
 | GET | `/api/list?q=&kind=&tag=&limit=&offset=` | 检索 / 列表(`limit` 省略=不分页;`offset` 在排序后生效;视频项带 `thumb` 标记) |
 | GET | `/api/count?q=&kind=&tag=` | 当前筛选命中总数(配合分页算总页数) |
-| GET | `/api/stats` | 总数 / 重复组 / 各 kind 数量 / 封面状态 / 批量任务进度 |
+| GET | `/api/stats` | 总数 / 重复组 / 各 kind 数量 / 封面状态 / 批量任务进度 / 外部引用与失效数 |
+| GET | `/api/health` | 健康检查快照(`ok` / 引用完整性 / 封面进度 / 索引体积),适合监控轮询 |
+| GET | `/api/broken` | 失效外部引用明细(原文件已不存在) |
 | GET | `/api/dupes` | 重复文件组 |
 | GET | `/api/tags` | 全部标签 + 计数(面板标签下拉) |
 | GET | `/api/file/<id>` | 预览原文(外部引用读 `external_path`,支持 HTTP Range 流式) |
@@ -203,6 +217,7 @@ core.purge_thumbs()                 # 清空封面缓存与失败标记
 | POST | `/api/tag` | `{id, tags}` 更新标签 |
 | POST | `/api/describe` | `{id, description}` 更新描述 |
 | POST | `/api/remove` | `{id}` 删除 |
+| POST | `/api/prune` | 清理全部失效外部引用的索引(只删索引,不动磁盘) |
 
 ## 命名规范
 非字母数字 / 中文 / 连字符统一为 `-`,折叠连续 `-`,截断至 80 字符 + 小写扩展名。原始文件名保留在 `orig_name` 字段。
@@ -215,6 +230,20 @@ core.purge_thumbs()                 # 清空封面缓存与失败标记
   `index/thumbs/`(封面缓存)同样是派生的,删掉后重新「生成封面」即可。
 - **迁移**:把 `materials/` 与原项目一起拷贝,重跑上面的重建命令即可,无需迁移数据库。
 > 这条"索引可丢弃、可重建"的原则,是本地素材库能长期稳定运维的关键。
+
+## 引用完整性与健康检查
+外部引用的代价是「索引可能指向已经不存在的文件」——上游清理产物、移动目录后就会发生。素材中心把这件事当一等公民对待:
+
+| 层级 | 表现 |
+|---|---|
+| 数据层 | `core.broken_externals()` 巡检、`core.prune_broken_externals()` 清理、`core.health()` 快照 |
+| 接口层 | `/api/stats`(`external.broken`)、`/api/broken`(明细)、`/api/health`(`ok:false`)、`POST /api/prune` |
+| 界面层 | 状态栏红字「失效 N」可点击 → 弹窗列出失效项 → 「清理全部」 |
+| 卡片层 | 失效素材的卡片直接显示红色「原文件缺失」,不再发起必然 404 的预览请求 |
+| CLI 层 | `bridge_subtitle.py --prune`(巡检并清理)、`--prune --dry-run`(只看不删) |
+
+**安全原则**:清理**只删索引记录,绝不删除或修改任何磁盘文件**。原文件恢复后再跑一次 bridge 即可重新登记(sha256 幂等)。
+**健康检查**:`GET /api/health` 返回 `ok`(引用是否完整)、总量与种类分布、重复数、索引体积、封面进度,可直接接监控轮询。
 
 ## 预览与缩略图策略
 - **图片**:直接返回,前端缩略图展示。
@@ -266,6 +295,8 @@ core.purge_thumbs()                 # 清空封面缓存与失败标记
 - **删除素材会删掉原文件吗?** 不会。内部素材删除后移入 `trash/`(可找回);外部引用(subtitle_pipeline)删除只删索引,原文件毫发无损。
 - **怎么重新登记 / 重建索引?** 删 `index/hub.db`,重跑 `python bridge_subtitle.py` + `python cli.py scan`(幂等)。
 - **索引库坏了影响原文件吗?** 不影响。`hub.db` 是派生索引,可随时丢弃重建(见运维)。
+- **外部文件被上游删了/搬走了怎么办?** 状态栏会红字提示「失效 N」,点开弹窗可一键清理;命令行用 `python bridge_subtitle.py --prune`(加 `--dry-run` 只看不删)。清理只删索引记录,**不会删任何磁盘文件**。
+- **怎么判断索引指向的文件都还在?** `GET /api/health` 的 `ok` 字段即答案(或看状态栏是否显示「引用完整」)。
 - **能用自然语言搜吗?** 能。检索按字段加权做近似匹配,问句不必含连续子串;精确过滤用 `type:` / `job:` / `lang:` 标签。
 - **视频封面是怎么来的?** 服务端用自动发现的 ffmpeg 抽第 1 秒的帧,存 `index/thumbs/<id>.jpg` 复用;本机确实没有 ffmpeg 时,前端用 `<video> + canvas` 截帧兜底。两种模式都只对进入视口的卡片生效。
 - **为什么有几个视频显示「封面不可用」?** 那些源文件本身损坏(典型报错 `moov atom not found`,多为上游写入中断的 mp4)。抽帧失败会留 `.fail` 标记不再重试;**源文件修好后**用 `POST /api/thumbs {"purge":true}` 清标记再生成即可。

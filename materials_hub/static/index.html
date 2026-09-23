@@ -100,6 +100,18 @@
   <div id="dupBody"></div>
   <div style="text-align:right;margin-top:12px"><button id="dupClose">关闭</button></div>
 </div></div>
+<div id="brokenModal" class="modal"><div class="box">
+  <h2>失效的外部引用</h2>
+  <div class="meta" style="margin-bottom:8px">
+    这些条目指向的原文件已被上游删除或移动。清理只删索引记录,<b>不会删除任何磁盘文件</b>;
+    原文件恢复后再跑一次 bridge 即可重新登记。
+  </div>
+  <div id="brokenBody"></div>
+  <div style="text-align:right;margin-top:12px">
+    <button id="brokenPrune">清理全部</button>
+    <button id="brokenClose">关闭</button>
+  </div>
+</div></div>
 <div id="drop">松手即可上传</div>
 
 <script>
@@ -125,20 +137,28 @@ async function load(){
   const rows = await api("/api/list?"+qs(q));
   const st = await api("/api/stats");
   THUMB_SERVER = !!(st.thumbs && st.thumbs.ffmpeg);
+  const ex = st.external || {};
   $("#stats").innerHTML = `库内 ${st.total} 个 · 重复 <span id="dupLink" style="cursor:pointer;color:var(--acc)">${st.dupes}</span> 组 · ` +
     Object.entries(st.kinds).map(([k,v])=>`${k}:${v}`).join("  ") +
-    ` · 封面 <span id="thumbInfo"></span>`;
+    ` · 封面 <span id="thumbInfo"></span> · ` +
+    (ex.broken
+      ? `外部引用 ${ex.external} 条,<span id="brokenLink" style="cursor:pointer;color:var(--dup)">失效 ${ex.broken}</span>`
+      : `外部引用 ${ex.external||0} 条,引用完整`);
   const dl=$("#dupLink"); if(dl) dl.onclick=openDupes;
+  const bl=$("#brokenLink"); if(bl) bl.onclick=openBroken;
   const grid=$("#grid"); grid.innerHTML="";
   if(!rows.length) grid.innerHTML='<div class="meta">没有匹配的素材</div>';
   for(const m of rows){
     const c=document.createElement("div"); c.className="card";
     let thumb;
-    if(m.kind==="images") thumb=`<div class="thumb"><img src="/api/file/${m.id}" loading="lazy"></div>`;
+    if(m.missing) thumb=`<div class="thumb" title="${m.external_path||""}"><div class="pill" style="border-color:var(--dup);color:var(--dup)">原文件缺失</div></div>`;
+    else if(m.kind==="images") thumb=`<div class="thumb"><img src="/api/file/${m.id}" loading="lazy"></div>`;
     else if(m.kind==="videos"){
-      const poster = THUMB_SERVER && m.thumb;   // 未生成/源文件损坏 → 不请求 poster,避免 404
+      // 服务端已备好封面就直接写 poster(小 jpg,立即显示);
+      // 视频元数据仍靠 preload=metadata + 进视口才取,避免一次拉上百个视频。
+      const poster = THUMB_SERVER && m.thumb;
       thumb=`<div class="thumb"><video data-id="${m.id}" src="/api/file/${m.id}" muted playsinline controls preload="metadata"` +
-        (poster?` data-poster="/api/thumb/${m.id}"`:"") + `></video>` +
+        (poster?` poster="/api/thumb/${m.id}"`:"") + `></video>` +
         (THUMB_SERVER && !m.thumb ? `<div class="badge">封面不可用</div>` : "") + `</div>`;
     }
     else if(m.kind==="audio") thumb=`<div class="thumb"><div class="ph">♪</div></div>`;
@@ -227,10 +247,7 @@ function observeThumb(v){
 function mountThumb(v){
   if(v.dataset.mounted) return;
   v.dataset.mounted="1";
-  if(THUMB_SERVER){                       // 服务端封面:交给浏览器按需请求 + 缓存
-    if(v.dataset.poster) v.poster=v.dataset.poster;
-    return;
-  }
+  if(THUMB_SERVER) return;                // 服务端封面:poster 已在标签上,无需等观察器
   clientThumb(v);
 }
 
@@ -330,6 +347,31 @@ async function openDupes(){
   }
   $("#dupModal").classList.add("show");
 }
+
+/* ---------- 失效外部引用(引用完整性巡检) ---------- */
+async function openBroken(){
+  const rows = await api("/api/broken");
+  const body=$("#brokenBody"); body.innerHTML="";
+  $("#brokenPrune").disabled = !rows.length;
+  if(!rows.length){
+    body.innerHTML='<div class="meta">引用完整,没有失效项</div>';
+  }else{
+    for(const m of rows){
+      const d=document.createElement("div"); d.className="item";
+      d.title = m.external_path;
+      d.innerHTML=`<span class="nm">${m.name}</span><span class="meta">${m.kind} · ${m.source||"-"}</span>`;
+      body.appendChild(d);
+    }
+  }
+  $("#brokenModal").classList.add("show");
+}
+$("#brokenClose").onclick=()=>$("#brokenModal").classList.remove("show");
+$("#brokenPrune").onclick=async()=>{
+  const r = await api("/api/prune",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+  alert(`已清理 ${r.pruned} 条失效索引(磁盘文件未动)。原文件恢复后可重跑 bridge 重新登记。`);
+  $("#brokenModal").classList.remove("show");
+  load();
+};
 
 const drop=$("#drop");
 ["dragenter","dragover"].forEach(ev=>document.addEventListener(ev,e=>{e.preventDefault();drop.style.display="flex";}));

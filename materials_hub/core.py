@@ -380,6 +380,64 @@ def scan_materials():
     return results
 
 
+# ---------- 引用完整性(external 引用巡检) ----------
+def broken_externals():
+    """列出「失效的外部引用」:source/external 记录指向的原文件已不存在。
+
+    上游项目清理产物、移动目录后常见。索引可随时重建,但先发现才能处理。"""
+    out = []
+    for m in all_materials():
+        if m.get("location") != "external":
+            continue
+        p = m.get("external_path") or ""
+        if not p or not os.path.exists(p):
+            out.append(m)
+    return out
+
+
+def prune_broken_externals():
+    """删除失效外部引用的索引记录(只删索引,绝不触碰磁盘文件)。返回被清理的记录。"""
+    broken = broken_externals()
+    if broken:
+        con = _con()
+        con.executemany("DELETE FROM materials WHERE id=?", [(m["id"],) for m in broken])
+        con.commit()
+        con.close()
+    return broken
+
+
+def external_stats():
+    """外部引用统计:内部素材数 / 外部引用数 / 其中失效数。"""
+    ms = all_materials()
+    ext = [m for m in ms if m.get("location") == "external"]
+    bad = [m for m in ext
+           if not (m.get("external_path") and os.path.exists(m["external_path"]))]
+    return {"internal": len(ms) - len(ext), "external": len(ext), "broken": len(bad)}
+
+
+def health():
+    """健康检查快照:总量、种类分布、重复、引用完整性、封面能力、磁盘占用。"""
+    ms = all_materials()
+    kinds = {}
+    size = 0
+    for m in ms:
+        kinds[m["kind"]] = kinds.get(m["kind"], 0) + 1
+        size += m.get("size") or 0
+    st = thumbs_status()
+    ex = external_stats()
+    videos = kinds.get("videos", 0)
+    return {
+        "ok": (ex["broken"] == 0),
+        "total": len(ms),
+        "kinds": kinds,
+        "bytes": size,
+        "duplicates": len(duplicates()),
+        "external": ex,
+        "thumbs": {**st, "videos": videos, "missing": max(0, videos - st["cached"] - st["failed"])},
+        "db": os.path.relpath(INDEX_DB, HUB),
+    }
+
+
 # ---------- 视频封面(缩略图) ----------
 # ffmpeg 探测结果缓存,避免每次请求都扫盘。
 _FFMPEG_CACHE = {"path": None, "scanned": False}

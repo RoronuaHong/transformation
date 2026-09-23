@@ -16,7 +16,8 @@ from core import (
     count_materials, ingest_file, ingest_dir, scan_materials, update_tags,
     update_description, remove_material, duplicates, sanitize_name,
     distinct_tags, make_thumb, thumb_path, thumbs_status, purge_thumbs,
-    missing_thumbnail_ids, thumb_failure_reason,
+    missing_thumbnail_ids, thumb_failure_reason, health, broken_externals,
+    prune_broken_externals, external_stats,
 )
 
 PORT = 8000
@@ -130,10 +131,15 @@ class Handler(BaseHTTPRequestHandler):
             limit = int(lim) if lim.isdigit() else None   # 不传 limit = 不分页
             offset = int(off) if off.isdigit() else 0
             rows = search(kw, kind, tag, limit=limit, offset=offset)
-            for m in rows:  # 给视频标注封面是否已就绪,前端据此决定要不要请求 poster
+            for m in rows:
+                # 给视频标注封面是否已就绪,前端据此决定要不要请求 poster
                 if m["kind"] == "videos":
                     tp = thumb_path(m["id"])
                     m["thumb"] = os.path.exists(tp) and os.path.getsize(tp) > 0
+                # 外部引用标注原文件是否还在(缺失则卡片提示,不再发起必然 404 的请求)
+                if m.get("location") == "external":
+                    m["missing"] = not (m.get("external_path")
+                                        and os.path.exists(m["external_path"]))
             return self._json(rows)
         if p == "/api/count":
             q = urllib.parse.parse_qs(u.query)
@@ -146,7 +152,15 @@ class Handler(BaseHTTPRequestHandler):
             for m in ms:
                 kinds[m["kind"]] = kinds.get(m["kind"], 0) + 1
             return self._json({"total": len(ms), "dupes": len(duplicates()), "kinds": kinds,
-                               "thumbs": thumbs_status(), "thumb_job": dict(_THUMB_JOB)})
+                               "thumbs": thumbs_status(), "thumb_job": dict(_THUMB_JOB),
+                               "external": external_stats()})
+        if p == "/api/health":
+            return self._json(health())
+        if p == "/api/broken":
+            return self._json([{"id": m["id"], "name": m["name"], "kind": m["kind"],
+                                "source": m.get("source", ""),
+                                "external_path": m.get("external_path", "")}
+                               for m in broken_externals()])
         if p == "/api/dupes":
             return self._json(duplicates())
         if p == "/api/tags":
@@ -287,6 +301,11 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/remove":
             remove_material(body.get("id"))
             return self._json({"ok": True})
+        if p == "/api/prune":
+            # 清理失效外部引用的索引(源文件已消失);只删索引,不动磁盘
+            bad = prune_broken_externals()
+            return self._json({"pruned": len(bad),
+                               "items": [m["name"] for m in bad[:50]]})
         return self._send(404, b"not found")
 
     def log_message(self, *a):

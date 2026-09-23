@@ -79,13 +79,33 @@ Web 面板 /api/file/<id> ───┘ 按需读 external_path 预览(图片直�
 5. **MCP(进阶)**:subtitle_pipeline 已有 `vitual_mcp`;可加一个工具把产物 POST 到
    素材中心(素材中心未来可加 `/api/register` 接收绝对路径)。阶段二再做。
 
-## 6. 取舍与后续
+## 6. 引用完整性(引用的固有代价,已一并处理)
+只登记索引就意味着**索引可能指向已经不存在的文件**(subtitle_pipeline 清理 `mode-renders/`、
+重跑 batch 覆盖旧目录时必然发生)。处理策略:
+
+| 场景 | 行为 |
+|---|---|
+| 巡检 | `core.broken_externals()` / `GET /api/broken` / `bridge_subtitle.py --prune`(先 dry-run 看) |
+| 感知 | 状态栏红字「失效 N」+ 失效素材卡片标红「原文件缺失」+ `GET /api/health` 的 `ok:false` |
+| 清理 | `POST /api/prune` / `--prune`:**只删索引记录,绝不删除或修改磁盘文件** |
+| 恢复 | 原文件回来后重跑 `bridge_subtitle.py`,sha256 幂等,自动重新登记 |
+
+**一轮完整同步**(推荐挂后台或任务计划):
+```bash
+python bridge_subtitle.py --thumbs --prune      # 登记 + 补封面 + 引用巡检
+python bridge_subtitle.py --state               # 查看上次同步时间/新增/引用完整性
+```
+同步结果写入 `index/bridge_state.json`,便于运维核对"上次什么时候同步的、新增了多少"。
+
+## 7. 取舍与后续
 - **引用 vs 复制**:默认引用(省盘、幂等、不动原工程);若需素材中心自带备份,可加 `--copy` 走 `ingest_file`。
 - **大视频预览**:已支持 `/api/file` HTTP Range 流式(可拖拽/边下边播),视频封面走 `/api/thumb/<id>`(ffmpeg 自动发现,无 ffmpeg 时前端 canvas 截帧兜底)。
 - **删除语义**:素材中心删条目只删索引;真正清理仍回 subtitle_pipeline 操作。
 - **真语义检索**:当前关键词/加权近似;接本地 Embedding 后,外部素材同样可语义搜。
 
-## 7. 验证
+## 8. 验证
 - `python bridge_subtitle.py --dry-run` 统计各 scope 数量与分类。
 - `python bridge_subtitle.py --limit 20` 试登记 20 个,`python cli.py list` 查看标签。
 - 启动 `python server.py`,面板按 `type:benchmark` / `job:BV1aDb56iEvu` 筛选并预览。
+- **实例闭环(已实测)**:把某个真实产物临时改名 → `/api/broken` 与 `/api/health` 立即反映 →
+  `POST /api/prune` 清理 → 恢复文件 → 重跑 bridge 重新登记,全程索引条数回到 344、`ok:true`。

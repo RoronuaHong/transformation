@@ -13,8 +13,15 @@
   python bridge_subtitle.py --scope batch        # 只扫 downloads/batch
   python bridge_subtitle.py --root <SP_ROOT>      # 指定 subtitle_pipeline 根
   python bridge_subtitle.py --limit 20            # 只登记前 20 个(试跑)
+  python bridge_subtitle.py --thumbs              # 登记后顺便给新增视频补封面
+  python bridge_subtitle.py --prune               # 顺带清理失效的外部引用(源文件已消失)
   python bridge_subtitle.py --watch               # 轮询守护:每 30s 增量登记新素材(Ctrl+C 退出)
   python bridge_subtitle.py --watch --interval 60 --scope batch  # 自定义间隔/范围
+  python bridge_subtitle.py --state               # 只打印上次同步状态
+
+推荐的"一次跑完"组合(登记 + 封面 + 巡检):
+  python bridge_subtitle.py --thumbs --prune
+  python bridge_subtitle.py --watch --interval 60 --thumbs --prune
 """
 import os
 import re
@@ -26,6 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import core
 
 DEFAULT_ROOT = os.path.normpath(os.path.join(core.HUB, "..", "subtitle_pipeline"))
+STATE_FILE = os.path.join(core.INDEX_DIR, "bridge_state.json")
 
 # scope -> (相对根的子目录)
 SCOPES = {
@@ -92,9 +100,11 @@ def type_from_rel(rel):
 
 
 def run(scope, root, dry_run, limit):
+    """扫描并登记。返回统计 dict(含本轮新增的 id,供后续补封面)。"""
     added = skipped = 0
     by_kind = {}
     by_type = {}
+    new_ids = []
 
     for sc_name, sub in SCOPES.items():
         if scope != "all" and sc_name != scope:
@@ -134,6 +144,7 @@ def run(scope, root, dry_run, limit):
                     continue
                 if r["status"] == "added":
                     added += 1
+                    new_ids.append(r["id"])
                     by_kind[kind] = by_kind.get(kind, 0) + 1
                     by_type[t] = by_type.get(t, 0) + 1
                 else:
@@ -149,13 +160,92 @@ def run(scope, root, dry_run, limit):
           + (f", 跳过重复 {skipped} 个" if not dry_run else ""))
     print("  按种类:", by_kind)
     print("  按类型:", by_type)
+    return {"scope": scope, "added": added, "skipped": skipped,
+            "by_kind": by_kind, "by_type": by_type, "new_ids": new_ids,
+            "dry_run": dry_run}
+
+
+def do_thumbs(new_ids):
+    """给新增视频补封面(顺带补齐历史缺失项)。无 ffmpeg 时说明并跳过。"""
+    if not core.thumbs_status()["ffmpeg"]:
+        print("[thumbs] 未找到 ffmpeg,跳过(面板会自动退化为浏览器截帧)")
+        return 0
+    ids = [i for i in new_ids if (core.get_material(i) or {}).get("kind") == "videos"]
+    ids += [i for i in core.missing_thumbnail_ids() if i not in ids]
+    if not ids:
+        print("[thumbs] 无需生成")
+        return 0
+    made = fail = 0
+    for n, mid in enumerate(ids, 1):
+        ok = core.make_thumb(mid)
+        made += bool(ok)
+        fail += not ok
+        if n % 10 == 0 or n == len(ids):
+            print(f"[thumbs] {n}/{len(ids)} ok={made} fail={fail}", flush=True)
+    return made
+
+
+def do_prune(dry_run=False):
+    """巡检并(可选)清理失效的外部引用。只删索引,绝不触碰磁盘文件。"""
+    bad = core.broken_externals()
+    if not bad:
+        print("[prune] 引用完整,无失效项")
+        return 0
+    print(f"[prune] 失效外部引用 {len(bad)} 条(原文件已不存在):")
+    for m in bad[:10]:
+        print(f"   - {m['name']}  <-  {m.get('external_path','')}")
+    if len(bad) > 10:
+        print(f"   …其余 {len(bad) - 10} 条")
+    if dry_run:
+        print("[prune] dry-run,未清理")
+        return 0
+    core.prune_broken_externals()
+    print(f"[prune] 已清理 {len(bad)} 条索引(原文件未触碰)")
+    return len(bad)
+
+
+def write_state(st):
+    try:
+        os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"last_sync": time.strftime("%Y-%m-%d %H:%M:%S"),
+                       "stats": st, "external": core.external_stats()},
+                      f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
+def print_state():
+    if not os.path.exists(STATE_FILE):
+        print("尚无同步记录(还没跑过 bridge)")
+        return
+    with open(STATE_FILE, encoding="utf-8") as f:
+        print(json.dumps(json.load(f), ensure_ascii=False, indent=2))
+
+
+def sync_once(scope, root, dry, limit, want_thumbs, want_prune):
+    """一轮完整同步:登记 → 补封面 → 引用巡检 → 记录状态。"""
+    st = run(scope, root, dry, limit)
+    if want_thumbs and not dry:
+        st["thumbs_made"] = do_thumbs(st["new_ids"])
+    if want_prune:
+        st["pruned"] = do_prune(dry)
+    if not dry:
+        write_state(st)
+    return st
 
 
 def main():
     args = sys.argv[1:]
     dry = "--dry-run" in args
     watch = "--watch" in args
-    rem = [a for a in args if a not in ("--dry-run", "--watch")]
+    thumbs = "--thumbs" in args
+    prune = "--prune" in args
+    if "--state" in args:
+        print_state()
+        return
+    flags = ("--dry-run", "--watch", "--thumbs", "--prune")
+    rem = [a for a in args if a not in flags]
     scope, root, limit, interval = "all", DEFAULT_ROOT, 0, 30
     i = 0
     while i < len(rem):
@@ -173,15 +263,17 @@ def main():
     core.init_hub()
     print("subtitle_pipeline 根:", root)
     if watch:
-        print(f"[watch] 每 {interval}s 增量扫描, Ctrl+C 退出")
+        print(f"[watch] 每 {interval}s 增量同步(登记"
+              + ("+封面" if thumbs else "") + ("+巡检" if prune else "")
+              + "), Ctrl+C 退出")
         try:
             while True:
-                run(scope, root, False, limit)
+                sync_once(scope, root, False, limit, thumbs, prune)
                 time.sleep(interval)
         except KeyboardInterrupt:
             print("\n[watch] 已停止")
         return
-    run(scope, root, dry, limit)
+    sync_once(scope, root, dry, limit, thumbs, prune)
 
 
 if __name__ == "__main__":
