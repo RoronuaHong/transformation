@@ -4,6 +4,22 @@
 
 已接入首个上游项目 **subtitle_pipeline**(视频处理流水线),以「原路径引用」方式编目其全部产物(详见 `INTEGRATION.md`)。
 
+## 目录
+- [功能](#功能对应需求四件套)
+- [架构与数据模型](#架构与数据模型)
+- [元数据与分类法(Taxonomy)](#元数据与分类法taxonomy)
+- [目录结构](#目录结构)
+- [运行](#运行)
+- [Web 面板用法](#web-面板用法)
+- [检索 / 分面检索](#检索示例)
+- [联动 subtitle_pipeline](#联动-subtitle_pipeline快速上手)
+- [运维:备份 / 重建 / 迁移](#运维备份--重建--迁移)
+- [预览与缩略图策略](#预览与缩略图策略)
+- [Python API](#python-apicore)
+- [HTTP API](#http-apiserverpy)
+- [已知限制与路线图](#已知限制与路线图)
+- [FAQ](#faq)
+
 ## 功能(对应需求四件套)
 - **目录规范**:固定结构,素材按类型归档。
 - **自动采集整理**:SHA-256 去重、自动分类、命名规范化;可扫描 `ingest/` 或 `materials/` 全树,也可只读联动外部项目。
@@ -25,13 +41,25 @@
 ### 索引字段
 `id`(sha256 前 12 位)、`kind`、`ext`、`name`、`rel_path`、`size`、`sha256`、`tags`、`description`、`source`、`orig_name`、`created_at`、`location`、`external_path`。
 
-### 标签 schema(联动 subtitle_pipeline 时自动生成)
-统一格式:`sp | <platform> | job:<id> | type:<media|subs|notes|benchmark|render|test> | lang:<xx>`
-- `sp` —— 来源标记
-- `<platform>` —— bilibili / youtube 等
+### 元数据与分类法(Taxonomy)
+
+> 成熟的素材/数字资产管理(DAM)**首要是元数据与分类法标准**:先定好"怎么打标签",检索与分面过滤才靠谱。素材中心采用一套**受控(controlled)标签体系**,请勿自由发挥。
+
+联动 subtitle_pipeline 时自动生成的标签(受控词汇):
+```
+sp | <platform> | job:<id> | type:<media|subs|notes|benchmark|render|test> | lang:<xx>
+```
+- `sp` —— 来源标记(固定值,表示来自 subtitle_pipeline)
+- `<platform>` —— bilibili / youtube 等(受控:只填已知平台)
 - `job:<id>` —— 对应某次采集任务(同一任务的全套素材可一键筛出)
-- `type:<...>` —— 业务类型
+- `type:<...>` —— 业务类型(受控枚举,见上)
 - `lang:<xx>` —— 从文件名识别的语言(zh/en/ja…)
+
+**扩展规则(保持一致,便于检索)**:
+1. 维度用 `key:value` 形式(`job:`、`type:`、`lang:`),便于分面过滤;自由文本放进 `description`,别塞进 tags。
+2. 新增类型只扩 `type:` 的受控枚举,不要发明新前缀;新平台加到 `<platform>` 白名单。
+3. 标签统一小写;多个标签用逗号分隔,顺序无关(检索按集合匹配)。
+4. 手动上传的素材同样建议套用 `type:` / `lang:` 维度,保持全库一致。
 
 ### 分类(kind)与扩展名
 `images` · `videos` · `docs` · `audio` · **`subs`(srt/ass/vtt/ssa/sub/sbv)** · `other`。
@@ -54,7 +82,7 @@ materials_hub/
 ├─ trash/             # 去重/删除移入的回收区
 └─ index/hub.db       # SQLite 索引库
 ```
-> `materials_hub/*.md` 受仓库 `.gitignore` 规则影响可能不入库;如需入库按 box-lift 先例在 `.gitignore` 末尾加例外。
+> 仓库默认不入库 `*.md` / `*.html`;素材中心的文档与单页前端已在 `.gitignore` 末尾加 `!materials_hub/**` 白名单,可随代码一起版本化(参照 `kb/docs`、`box-lift` 先例)。`index/hub.db` 为生成物,不入库。
 
 ## 运行
 需要 Python 3.12(避免 3.13 移除的 `cgi`;本服务已手写 multipart 解析,但建议 3.12)。
@@ -80,6 +108,13 @@ python server.py        # 启动面板,打开 http://localhost:8000
 - 标签筛选:`job:BV1aDb56iEvu`(某 B 站视频全套素材)、`type:benchmark`(基准视频)、`type:render`(渲染预览)、`lang:zh`(中文字幕/笔记)。
 - 组合:在面板里先选 `类型=视频`,再搜 `render` 或 `benchmark`。
 - 空 query:直接按时间倒序列出(等同浏览全部)。
+
+### 分面检索(Faceted Search)
+成熟 DAM 的检索 = **关键词 + 多个维度同时过滤**。素材中心提供三个正交维度,可任意组合:
+- **类型(kind)**:`images / videos / docs / audio / subs / other`(面板下拉)
+- **标签(tag)**:`type:` / `job:` / `lang:` / `sp` 等(面板标签下拉,含计数)
+- **时间(created_at)**:无 query 时默认按时间倒序
+> 例:选 `类型=视频` + 标签 `type:benchmark` + 搜 `render` ⇒ 只列"基准视频里和渲染相关"的素材。维度越多越精。
 
 ## CLI 参考
 ```bash
@@ -148,9 +183,39 @@ core.remove_material(mid)           # 内部移 trash,外部只删索引
 ## 命名规范
 非字母数字 / 中文 / 连字符统一为 `-`,折叠连续 `-`,截断至 80 字符 + 小写扩展名。原始文件名保留在 `orig_name` 字段。
 
-## 后续可扩展
+## 运维:备份 / 重建 / 迁移
+`index/hub.db` 是**派生索引(derived index)**,不是唯一真相源——真相是磁盘上的原文件。因此:
+- **备份**:优先备份原始素材文件;`hub.db` 可随时重建,不必单独备份。需要可移植快照时用面板「导出 JSON / CSV」(`/api/export`)。
+- **重建**:索引损坏或想重置,直接删 `index/hub.db`,然后
+  `python bridge_subtitle.py`(重建外部引用)+ `python cli.py scan`(重建内部素材)。`sha256` 保证幂等,不会重复。
+- **迁移**:把 `materials/` 与原项目一起拷贝,重跑上面的重建命令即可,无需迁移数据库。
+> 这条"索引可丢弃、可重建"的原则,是本地素材库能长期稳定运维的关键。
+
+## 预览与缩略图策略
+- **图片**:直接返回,前端缩略图展示。
+- **视频 / 音频**:`/api/file/<id>` 支持 **HTTP Range**,浏览器内嵌播放器可拖拽进度、边下边播(大文件也不整块读内存)。
+- **视频缩略图(封面)**:当前**未生成**。本机未安装 `ffmpeg`,无法抽首帧。建议路线:
+  1. 安装 ffmpeg → 新增 `/api/thumb/<id>`:对视频抽首帧 jpg 缓存到 `index/thumbs/`,前端作为 `<video poster>`;
+  2. 或纯前端兜底:用 `<video>` + `canvas` 在加载时截首帧作封面(零服务端成本,但每个视频需加载一次)。
+- **外部引用**(subtitle_pipeline 大视频)预览同样走 Range,不复制文件。
+
+## 已知限制与路线图
+**已知限制**
+- **本地单用户**:服务监听 `0.0.0.0:8000` 但无认证/权限;仅本机或可信局域网使用,勿直接暴露公网。
+- **无版本管理**:素材更新会覆盖索引记录,不保留历史版本。
+- **非真·语义检索**:当前为加权关键词近似(见下)。
+- **缩略图待 ffmpeg**:见上。
+
+**后续可扩展**
 - **真·语义 Embedding 检索**(可选增强):接本地 sentence-transformers / CLIP(图片),离线需预置权重;`search()` 已按分数排序,接入后替换 `_score` 即可(外部素材同样可语义搜)。
-- **缩略图 / 转码**(可选):当前视频直读原文件并支持 Range 流式;可再加缩略图生成、转码代理以提速大文件浏览。
+- **缩略图 / 转码**(见上,依赖 ffmpeg):首帧封面 + 可选转码代理以提速大文件浏览。
 - **远程采集**:加网络抓取源(需明确站点与授权)。
 - **多库隔离**:按项目分库。
 - **MCP 推送**:由 subtitle_pipeline 的 `vitual_mcp` 把产物推送到素材中心(阶段二)。
+
+## FAQ
+- **为什么视频不复制进素材中心?** 体量大(subtitle_pipeline 下 177+ 个 mp4),复制会重复占盘。采用「原路径引用」,只登记索引,预览按需读取原文件。
+- **删除素材会删掉原文件吗?** 不会。内部素材删除后移入 `trash/`(可找回);外部引用(subtitle_pipeline)删除只删索引,原文件毫发无损。
+- **怎么重新登记 / 重建索引?** 删 `index/hub.db`,重跑 `python bridge_subtitle.py` + `python cli.py scan`(幂等)。
+- **索引库坏了影响原文件吗?** 不影响。`hub.db` 是派生索引,可随时丢弃重建(见运维)。
+- **能用自然语言搜吗?** 能。检索按字段加权做近似匹配,问句不必含连续子串;精确过滤用 `type:` / `job:` / `lang:` 标签。
