@@ -81,7 +81,7 @@ Web 面板 /api/file/<id> ───┘ 按需读 external_path 预览(图片直�
 
 ## 6. 取舍与后续
 - **引用 vs 复制**:默认引用(省盘、幂等、不动原工程);若需素材中心自带备份,可加 `--copy` 走 `ingest_file`。
-- **大视频预览**:当前 `/api/file` 整文件读入内存,超长视频建议后续加 HTTP Range 流式 + 缩略图生成。
+- **大视频预览**:已支持 `/api/file` HTTP Range 流式(可拖拽/边下边播),视频封面走 `/api/thumb/<id>`(ffmpeg 自动发现,无 ffmpeg 时前端 canvas 截帧兜底)。
 - **删除语义**:素材中心删条目只删索引;真正清理仍回 subtitle_pipeline 操作。
 - **真语义检索**:当前关键词/加权近似;接本地 Embedding 后,外部素材同样可语义搜。
 

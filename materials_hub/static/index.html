@@ -40,6 +40,9 @@
   .modal .item{display:flex;gap:8px;align-items:center;margin:4px 0;font-size:13px}
   .modal .item .nm{flex:1;word-break:break-all}
   .modal .item button{font-size:12px;padding:3px 8px}
+  .thumb{position:relative}
+  .thumb video{width:100%;height:140px;object-fit:cover;background:#000}
+  .badge{position:absolute;left:6px;top:6px;background:rgba(0,0,0,.62);border:1px solid var(--line);color:var(--mut);font-size:11px;padding:2px 6px;border-radius:6px}
 </style>
 </head>
 <body>
@@ -65,6 +68,7 @@
     <button id="dupes">重复清理</button>
     <button id="exportJson">导出 JSON</button>
     <button id="exportCsv">导出 CSV</button>
+    <button id="thumbs">生成封面</button>
     <button id="pick">上传</button>
     <input id="file" type="file" multiple hidden>
   </div>
@@ -85,19 +89,29 @@
 const $ = s => document.querySelector(s);
 const api = (p,o)=>fetch(p,o).then(r=>r.json());
 
+let THUMB_SERVER=false;            // 服务端能否抽帧(ffmpeg 可用)
+const thumbCache=new Map();        // id -> dataURL:浏览器截帧结果,避免重复抽
+
 async function load(){
   const q=$("#q").value.trim(), kind=$("#kind").value, tag=$("#tag").value;
   const rows = await api("/api/list?q="+encodeURIComponent(q)+"&kind="+encodeURIComponent(kind)+"&tag="+encodeURIComponent(tag));
   const st = await api("/api/stats");
+  THUMB_SERVER = !!(st.thumbs && st.thumbs.ffmpeg);
   $("#stats").innerHTML = `共 ${st.total} 个 · 重复 <span id="dupLink" style="cursor:pointer;color:var(--acc)">${st.dupes}</span> 组 · ` +
-    Object.entries(st.kinds).map(([k,v])=>`${k}:${v}`).join("  ");
+    Object.entries(st.kinds).map(([k,v])=>`${k}:${v}`).join("  ") +
+    ` · 封面 <span id="thumbInfo"></span>`;
   const dl=$("#dupLink"); if(dl) dl.onclick=openDupes;
   const grid=$("#grid"); grid.innerHTML="";
   for(const m of rows){
     const c=document.createElement("div"); c.className="card";
     let thumb;
     if(m.kind==="images") thumb=`<div class="thumb"><img src="/api/file/${m.id}" loading="lazy"></div>`;
-    else if(m.kind==="videos") thumb=`<div class="thumb"><video src="/api/file/${m.id}" muted controls></video></div>`;
+    else if(m.kind==="videos"){
+      const poster = THUMB_SERVER && m.thumb;   // 未生成/源文件损坏 → 不请求 poster,避免 404
+      thumb=`<div class="thumb"><video data-id="${m.id}" src="/api/file/${m.id}" muted playsinline controls preload="metadata"` +
+        (poster?` data-poster="/api/thumb/${m.id}"`:"") + `></video>` +
+        (THUMB_SERVER && !m.thumb ? `<div class="badge">封面不可用</div>` : "") + `</div>`;
+    }
     else if(m.kind==="audio") thumb=`<div class="thumb"><div class="ph">♪</div></div>`;
     else thumb=`<div class="thumb"><div class="ph">${m.ext||"?"}</div></div>`;
     const size=(m.size/1048576).toFixed(2)+" MB";
@@ -122,6 +136,77 @@ async function load(){
       if(confirm("删除 "+m.name+" ?")){ await api("/api/remove",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:m.id})}); load(); }
     };
     grid.appendChild(c);
+    const v=c.querySelector(".thumb video");
+    if(v) observeThumb(v);
+  }
+  refreshThumbInfo();
+}
+
+/* ---------- 视频封面 ----------
+   优先服务端 ffmpeg 抽帧(/api/thumb,磁盘缓存复用);
+   无 ffmpeg 时回退浏览器截帧:<video> 加载元数据 → seek 到 10% 处 → canvas 抓帧做 poster。
+   无论哪种模式都**进视口才取封面**,避免一次列出上百个视频时同时拉流/抽帧。 */
+const thumbIO = (typeof IntersectionObserver!=="undefined")
+  ? new IntersectionObserver(es=>{ for(const e of es){ if(e.isIntersecting){ thumbIO.unobserve(e.target); mountThumb(e.target); } } },{rootMargin:"300px"})
+  : null;
+
+function observeThumb(v){
+  const cached = thumbCache.get(v.dataset.id);
+  if(cached){ v.poster=cached; return; }
+  if(thumbIO) thumbIO.observe(v); else mountThumb(v);
+}
+
+function mountThumb(v){
+  if(v.dataset.mounted) return;
+  v.dataset.mounted="1";
+  if(THUMB_SERVER){                       // 服务端封面:交给浏览器按需请求 + 缓存
+    if(v.dataset.poster) v.poster=v.dataset.poster;
+    return;
+  }
+  clientThumb(v);
+}
+
+function clientThumb(v){
+  if(v.dataset.grabbed) return;
+  v.dataset.grabbed="1";
+  const grab=()=>{
+    try{
+      if(!v.videoWidth) return;
+      const w=480, h=Math.max(1,Math.round(v.videoHeight*w/v.videoWidth));
+      const c=document.createElement("canvas"); c.width=w; c.height=h;
+      c.getContext("2d").drawImage(v,0,0,w,h);
+      const url=c.toDataURL("image/jpeg",0.72);
+      thumbCache.set(v.dataset.id,url); v.poster=url;
+    }catch(e){}
+  };
+  v.addEventListener("seeked",grab,{once:true});
+  v.addEventListener("loadedmetadata",()=>{
+    const t=Math.min(1,(v.duration||2)*0.1);
+    try{ v.currentTime = t>0 ? t : 0.1; }catch(e){}
+    setTimeout(grab,4000);   // 兜底:某些容器 seek 后不触发 seeked
+  },{once:true});
+  try{ v.load(); }catch(e){}
+}
+
+let thumbJobActive=false;
+
+async function refreshThumbInfo(){
+  let st;
+  try{ st = await api("/api/stats"); }catch(e){ return; }
+  const t = st.thumbs||{}, j = st.thumb_job||{};
+  const el = $("#thumbInfo"); if(!el) return;
+  let txt = t.ffmpeg
+    ? `服务端抽帧(缓存 ${t.cached}${t.failed?` · 不可用 ${t.failed}`:""})`
+    : "浏览器截帧(本机无 ffmpeg)";
+  if(j.running) txt += ` · 生成中 ${j.done}/${j.total}`;
+  el.textContent = txt;
+  const btn=$("#thumbs"); if(btn) btn.disabled = !t.ffmpeg || !!j.running;
+  if(j.running){
+    thumbJobActive=true;
+    setTimeout(refreshThumbInfo,2000);
+  }else if(thumbJobActive){      // 批量生成结束 → 重渲染一次,换上服务端封面
+    thumbJobActive=false;
+    load();
   }
 }
 
@@ -135,6 +220,11 @@ $("#pick").onclick=()=>$("#file").click();
 $("#exportJson").onclick=()=>window.open("/api/export?fmt=json");
 $("#exportCsv").onclick=()=>window.open("/api/export?fmt=csv");
 $("#dupes").onclick=openDupes;
+$("#thumbs").onclick=async()=>{
+  const r = await api("/api/thumbs",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+  if(r.ffmpeg===false){ alert(r.hint||"本机未安装 ffmpeg,已回退浏览器截帧"); return; }
+  refreshThumbInfo();
+};
 $("#dupClose").onclick=()=>$("#dupModal").classList.remove("show");
 $("#file").onchange=e=>upload(e.target.files);
 

@@ -7,6 +7,7 @@ import os
 import re
 import json
 import mimetypes
+import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -14,10 +15,30 @@ from core import (
     init_hub, HUB, MATERIALS, get_material, all_materials, search,
     ingest_file, ingest_dir, scan_materials, update_tags,
     update_description, remove_material, duplicates, sanitize_name,
-    distinct_tags,
+    distinct_tags, make_thumb, thumb_path, thumbs_status, purge_thumbs,
+    missing_thumbnail_ids, thumb_failure_reason,
 )
 
 PORT = 8000
+
+# 批量生成封面的后台任务状态(抽帧耗时,放后台线程 + 前端轮询进度)
+_THUMB_JOB = {"running": False, "total": 0, "done": 0, "made": 0, "error": ""}
+
+
+def _run_thumb_job(limit=0):
+    try:
+        ids = missing_thumbnail_ids()
+        if limit:
+            ids = ids[:limit]
+        _THUMB_JOB.update(total=len(ids), done=0, made=0)
+        for i, mid in enumerate(ids, 1):
+            if make_thumb(mid):
+                _THUMB_JOB["made"] += 1
+            _THUMB_JOB["done"] = i
+    except Exception as e:  # 后台线程异常不能让进程挂掉
+        _THUMB_JOB["error"] = str(e)
+    finally:
+        _THUMB_JOB["running"] = False
 
 
 def parse_multipart(raw, boundary):
@@ -48,8 +69,8 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _json(self, obj):
-        self._send(200, json.dumps(obj, ensure_ascii=False))
+    def _json(self, obj, code=200):
+        self._send(code, json.dumps(obj, ensure_ascii=False), "application/json; charset=utf-8")
 
     def _serve_static(self, name, ctype=None):
         fp = os.path.join(HUB, "static", name)
@@ -105,13 +126,18 @@ class Handler(BaseHTTPRequestHandler):
             tag = q.get("tag", [""])[0]
             kw = q.get("q", [""])[0]
             rows = search(kw, kind, tag) if (kw or tag or kind) else all_materials()
+            for m in rows:  # 给视频标注封面是否已就绪,前端据此决定要不要请求 poster
+                if m["kind"] == "videos":
+                    tp = thumb_path(m["id"])
+                    m["thumb"] = os.path.exists(tp) and os.path.getsize(tp) > 0
             return self._json(rows)
         if p == "/api/stats":
             ms = all_materials()
             kinds = {}
             for m in ms:
                 kinds[m["kind"]] = kinds.get(m["kind"], 0) + 1
-            return self._json({"total": len(ms), "dupes": len(duplicates()), "kinds": kinds})
+            return self._json({"total": len(ms), "dupes": len(duplicates()), "kinds": kinds,
+                               "thumbs": thumbs_status(), "thumb_job": dict(_THUMB_JOB)})
         if p == "/api/dupes":
             return self._json(duplicates())
         if p == "/api/tags":
@@ -147,6 +173,26 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+            return
+        if p.startswith("/api/thumb/"):
+            mid = p[len("/api/thumb/"):]
+            fp = thumb_path(mid)
+            if not (os.path.exists(fp) and os.path.getsize(fp) > 0):
+                if not thumbs_status()["ffmpeg"]:
+                    return self._json({"error": "ffmpeg-unavailable",
+                                       "hint": "本机未找到 ffmpeg,前端已回退到浏览器截帧"}, 404)
+                fp = make_thumb(mid)
+            if not fp or not os.path.exists(fp):
+                return self._json({"error": "thumbnail-failed", "id": mid,
+                                   "reason": thumb_failure_reason(mid)}, 404)
+            with open(fp, "rb") as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
             return
         if p.startswith("/api/file/"):
             mid = p[len("/api/file/"):]
@@ -200,6 +246,24 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/scan":
             r = scan_materials()
             return self._json({"new": len(r)})
+
+        if p == "/api/thumbs":
+            # {purge:true} 清空封面缓存;否则后台批量抽帧(limit 可限个数)
+            try:
+                opt = json.loads(raw or b"{}")
+            except Exception:
+                opt = {}
+            if opt.get("purge"):
+                return self._json({"purged": purge_thumbs()})
+            if _THUMB_JOB["running"]:
+                return self._json({"running": True, "job": dict(_THUMB_JOB)})
+            if not thumbs_status()["ffmpeg"]:
+                return self._json({"ffmpeg": False,
+                                   "hint": "本机未安装 ffmpeg;前端已用浏览器 canvas 截帧代替"})
+            _THUMB_JOB.update(running=True, total=0, done=0, made=0, error="")
+            threading.Thread(target=_run_thumb_job, args=(int(opt.get("limit") or 0),),
+                             daemon=True).start()
+            return self._json({"running": True, "job": dict(_THUMB_JOB)})
 
         try:
             body = json.loads(raw or b"{}")

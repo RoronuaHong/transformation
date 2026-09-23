@@ -24,7 +24,7 @@
 - **目录规范**:固定结构,素材按类型归档。
 - **自动采集整理**:SHA-256 去重、自动分类、命名规范化;可扫描 `ingest/` 或 `materials/` 全树,也可只读联动外部项目。
 - **索引 + 检索**:SQLite 索引 + **零依赖加权语义近似检索**(中文按字 / bigram 分词、英数按词,字段加权打分)。自然语言问一句即可命中,不要求连续子串;支持按类型筛选、按标签过滤。
-- **管理面板(Web/UI)**:浏览器可视化浏览、上传(含拖拽)、打标签、编辑描述、预览、删除、去重整理。
+- **管理面板(Web/UI)**:浏览器可视化浏览、上传(含拖拽)、打标签、编辑描述、预览、视频封面、删除、去重整理、导出。
 
 > 另见 `INTEGRATION.md` 了解与 subtitle_pipeline 的联动设计(可行性、目录落点、标签映射、数据流)。
 
@@ -80,7 +80,9 @@ materials_hub/
 │  ├─ images/ videos/ docs/ audio/ subs/ other/
 ├─ ingest/            # 待整理队列(丢这里,点「整理」或跑 ingest)
 ├─ trash/             # 去重/删除移入的回收区
-└─ index/hub.db       # SQLite 索引库
+└─ index/
+   ├─ hub.db          # SQLite 索引库(派生,可重建)
+   └─ thumbs/         # 视频封面缓存 <id>.jpg / <id>.jpg.fail(派生,可重建)
 ```
 > 仓库默认不入库 `*.md` / `*.html`;素材中心的文档与单页前端已在 `.gitignore` 末尾加 `!materials_hub/**` 白名单,可随代码一起版本化(参照 `kb/docs`、`box-lift` 先例)。`index/hub.db` 为生成物,不入库。
 
@@ -93,16 +95,19 @@ python server.py        # 启动面板,打开 http://localhost:8000
 ```
 或纯命令行(见下方 CLI 参考)。
 
+> **ffmpeg 可选**:找得到就用它抽视频封面,找不到自动降级为浏览器截帧。探测顺序见[预览与缩略图策略](#预览与缩略图策略)。
+
 ## Web 面板用法
 - **搜索框**:自然语言 / 关键词,实时(输入即搜),按相关度排序。
 - **类型下拉**:按 `kind` 筛选(图片/视频/文档/音频/其他)。
 - **上传**:点「上传」或把文件**拖拽**到页面 → 落到 `ingest/` 并整理入库。
 - **标签 / 描述**:每张卡片可编辑,点「保存」写回索引。
-- **预览**:图片直接显示缩略图;视频内嵌播放器;音频 / 文档显示占位。
+- **预览**:图片直接显示缩略图;视频内嵌播放器 + 封面;音频 / 文档显示占位。
 - **删除**:删内部素材会移入 `trash/`(不破坏原工程);删外部引用只删索引。
 - **整理 / 扫描**:「整理 ingest/」处理待整理队列;「扫描 materials/」补录全树。
-- **状态栏**:显示总数、重复组数、各 kind 数量。
+- **状态栏**:显示总数、重复组数、各 kind 数量、封面缓存状态(服务端抽帧 / 浏览器截帧)。
 - **重复清理**:点状态栏的「重复 N 组」或工具条「重复清理」,弹出按 SHA-256 相同的重复分组,可逐条删除冗余(保留需要的那份)。
+- **生成封面**:工具条「生成封面」→ 后台批量抽帧全部视频封面,状态栏实时显示进度;抽不出封面的(源文件损坏)会标注「封面不可用」。
 
 ## 检索示例
 - 自然语言:`python cli.py search "bilibili 的足球比赛字幕"` → 命中标题含相关词、带 `bilibili` 标签的素材。
@@ -125,6 +130,8 @@ python cli.py scan                 # 扫描 materials/ 全树补录索引
 python cli.py search <关键词>      # 加权语义近似检索
 python cli.py dupes                # 列出重复文件(SHA-256 相同)
 python cli.py list                 # 列出全部素材
+python cli.py thumbs               # 批量生成视频封面(逐条打印进度;无 ffmpeg 会提示)
+python cli.py thumbs --purge       # 清空封面缓存与失败标记
 ```
 
 ## 联动 subtitle_pipeline(快速上手)
@@ -164,19 +171,28 @@ core.duplicates()                   # 重复组
 core.update_tags(mid, tags)
 core.update_description(mid, desc)
 core.remove_material(mid)           # 内部移 trash,外部只删索引
+core.ffmpeg_path()                  # 自动发现的 ffmpeg 路径(无则 None)
+core.make_thumb(mid)                # 抽帧生成视频封面(缓存;失败留 .fail 标记)
+core.thumbs_status()                # {ffmpeg, exe, cached, failed, dir}
+core.missing_thumbnail_ids()        # 还没有封面的视频 id(默认跳过已知损坏)
+core.purge_thumbs()                 # 清空封面缓存与失败标记
 ```
 
 ## HTTP API(server.py)
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/` · `/index.html` | 管理面板 |
-| GET | `/api/list?q=&kind=&tag=` | 检索 / 列表 |
-| GET | `/api/stats` | 总数 / 重复组 / 各 kind 数量 |
+| GET | `/api/list?q=&kind=&tag=` | 检索 / 列表(视频项带 `thumb` 标记:封面是否就绪) |
+| GET | `/api/stats` | 总数 / 重复组 / 各 kind 数量 / 封面状态 / 批量任务进度 |
 | GET | `/api/dupes` | 重复文件组 |
+| GET | `/api/tags` | 全部标签 + 计数(面板标签下拉) |
 | GET | `/api/file/<id>` | 预览原文(外部引用读 `external_path`,支持 HTTP Range 流式) |
+| GET | `/api/thumb/<id>` | 视频封面 jpg(命中缓存直接返回,否则现场抽帧;失败返回 404 + 原因) |
+| GET | `/api/export?fmt=json\|csv` | 导出全部编目(带下载文件名;CSV 含 BOM) |
 | POST | `/api/upload` | 上传(表单 multipart) |
 | POST | `/api/ingest` | 整理 `ingest/` |
 | POST | `/api/scan` | 扫描 `materials/` 全树 |
+| POST | `/api/thumbs` | `{}` 后台批量抽帧;`{"limit":N}` 限量;`{"purge":true}` 清缓存与失败标记 |
 | POST | `/api/tag` | `{id, tags}` 更新标签 |
 | POST | `/api/describe` | `{id, description}` 更新描述 |
 | POST | `/api/remove` | `{id}` 删除 |
@@ -189,27 +205,51 @@ core.remove_material(mid)           # 内部移 trash,外部只删索引
 - **备份**:优先备份原始素材文件;`hub.db` 可随时重建,不必单独备份。需要可移植快照时用面板「导出 JSON / CSV」(`/api/export`)。
 - **重建**:索引损坏或想重置,直接删 `index/hub.db`,然后
   `python bridge_subtitle.py`(重建外部引用)+ `python cli.py scan`(重建内部素材)。`sha256` 保证幂等,不会重复。
+  `index/thumbs/`(封面缓存)同样是派生的,删掉后重新「生成封面」即可。
 - **迁移**:把 `materials/` 与原项目一起拷贝,重跑上面的重建命令即可,无需迁移数据库。
 > 这条"索引可丢弃、可重建"的原则,是本地素材库能长期稳定运维的关键。
 
 ## 预览与缩略图策略
 - **图片**:直接返回,前端缩略图展示。
 - **视频 / 音频**:`/api/file/<id>` 支持 **HTTP Range**,浏览器内嵌播放器可拖拽进度、边下边播(大文件也不整块读内存)。
-- **视频缩略图(封面)**:当前**未生成**。本机未安装 `ffmpeg`,无法抽首帧。建议路线:
-  1. 安装 ffmpeg → 新增 `/api/thumb/<id>`:对视频抽首帧 jpg 缓存到 `index/thumbs/`,前端作为 `<video poster>`;
-  2. 或纯前端兜底:用 `<video>` + `canvas` 在加载时截首帧作封面(零服务端成本,但每个视频需加载一次)。
 - **外部引用**(subtitle_pipeline 大视频)预览同样走 Range,不复制文件。
+
+### 视频封面(双模式自动降级)
+| 模式 | 触发条件 | 行为 | 代价 |
+|---|---|---|---|
+| **A 服务端抽帧**(首选) | 找到 ffmpeg | `/api/thumb/<id>` 用 ffmpeg 抽一帧存 `index/thumbs/<id>.jpg`,命中缓存直接返回;前端作 `<video poster>` | 首次每视频约 0.1–1s,之后走缓存 |
+| **B 浏览器截帧**(兜底) | 找不到 ffmpeg | 前端把 `<video>` seek 到 10% 处 → `canvas` 抓帧 → `toDataURL` 当 poster | 每个视频需加载一次,零服务端成本 |
+
+两种模式都**进视口才取封面**(`IntersectionObserver`),避免一次列出上百个视频时同时拉流/抽帧。
+
+**ffmpeg 自动发现**:很多 Python 包自带 ffmpeg 二进制(只是不在 PATH 上),因此探测顺序为
+`VITUAL_FFMPEG` 环境变量 → `PATH` → 同工作区项目的 `*/.venv/Lib/site-packages/{static_ffmpeg,imageio_ffmpeg}/.../ffmpeg.exe` → `C:\ffmpeg\bin\ffmpeg.exe`。
+> 本项目即靠这条规则免安装获得抽帧能力:命中 `subtitle_pipeline/.venv` 里的 `static_ffmpeg` 自带 ffmpeg。
+
+**损坏源文件不反复重试**:抽帧失败的会留下 `<id>.jpg.fail` 标记(内含 ffmpeg 报错摘要),后续不再白跑;面板在该视频上标「封面不可用」。
+想重试:面板 `POST /api/thumbs {"purge":true}` 清掉缓存与标记,再重新生成。
+
+**相关环境变量**
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `VITUAL_FFMPEG` | 空 | 指定 ffmpeg 可执行文件(优先级最高) |
+| `VITUAL_THUMB_SEEK` | `1` | 抽帧时间点(秒);避开片头黑帧,失败自动回退 0 秒 |
+| `VITUAL_THUMB_CONCURRENCY` | `2` | 同时抽帧进程上限(限流,避免一次拉起几十个 ffmpeg) |
+
+**批量生成**:面板「生成封面」按钮,或 `POST /api/thumbs`(后台线程 + 状态栏实时进度)。
+实测 83 个视频(含 186MB 大文件)→ 75 张封面,**12.1s** 完成。
 
 ## 已知限制与路线图
 **已知限制**
 - **本地单用户**:服务监听 `0.0.0.0:8000` 但无认证/权限;仅本机或可信局域网使用,勿直接暴露公网。
 - **无版本管理**:素材更新会覆盖索引记录,不保留历史版本。
 - **非真·语义检索**:当前为加权关键词近似(见下)。
-- **缩略图待 ffmpeg**:见上。
+- **封面依赖 ffmpeg**:本机找不到 ffmpeg 时自动降级为浏览器截帧(可用但较慢);源文件损坏(如上游写入中断的 mp4)抽不出封面,只会标记不重试。
+- **封面缓存不入库**:`index/thumbs/` 是派生数据,删除无副作用(重跑生成即可)。
 
 **后续可扩展**
 - **真·语义 Embedding 检索**(可选增强):接本地 sentence-transformers / CLIP(图片),离线需预置权重;`search()` 已按分数排序,接入后替换 `_score` 即可(外部素材同样可语义搜)。
-- **缩略图 / 转码**(见上,依赖 ffmpeg):首帧封面 + 可选转码代理以提速大文件浏览。
+- **转码代理**(依赖 ffmpeg):为超大视频生成低码率预览版,提速浏览。
 - **远程采集**:加网络抓取源(需明确站点与授权)。
 - **多库隔离**:按项目分库。
 - **MCP 推送**:由 subtitle_pipeline 的 `vitual_mcp` 把产物推送到素材中心(阶段二)。
@@ -220,3 +260,5 @@ core.remove_material(mid)           # 内部移 trash,外部只删索引
 - **怎么重新登记 / 重建索引?** 删 `index/hub.db`,重跑 `python bridge_subtitle.py` + `python cli.py scan`(幂等)。
 - **索引库坏了影响原文件吗?** 不影响。`hub.db` 是派生索引,可随时丢弃重建(见运维)。
 - **能用自然语言搜吗?** 能。检索按字段加权做近似匹配,问句不必含连续子串;精确过滤用 `type:` / `job:` / `lang:` 标签。
+- **视频封面是怎么来的?** 服务端用自动发现的 ffmpeg 抽第 1 秒的帧,存 `index/thumbs/<id>.jpg` 复用;本机确实没有 ffmpeg 时,前端用 `<video> + canvas` 截帧兜底。两种模式都只对进入视口的卡片生效。
+- **为什么有几个视频显示「封面不可用」?** 那些源文件本身损坏(典型报错 `moov atom not found`,多为上游写入中断的 mp4)。抽帧失败会留 `.fail` 标记不再重试;**源文件修好后**用 `POST /api/thumbs {"purge":true}` 清标记再生成即可。

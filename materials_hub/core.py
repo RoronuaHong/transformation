@@ -9,6 +9,8 @@ import sqlite3
 import shutil
 import hashlib
 import datetime
+import subprocess
+import threading
 
 HUB = os.path.dirname(os.path.abspath(__file__))
 MATERIALS = os.path.join(HUB, "materials")
@@ -17,6 +19,7 @@ TRASH = os.path.join(HUB, "trash")
 INDEX_DIR = os.path.join(HUB, "index")
 INDEX_DB = os.path.join(INDEX_DIR, "hub.db")
 STATIC = os.path.join(HUB, "static")
+THUMBS = os.path.join(INDEX_DIR, "thumbs")  # 视频封面缓存(派生数据,可随时删)
 
 # 按扩展名分类。audio 单独成类便于检索。
 KINDS = {
@@ -360,6 +363,178 @@ def scan_materials():
                     )
                     results.append(mid)
     return results
+
+
+# ---------- 视频封面(缩略图) ----------
+# ffmpeg 探测结果缓存,避免每次请求都扫盘。
+_FFMPEG_CACHE = {"path": None, "scanned": False}
+# 抽帧并发上限:面板一次列出上百个视频时会并发请求封面,限流避免拉起一堆 ffmpeg 进程。
+_THUMB_SLOTS = threading.BoundedSemaphore(int(os.environ.get("VITUAL_THUMB_CONCURRENCY", "2")))
+
+
+def _ffmpeg_candidates():
+    """按优先级产出候选 ffmpeg:环境变量 → PATH → 同工作区项目 venv 自带 → 常见安装位。
+
+    很多 Python 包(imageio-ffmpeg / static-ffmpeg / moviepy)会自带 ffmpeg 二进制,
+    虽不在 PATH 上,但可直接调用 —— 自动发现即免安装获得抽帧能力。"""
+    import glob as _glob
+    env = os.environ.get("VITUAL_FFMPEG", "").strip()
+    if env:
+        yield env
+    got = shutil.which("ffmpeg")
+    if got:
+        yield got
+    root = os.path.dirname(HUB)  # 工作区根目录
+    patterns = [
+        os.path.join(root, "*", ".venv", "Lib", "site-packages", "static_ffmpeg", "bin", "*", "ffmpeg.exe"),
+        os.path.join(root, "*", ".venv", "Lib", "site-packages", "imageio_ffmpeg", "binaries", "ffmpeg*.exe"),
+        os.path.join(root, "*", "ffmpeg", "bin", "ffmpeg.exe"),
+        os.path.join(root, "*", "bin", "ffmpeg.exe"),
+        r"C:\ffmpeg\bin\ffmpeg.exe",
+        "/usr/local/bin/ffmpeg",
+        "/opt/homebrew/bin/ffmpeg",
+    ]
+    for pat in patterns:
+        for hit in sorted(_glob.glob(pat)):
+            yield hit
+
+
+def ffmpeg_path(refresh=False):
+    """返回可用的 ffmpeg 可执行文件路径;确实没有则 None。结果缓存。"""
+    if refresh or not _FFMPEG_CACHE["scanned"]:
+        _FFMPEG_CACHE["scanned"] = True
+        _FFMPEG_CACHE["path"] = None
+        for c in _ffmpeg_candidates():
+            if not c:
+                continue
+            if os.path.isfile(c):
+                _FFMPEG_CACHE["path"] = c
+                break
+            w = shutil.which(c)
+            if w:
+                _FFMPEG_CACHE["path"] = w
+                break
+    return _FFMPEG_CACHE["path"]
+
+
+def thumb_path(mid):
+    return os.path.join(THUMBS, f"{mid}.jpg")
+
+
+def _abs_source(m):
+    """素材的真实磁盘路径(区分内部 / 外部引用)。"""
+    if m.get("location") == "external":
+        return m.get("external_path") or ""
+    p = m["rel_path"]
+    return p if os.path.isabs(p) else os.path.join(HUB, p)
+
+
+def make_thumb(mid, retry_failed=False):
+    """为视频抽一帧存成 jpg 封面,缓存到 index/thumbs/<id>.jpg。
+    返回封面路径;无 ffmpeg / 非视频 / 抽帧失败均返回 None。
+
+    抽帧失败的会留下 `<id>.jpg.fail` 标记:源文件损坏/未写完时 ffmpeg 很费时,
+    标记后不再反复重试(想重试:purge_thumbs() 清标记,或传 retry_failed=True)。"""
+    m = get_material(mid)
+    if not m or m["kind"] != "videos":
+        return None
+    dst = thumb_path(mid)
+    if os.path.exists(dst) and os.path.getsize(dst) > 0:
+        return dst
+    if not retry_failed and os.path.exists(dst + ".fail"):
+        return None
+    exe = ffmpeg_path()
+    if not exe:
+        return None
+    src = _abs_source(m)
+    if not src or not os.path.exists(src):
+        return None
+    os.makedirs(THUMBS, exist_ok=True)
+    # 默认取第 1 秒(避开片头黑帧);环境变量可调,短视频失败时回退到 0 秒。
+    seek = os.environ.get("VITUAL_THUMB_SEEK", "1")
+    flags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW,避免弹黑框
+    last_err = b""
+    with _THUMB_SLOTS:                            # 限流:最多同时抽 2 帧
+        if os.path.exists(dst) and os.path.getsize(dst) > 0:
+            return dst                            # 等待期间别人已生成
+        for ss in (seek, "0"):
+            cmd = [exe, "-v", "error", "-y", "-ss", str(ss), "-i", src,
+                   "-frames:v", "1", "-vf", "scale=480:-2", "-q:v", "4", dst]
+            try:
+                p = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                   timeout=60, creationflags=flags)
+                last_err = (p.stderr or b"")[:400]
+            except Exception as e:
+                last_err = str(e).encode()
+                continue
+            if os.path.exists(dst) and os.path.getsize(dst) > 0:
+                return dst
+    # 失败:记录标记(含原因),避免后续每次刷面板都再跑一遍 ffmpeg
+    try:
+        with open(dst + ".fail", "w", encoding="utf-8") as f:
+            f.write(last_err.decode("utf-8", "ignore"))
+    except OSError:
+        pass
+    return None
+
+
+def thumb_failure_reason(mid):
+    """读取失败标记里的 ffmpeg 报错摘要(无标记返回 '')。"""
+    p = thumb_path(mid) + ".fail"
+    if not os.path.exists(p):
+        return ""
+    try:
+        with open(p, encoding="utf-8", errors="ignore") as f:
+            txt = f.read().strip()
+    except OSError:
+        return "unreadable"
+    lines = [l for l in txt.splitlines() if l.strip()]
+    return lines[-1][:200] if lines else ""
+
+
+def thumbs_status():
+    """封面能力状态:ffmpeg 是否可用 + 已缓存数量 + 抽帧失败数。"""
+    n = fail = 0
+    if os.path.isdir(THUMBS):
+        for f in os.listdir(THUMBS):
+            if f.endswith(".jpg.fail"):
+                fail += 1
+            elif f.endswith(".jpg"):
+                n += 1
+    exe = ffmpeg_path()
+    return {"ffmpeg": bool(exe), "exe": os.path.basename(exe) if exe else "",
+            "cached": n, "failed": fail, "dir": os.path.relpath(THUMBS, HUB)}
+
+
+def purge_thumbs():
+    """清空封面缓存与失败标记(派生数据,删除无副作用)。返回清理数量。"""
+    n = 0
+    if os.path.isdir(THUMBS):
+        for f in os.listdir(THUMBS):
+            p = os.path.join(THUMBS, f)
+            if os.path.isfile(p):
+                try:
+                    os.remove(p)
+                    n += 1
+                except OSError:
+                    pass
+    return n
+
+
+def missing_thumbnail_ids(skip_failed=True):
+    """列出「还没有封面」的视频素材 id(供批量生成)。
+    skip_failed=True 时跳过已知损坏(有 .fail 标记)的,避免每次批量都白跑。"""
+    out = []
+    for m in all_materials():
+        if m["kind"] != "videos":
+            continue
+        p = thumb_path(m["id"])
+        if os.path.exists(p) and os.path.getsize(p) > 0:
+            continue
+        if skip_failed and os.path.exists(p + ".fail"):
+            continue
+        out.append(m["id"])
+    return out
 
 
 if __name__ == "__main__":
