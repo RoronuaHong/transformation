@@ -105,6 +105,7 @@ python server.py        # 启动面板,打开 http://localhost:8000
 - **预览**:图片直接显示缩略图;视频内嵌播放器 + 封面;音频 / 文档显示占位。
 - **删除**:删内部素材会移入 `trash/`(不破坏原工程);删外部引用只删索引。
 - **整理 / 扫描**:「整理 ingest/」处理待整理队列;「扫描 materials/」补录全树。
+- **分页**:页面底部「上一页 / 下一页 + 24·48·96 / 全部」;筛选或搜索变化自动回到第 1 页,并显示「第 X / Y 页 · 共 N 条」。
 - **状态栏**:显示总数、重复组数、各 kind 数量、封面缓存状态(服务端抽帧 / 浏览器截帧)。
 - **重复清理**:点状态栏的「重复 N 组」或工具条「重复清理」,弹出按 SHA-256 相同的重复分组,可逐条删除冗余(保留需要的那份)。
 - **生成封面**:工具条「生成封面」→ 后台批量抽帧全部视频封面,状态栏实时显示进度;抽不出封面的(源文件损坏)会标注「封面不可用」。
@@ -121,6 +122,7 @@ python server.py        # 启动面板,打开 http://localhost:8000
 - **标签(tag)**:`type:` / `job:` / `lang:` / `sp` 等(面板标签下拉,含计数)
 - **时间(created_at)**:无 query 时默认按时间倒序
 > 例:选 `类型=视频` + 标签 `type:benchmark` + 搜 `render` ⇒ 只列"基准视频里和渲染相关"的素材。维度越多越精。
+> 结果分页展示(默认 48/页,可切 24/96/全部);筛选或搜索变化自动回到第 1 页,上传/整理后也会回到第 1 页看新素材。
 
 ## CLI 参考
 ```bash
@@ -164,8 +166,10 @@ core.ingest_file(src, move=True)    # 整理单个文件(去重/分类/命名/�
 core.ingest_dir(dirpath)            # 整理目录
 core.ingest_external(src, source, tags, description)  # 外部引用登记(不复制)
 core.scan_materials()               # 扫描 materials/ 全树补录
-core.search(q="", kind="", tag="")  # 检索;q 为空按筛选+时间倒序
-core.all_materials()                # 全部
+core.search(q="", kind="", tag="", limit=None, offset=0)  # 检索(可分页);q 为空按筛选+时间倒序
+core.count_materials(q, kind, tag)  # 当前筛选命中总数(配合分页)
+core.query_materials(q, kind, tag)  # 不分页的完整结果
+core.all_materials()                # 全部(不分页,供统计/导出)
 core.get_material(mid)              # 单条
 core.duplicates()                   # 重复组
 core.update_tags(mid, tags)
@@ -182,7 +186,8 @@ core.purge_thumbs()                 # 清空封面缓存与失败标记
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/` · `/index.html` | 管理面板 |
-| GET | `/api/list?q=&kind=&tag=` | 检索 / 列表(视频项带 `thumb` 标记:封面是否就绪) |
+| GET | `/api/list?q=&kind=&tag=&limit=&offset=` | 检索 / 列表(`limit` 省略=不分页;`offset` 在排序后生效;视频项带 `thumb` 标记) |
+| GET | `/api/count?q=&kind=&tag=` | 当前筛选命中总数(配合分页算总页数) |
 | GET | `/api/stats` | 总数 / 重复组 / 各 kind 数量 / 封面状态 / 批量任务进度 |
 | GET | `/api/dupes` | 重复文件组 |
 | GET | `/api/tags` | 全部标签 + 计数(面板标签下拉) |

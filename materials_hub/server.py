@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from core import (
     init_hub, HUB, MATERIALS, get_material, all_materials, search,
-    ingest_file, ingest_dir, scan_materials, update_tags,
+    count_materials, ingest_file, ingest_dir, scan_materials, update_tags,
     update_description, remove_material, duplicates, sanitize_name,
     distinct_tags, make_thumb, thumb_path, thumbs_status, purge_thumbs,
     missing_thumbnail_ids, thumb_failure_reason,
@@ -125,12 +125,21 @@ class Handler(BaseHTTPRequestHandler):
             kind = q.get("kind", [""])[0]
             tag = q.get("tag", [""])[0]
             kw = q.get("q", [""])[0]
-            rows = search(kw, kind, tag) if (kw or tag or kind) else all_materials()
+            lim = q.get("limit", [""])[0]
+            off = q.get("offset", [""])[0]
+            limit = int(lim) if lim.isdigit() else None   # 不传 limit = 不分页
+            offset = int(off) if off.isdigit() else 0
+            rows = search(kw, kind, tag, limit=limit, offset=offset)
             for m in rows:  # 给视频标注封面是否已就绪,前端据此决定要不要请求 poster
                 if m["kind"] == "videos":
                     tp = thumb_path(m["id"])
                     m["thumb"] = os.path.exists(tp) and os.path.getsize(tp) > 0
             return self._json(rows)
+        if p == "/api/count":
+            q = urllib.parse.parse_qs(u.query)
+            return self._json({"total": count_materials(q.get("q", [""])[0],
+                                                         q.get("kind", [""])[0],
+                                                         q.get("tag", [""])[0])})
         if p == "/api/stats":
             ms = all_materials()
             kinds = {}

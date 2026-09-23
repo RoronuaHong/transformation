@@ -43,6 +43,10 @@
   .thumb{position:relative}
   .thumb video{width:100%;height:140px;object-fit:cover;background:#000}
   .badge{position:absolute;left:6px;top:6px;background:rgba(0,0,0,.62);border:1px solid var(--line);color:var(--mut);font-size:11px;padding:2px 6px;border-radius:6px}
+  .pager{display:flex;gap:8px;align-items:center;justify-content:center;margin:18px 0 6px;color:var(--mut);font-size:13px}
+  .pager button{padding:5px 12px;font-size:13px}
+  .pager button:disabled{opacity:.45;cursor:default}
+  .pager select{padding:5px 8px;font-size:13px}
 </style>
 </head>
 <body>
@@ -77,6 +81,17 @@
 <div class="main">
   <div class="stats" id="stats">加载中…</div>
   <div class="grid" id="grid"></div>
+  <div class="pager">
+    <button id="prev">上一页</button>
+    <span id="pageInfo"></span>
+    <button id="next">下一页</button>
+    <select id="pageSize">
+      <option value="24">24 / 页</option>
+      <option value="48" selected>48 / 页</option>
+      <option value="96">96 / 页</option>
+      <option value="0">全部</option>
+    </select>
+  </div>
 </div>
 <div id="dupModal" class="modal"><div class="box">
   <h2>重复素材(按 SHA-256 相同)</h2>
@@ -91,10 +106,21 @@ const api = (p,o)=>fetch(p,o).then(r=>r.json());
 
 let THUMB_SERVER=false;            // 服务端能否抽帧(ffmpeg 可用)
 const thumbCache=new Map();        // id -> dataURL:浏览器截帧结果,避免重复抽
+let page=1, pageSize=48, totalRows=0;   // 分页状态
+
+const filters = ()=>({q:$("#q").value.trim(), kind:$("#kind").value, tag:$("#tag").value});
+const qs = o => Object.entries(o).map(([k,v])=>`${k}=${encodeURIComponent(v)}`).join("&");
+function reload(){ page=1; load(); }    // 筛选条件变化时回到第 1 页
 
 async function load(){
-  const q=$("#q").value.trim(), kind=$("#kind").value, tag=$("#tag").value;
-  const rows = await api("/api/list?q="+encodeURIComponent(q)+"&kind="+encodeURIComponent(kind)+"&tag="+encodeURIComponent(tag));
+  const f = filters();
+  const c = await api("/api/count?"+qs(f));
+  totalRows = c.total;
+  const pages = Math.max(1, Math.ceil(totalRows/pageSize));
+  if(page>pages) page=pages;
+  const q = {...f, offset:(page-1)*pageSize};
+  if(pageSize>0) q.limit = pageSize;      // pageSize=0(全部)时不传 limit
+  const rows = await api("/api/list?"+qs(q));
   const st = await api("/api/stats");
   THUMB_SERVER = !!(st.thumbs && st.thumbs.ffmpeg);
   $("#stats").innerHTML = `共 ${st.total} 个 · 重复 <span id="dupLink" style="cursor:pointer;color:var(--acc)">${st.dupes}</span> 组 · ` +
@@ -102,6 +128,7 @@ async function load(){
     ` · 封面 <span id="thumbInfo"></span>`;
   const dl=$("#dupLink"); if(dl) dl.onclick=openDupes;
   const grid=$("#grid"); grid.innerHTML="";
+  if(!rows.length) grid.innerHTML='<div class="meta">没有匹配的素材</div>';
   for(const m of rows){
     const c=document.createElement("div"); c.className="card";
     let thumb;
@@ -140,6 +167,15 @@ async function load(){
     if(v) observeThumb(v);
   }
   refreshThumbInfo();
+  renderPager(pages);
+}
+
+function renderPager(pages){
+  $("#pageInfo").textContent = totalRows
+    ? `第 ${page} / ${Math.max(1, pages)} 页 · 共 ${totalRows} 条`
+    : "无匹配结果";
+  $("#prev").disabled = page<=1;
+  $("#next").disabled = page>=pages;
 }
 
 /* ---------- 视频封面 ----------
@@ -210,12 +246,15 @@ async function refreshThumbInfo(){
   }
 }
 
-$("#q").oninput=debounce(load,250);
-$("#kind").onchange=load;
-$("#tag").onchange=load;
+$("#q").oninput=debounce(reload,250);
+$("#kind").onchange=reload;
+$("#tag").onchange=reload;
 $("#refresh").onclick=load;
-$("#ingest").onclick=async()=>{ await api("/api/ingest",{method:"POST"}); load(); };
-$("#scan").onclick=async()=>{ await api("/api/scan",{method:"POST"}); load(); };
+$("#prev").onclick=()=>{ if(page>1){ page--; load(); } };
+$("#next").onclick=()=>{ const pages=Math.max(1,Math.ceil(totalRows/pageSize)); if(page<pages){ page++; load(); } };
+$("#pageSize").onchange=e=>{ pageSize=Number(e.target.value)||0; page=1; load(); };
+$("#ingest").onclick=async()=>{ await api("/api/ingest",{method:"POST"}); reload(); };  // 新素材在第 1 页
+$("#scan").onclick=async()=>{ await api("/api/scan",{method:"POST"}); reload(); };
 $("#pick").onclick=()=>$("#file").click();
 $("#exportJson").onclick=()=>window.open("/api/export?fmt=json");
 $("#exportCsv").onclick=()=>window.open("/api/export?fmt=csv");
@@ -233,7 +272,7 @@ async function upload(files){
     const fd=new FormData(); fd.append("file",f);
     await fetch("/api/upload",{method:"POST",body:fd});
   }
-  load();
+  reload();                                  // 上传后回第 1 页看新素材
 }
 
 async function openDupes(){

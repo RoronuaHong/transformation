@@ -162,9 +162,9 @@ def _score(q_tokens, m):
     return sc
 
 
-def search(q="", kind="", tag=""):
-    """检索:自然语言问句 → 字段加权语义近似打分排序。
-    q 为空时按 kind/tag 过滤后按时间倒序返回(等同原 LIKE 行为)。"""
+def query_materials(q="", kind="", tag=""):
+    """按筛选条件取出并排好序的全部结果(不分页)。
+    q 为空时按时间倒序(等同浏览全部);有 q 时按加权得分倒序。"""
     con = _con()
     con.row_factory = sqlite3.Row
     sql = "SELECT * FROM materials WHERE 1=1"
@@ -187,10 +187,25 @@ def search(q="", kind="", tag=""):
     if not qt:
         return rows
 
-    scored = [( _score(qt, m), m) for m in rows]
+    scored = [(_score(qt, m), m) for m in rows]
     scored = [(s, m) for s, m in scored if s > 0]
     scored.sort(key=lambda x: x[0], reverse=True)
     return [m for _, m in scored]
+
+
+def search(q="", kind="", tag="", limit=None, offset=0):
+    """检索:自然语言问句 → 字段加权语义近似打分排序,支持分页。
+    limit=None 表示不分页;offset 在排序之后生效(全局偏移,非页内)。"""
+    rows = query_materials(q, kind, tag)
+    if offset > 0 or limit is not None:
+        end = None if limit is None else offset + limit
+        rows = rows[offset:end]
+    return rows
+
+
+def count_materials(q="", kind="", tag=""):
+    """当前筛选条件下的命中总数(配合分页使用)。"""
+    return len(query_materials(q, kind, tag))
 
 
 def distinct_tags():
