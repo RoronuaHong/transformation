@@ -312,6 +312,48 @@ def embed_ready():
     return embed_probe()["ok"]
 
 
+def _ollama_exe():
+    """定位 ollama 可执行文件:环境变量 → PATH → Windows 默认安装位。没有则 None。"""
+    import shutil
+    env = os.environ.get("VITUAL_OLLAMA", "").strip()
+    if env and os.path.isfile(env):
+        return env
+    got = shutil.which("ollama")
+    if got:
+        return got
+    if os.name == "nt":
+        cand = os.path.expandvars(r"%LOCALAPPDATA%\Programs\Ollama\ollama.exe")
+        if os.path.isfile(cand):
+            return cand
+        return None
+    p = os.path.expanduser("~/.local/bin/ollama")
+    return p if os.path.isfile(p) else None
+
+
+def ensure_ollama(timeout=15):
+    """语义检索依赖本地 ollama;服务没起时尽力自动拉起(实测:重启电脑后模型服务
+    不会自己回来,语义检索会静默降级成词法)。成功/本就在线 → ok=True;
+    失败不抛错,检索层会自动回退词法,面板状态栏会如实显示「未启用」。"""
+    if embed_probe(refresh=True)["ok"]:
+        return embed_probe()
+    exe = _ollama_exe()
+    if not exe:
+        return embed_probe()
+    flags = 0x08000000 if os.name == "nt" else 0          # CREATE_NO_WINDOW
+    try:
+        subprocess.Popen([exe, "serve"], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, creationflags=flags)
+    except OSError:
+        return embed_probe()
+    import time as _t
+    deadline = _t.time() + timeout
+    while _t.time() < deadline:
+        _t.sleep(0.5)
+        if embed_probe(refresh=True)["ok"]:
+            break
+    return embed_probe()
+
+
 def embed_texts(texts, model=None):
     """批量取 embedding。失败返回 None(调用方回退词法检索)。
     优先 /api/embed(批量),不支持则退回 /api/embeddings(逐条)。"""

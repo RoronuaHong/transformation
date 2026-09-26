@@ -18,6 +18,7 @@ from core import (
     distinct_tags, make_thumb, thumb_path, thumbs_status, purge_thumbs,
     missing_thumbnail_ids, thumb_failure_reason, health, broken_externals,
     prune_broken_externals, external_stats, build_embeddings, embed_status,
+    ensure_ollama,
 )
 
 PORT = 8000
@@ -352,6 +353,12 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    st = ensure_ollama()          # 语义检索依赖;没起就自动拉起,失败回退词法
+    if st["ok"]:
+        print(f"ollama ready -> {st['model']}")
+    else:
+        print("ollama unavailable -> semantic search falls back to lexical"
+              + (f" ({st['err']})" if st.get("err") else ""))
     init_hub()
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"Materials Hub running -> http://localhost:{PORT}")
