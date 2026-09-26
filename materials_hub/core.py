@@ -622,16 +622,26 @@ QUERY_SYNONYMS = {
     "已修复": ["fixed"],
 }
 
+# 「泛化词」:命中面太宽,只在查询里没有更具体概念时才展开。
+# 实测边界:只收**媒体类型词**(video/mp4/png/jpg/audio…会匹配几百个文件名,
+# 纯稀释);而 对比→cmp/compare、结果→out/final 是**答案型词**(compare10s/final_*
+# 正是用户要的),降权它们反而把最佳答案挤出前排(渲染结果对比实测回归),保持强展开。
+_WEAK_SYNONYMS = {"视频", "图片", "音频", "音轨", "状态"}
+
 
 def expand_query(q):
     """中文问句 → 追加语料里的英文对应词汇(纯英文查询原样返回)。
-    只做「加词」不做「改词」,原有命中只会更靠前,不会消失。"""
+    只做「加词」不做「改词」,原有命中只会更靠前,不会消失。
+
+    泛化词(_WEAK_SYNONYMS,如 对比/视频/图片)只在查询里**没有更具体概念**时才展开:
+    「显卡对比」→ 只加 gpu;单独问「视频」→ 仍展开 video/mp4。"""
     if not q:
         return q
-    extra = []
+    strong, weak = [], []
     for zh, ens in QUERY_SYNONYMS.items():
         if zh in q:
-            extra.extend(ens)
+            (weak if zh in _WEAK_SYNONYMS else strong).extend(ens)
+    extra = strong or weak
     if not extra:
         return q
     seen, add = set(), []
