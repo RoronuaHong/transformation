@@ -600,6 +600,26 @@ QUERY_SYNONYMS = {
     "调试": ["debug", "probe"],
     "画质": ["quality"],
     "结果": ["out", "final"],
+    # ↓ 2026-09-26 按语料高频 token 挖掘补充(数据驱动,只收语料里真实存在的词)
+    "b站": ["bilibili"],
+    "裁剪": ["crop"],
+    "裁切": ["crop"],
+    "帧": ["frames", "frame"],
+    "抽帧": ["frames", "frame"],
+    "预览": ["preview"],
+    "总结": ["summary", "notes"],
+    "摘要": ["summary"],
+    "快速": ["fast"],
+    "填充": ["fill"],
+    "显卡": ["gpu"],
+    "缺失": ["miss"],
+    "丢失": ["miss"],
+    "热门": ["hot"],
+    "质检": ["qa"],
+    "状态": ["status"],
+    "元数据": ["meta"],
+    "保留": ["keep"],
+    "已修复": ["fixed"],
 }
 
 
