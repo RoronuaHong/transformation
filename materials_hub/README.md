@@ -367,3 +367,19 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 - **检索结果变了?** 若新增了大量素材,记得 `python cli.py embed`(或面板按钮 / `bridge --embed`)刷新语义索引;未建向量的条目仍走词法,不会丢。
 - **视频封面是怎么来的?** 服务端用自动发现的 ffmpeg 抽第 1 秒的帧,存 `index/thumbs/<id>.jpg` 复用;本机确实没有 ffmpeg 时,前端用 `<video> + canvas` 截帧兜底。两种模式都只对进入视口的卡片生效。
 - **为什么有几个视频显示「封面不可用」?** 那些源文件本身损坏(典型报错 `moov atom not found`,多为上游写入中断的 mp4)。抽帧失败会留 `.fail` 标记不再重试;**源文件修好后**用 `POST /api/thumbs {"purge":true}` 清标记再生成即可。
+
+
+## MCP 接入(阶段二,零依赖 stdio server)
+
+`mcp_server.py` 让 AI 助手(Claude Desktop / CodeBuddy 等)通过 MCP 直接检索素材库。
+
+注册(配置文件里加):
+```json
+{"mcpServers": {"materials-hub": {
+  "command": "python",
+  "args": ["d:/MineWeb/2026/Vitual/materials_hub/mcp_server.py"]}}}
+```
+
+工具:`search_materials(q,kind?,tag?,mode?,limit?)` 中文自然语言检索 /
+`get_material(id)` / `list_tags(limit?)` / `hub_stats()`。
+启动时会顺手自动拉起 ollama(失败不影响词法检索)。日志走 stderr,协议走 stdout。
