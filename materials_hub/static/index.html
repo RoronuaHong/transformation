@@ -151,7 +151,8 @@ async function load(){
     (ex.broken
       ? `外部引用 ${ex.external} 条,<span id="brokenLink" style="cursor:pointer;color:var(--dup)">失效 ${ex.broken}</span>`
       : `外部引用 ${ex.external||0} 条,引用完整`) +
-    ` · 语义 <span id="embedInfo"></span>`;
+    ` · 语义 <span id="embedInfo"></span> · 健康 <span id="healthInfo"></span>`;
+  const hl=$("#healthInfo"); if(hl) hl.onclick=openHealth;
   const dl=$("#dupLink"); if(dl) dl.onclick=openDupes;
   const bl=$("#brokenLink"); if(bl) bl.onclick=openBroken;
   const grid=$("#grid"); grid.innerHTML="";
@@ -313,6 +314,17 @@ async function refreshThumbInfo(){          // 同时刷新封面与语义索引
   }
   const ebtn=$("#embed"); if(ebtn) ebtn.disabled = !e.available || !!ej.running;
 
+  // 健康检查(/api/health):服务整体状态,UI 之前未消费该端点
+  try{
+    const h = await api("/api/health");
+    const he=$("#healthInfo");
+    if(he){
+      he.style.cursor="pointer";
+      if(h.ok){ he.textContent="OK"; he.style.color="var(--acc)"; }
+      else { he.textContent="告警(失效 "+h.external.broken+")"; he.style.color="var(--dup)"; }
+    }
+  }catch(e){}
+
   if(j.running){ thumbJobActive=true; setTimeout(refreshThumbInfo,2000); }
   else if(thumbJobActive){ thumbJobActive=false; load(); }
   if(ej.running){
@@ -403,6 +415,7 @@ async function openBroken(){
   $("#brokenModal").classList.add("show");
 }
 $("#brokenClose").onclick=()=>$("#brokenModal").classList.remove("show");
+async function openHealth(){const h=await api("/api/health");alert(JSON.stringify(h,null,2));}
 $("#brokenPrune").onclick=async()=>{
   const r = await api("/api/prune",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
   alert(`已清理 ${r.pruned} 条失效索引(磁盘文件未动)。原文件恢复后可重跑 bridge 重新登记。`);
