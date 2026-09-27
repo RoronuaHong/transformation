@@ -12,6 +12,12 @@
   python cli.py embed               增量构建语义检索索引(本地 ollama embedding)
   python cli.py embed --force       全量重建
   python cli.py embed --status      只看语义索引状态
+  python cli.py autotag             用本地 LLM 为素材自动补描述/标签(需 ollama chat 模型)
+  python cli.py autotag --limit 10  只处理前 10 条
+  python cli.py autotag --dry       只输出模型建议,不写库
+  python cli.py autotag --rule      离线规则打标:确定性关键词提取标签(预览,不写库)
+  python cli.py autotag --rule --apply  写库(仅追加标签、为空时补中文描述,非破坏式)
+  python cli.py autotag --rule --undo   回滚规则打标写入的标签(保留 bridge 的 bilibili)
 """
 import sys
 import os
@@ -20,6 +26,7 @@ from core import (
     all_materials, duplicates, make_thumb, missing_thumbnail_ids,
     thumbs_status, purge_thumbs, get_material,
     build_embeddings, embed_status, embed_probe, expand_query,
+    auto_tag_all, chat_models, rule_tag_all, rule_tag_cleanup,
 )
 
 
@@ -113,6 +120,42 @@ def main():
                              limit=int(args[args.index("--limit") + 1]) if "--limit" in args else 0)
         print("embed done: %s | %.1fs" % (r, __import__("time").time() - t0))
         print("embed status:", embed_status())
+
+    elif cmd == "autotag":
+        if "--rule" in args:
+            if "--undo" in args:
+                n = rule_tag_cleanup()
+                print(f"rule-tag UNDONE: removed {n} rule-added tags "
+                      f"(bridge 的 bilibili 等保留)")
+                return
+            dry = "--apply" not in args
+            limit = int(args[args.index("--limit") + 1]) if "--limit" in args else 0
+            res = rule_tag_all(limit=limit, dry=dry)
+            changed = [x for x in res if (x.get("added_tags") or (dry and x.get("added")))]
+            print(f"rule-tag {'PREVIEW(dry)' if dry else 'APPLIED'}: "
+                  f"{len(res)} scanned, {len(changed)} with new tags")
+            for x in changed[:25]:
+                print(f"  {x['id']}  +{(x.get('added_tags') or x.get('added'))}  | {x.get('desc')}")
+            if dry:
+                print("  (加 --apply 写库;如已应用可用 --undo 回滚)")
+            return
+        if not chat_models():
+            print("自动打标(LLM)不可用:未发现本地 chat 模型。")
+            print("  提示: `ollama pull <一个 chat 模型, 如 qwen2.5:7b>`;或先用离线规则打标:")
+            print("        python cli.py autotag --rule        # 预览")
+            print("        python cli.py autotag --rule --apply # 写库(仅追加标签/补空描述)")
+            return
+        dry = "--dry" in args
+        limit = int(args[args.index("--limit") + 1]) if "--limit" in args else 0
+        res = auto_tag_all(limit=limit, dry=dry)
+        ok = sum(1 for x in res if x["status"] in ("ok", "dry"))
+        skip = sum(1 for x in res if x["status"] == "skipped")
+        err = sum(1 for x in res if x["status"] in ("error", "parse_error"))
+        print(f"autotag done: {ok} processed, {skip} skipped, {err} failed"
+              f"{' (dry-run, 未写库)' if dry else ''}")
+        for x in res[:25]:
+            extra = x.get("desc") or x.get("reason") or ""
+            print(f"  {x['id']}  {x['status']}  {extra}")
 
     else:
         print(__doc__)

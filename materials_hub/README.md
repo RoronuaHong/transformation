@@ -151,6 +151,7 @@ python cli.py embed                # 增量构建语义检索索引
 python cli.py embed --force        # 全量重建;--status 只看状态
 python cli.py search --file q.txt  # 中文查询建议走文件(Windows 终端 GBK 代码页会弄坏命令行中文)
 python cli.py search --stdin       # 或从标准输入读查询
+python eval_search.py --baseline  # 检索质量评估(中文查询 P@5/R@20,带 lexical↔auto 对比,回归门禁)
 ```
 
 ## 联动 subtitle_pipeline(快速上手)
@@ -341,11 +342,31 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 
 ## 已知限制与路线图
 **已知限制**
-- **本地单用户**:服务监听 `0.0.0.0:8000` 但无认证/权限;仅本机或可信局域网使用,勿直接暴露公网。
+- **本地单用户(现已可鉴权)**:服务默认只听 `127.0.0.1`;设 `VITUAL_HUB_TOKEN` 后开启令牌鉴权,可安全跨机(见下方「安全与网络暴露」)。
 - **无版本管理**:素材更新会覆盖索引记录,不保留历史版本。
 - **语义检索依赖本地 ollama**:没有 embedding 模型时自动退回纯词法;当前可用模型是英文单语的,中文靠同义词表兜(见[语义检索](#语义检索本地-embedding))。
 - **封面依赖 ffmpeg**:本机找不到 ffmpeg 时自动降级为浏览器截帧(可用但较慢);源文件损坏(如上游写入中断的 mp4)抽不出封面,只会标记不重试。
 - **封面缓存不入库**:`index/thumbs/` 是派生数据,删除无副作用(重跑生成即可)。
+
+## 安全与网络暴露(上线前必读)
+
+素材中心默认**只听本机 `127.0.0.1`**,未设口令时等同于本地开放(适合本机/可信局域网)。
+一旦要离开可信环境,必须同时做两件事:
+
+1. **设口令**:环境变量 `VITUAL_HUB_TOKEN=<口令>`。设完后,Web 面板与所有 `/api/*` 请求都需带令牌
+   (浏览器访问 `http://localhost:8000/?token=<口令>`;API 用 `Authorization: Bearer <口令>` 头),否则返回 401。
+   MCP 端则需在客户端配置里传一致的 `--token`。
+2. **换监听地址**:默认 `127.0.0.1`;仅当确需跨机访问时才设 `VITUAL_HUB_HOST=0.0.0.0`,且**务必先设 token**。
+
+**外部引用防越权读取**:`ingest_external` 登记时,以及 `/api/file` 读取前,都会校验 `external_path`
+落在允许根内(默认=素材中心所在工作区,即 `materials_hub` 的上一级;跨工作区素材用 `VITUAL_HUB_EXT_ROOTS`
+追加,分号分隔)。越界路径一律拒绝(`rejected` / 403),即使索引库被写坏也读不到工作区外的任何文件。
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `VITUAL_HUB_TOKEN` | 空 | 设了即开启令牌鉴权(Web + API + MCP 共用) |
+| `VITUAL_HUB_HOST` | `127.0.0.1` | 监听地址;跨机才改 `0.0.0.0`(且仅配合 token) |
+| `VITUAL_HUB_EXT_ROOTS` | 工作区根 | 允许登记/读取外部引用的额外根目录(分号分隔) |
 
 **后续可扩展**
 - **多语 embedding / 图片语义**:换成 `bge-m3` 等多语模型可显著改善中文语义;再用 CLIP 类模型可支持"按画面内容搜图"(当前语义只覆盖元数据文本)。
@@ -363,7 +384,7 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 - **怎么判断索引指向的文件都还在?** `GET /api/health` 的 `ok` 字段即答案(或看状态栏是否显示「引用完整」)。
 - **能用自然语言搜吗?** 能。默认走「词法(同义词+松匹配)+ 语义」混合排序,问句不必含连续子串;精确过滤用 `type:` / `job:` / `lang:` 标签。
 - **语义检索要不要额外装东西?** 不用装 Python 包。只要本机 ollama 里有 embedding 模型(`ollama pull nomic-embed-text`)即可,全离线;没有就自动退回词法。
-- **为什么中文查询要靠同义词表?** 因为手边能离线拿到的 embedding 模型(nomic-embed-text)是英文单语的,而本库元数据也是英文;词表把中文意图映射到语料词汇,实测把中文查询 P@5 从 0.00 拉到 0.44,再叠加语义到 0.71。
+- **为什么中文查询要靠同义词表?** 因为手边能离线拿到的 embedding 模型(nomic-embed-text)是英文单语的,而本库元数据也是英文;词表把中文意图映射到语料词汇,实测把中文查询 P@5 从 0.00 拉到 0.44,再叠加语义到 0.71;后经同义词补齐 + 中文 bigram 降权,纯词法 P@5 已到 **~0.96**(`python eval_search.py` 可复测)。注意:英文单语模型下语义检索的边际增益已转负,换 `bge-m3` 等多语模型(`VITUAL_EMBED_MODEL` 已支持离线切换)才能重新转正。
 - **检索结果变了?** 若新增了大量素材,记得 `python cli.py embed`(或面板按钮 / `bridge --embed`)刷新语义索引;未建向量的条目仍走词法,不会丢。
 - **视频封面是怎么来的?** 服务端用自动发现的 ffmpeg 抽第 1 秒的帧,存 `index/thumbs/<id>.jpg` 复用;本机确实没有 ffmpeg 时,前端用 `<video> + canvas` 截帧兜底。两种模式都只对进入视口的卡片生效。
 - **为什么有几个视频显示「封面不可用」?** 那些源文件本身损坏(典型报错 `moov atom not found`,多为上游写入中断的 mp4)。抽帧失败会留 `.fail` 标记不再重试;**源文件修好后**用 `POST /api/thumbs {"purge":true}` 清标记再生成即可。
@@ -377,8 +398,10 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 ```json
 {"mcpServers": {"materials-hub": {
   "command": "python",
-  "args": ["d:/MineWeb/2026/Vitual/materials_hub/mcp_server.py"]}}}
+  "args": ["d:/MineWeb/2026/Vitual/materials_hub/mcp_server.py", "--token", "<TOKEN>"],
+  "env": {"VITUAL_HUB_TOKEN": "<TOKEN>"}}}}
 ```
+> **鉴权**:一旦设了 `VITUAL_HUB_TOKEN`,MCP 客户端必须在 `--token` 里传一致的令牌,否则 server 启动即拒绝(`sys.exit(2)`)——防止本机任意进程无鉴权调起素材中心 Agent 接口。
 
 工具:`search_materials(q,kind?,tag?,mode?,limit?)` 中文自然语言检索 /
 `get_material(id)` / `list_tags(limit?)` / `hub_stats()`。

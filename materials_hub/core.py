@@ -22,6 +22,32 @@ INDEX_DB = os.path.join(INDEX_DIR, "hub.db")
 STATIC = os.path.join(HUB, "static")
 THUMBS = os.path.join(INDEX_DIR, "thumbs")  # 视频封面缓存(派生数据,可随时删)
 
+# 外部引用允许的根目录(防路径穿越/越权读取)。素材中心与 subtitle_pipeline 同处一个工作区,
+# 默认只允许登记/读取该工作区内的文件;跨工作区的素材可用 VITUAL_HUB_EXT_ROOTS 追加(分号分隔,绝对路径)。
+def _load_ext_roots():
+    root = os.path.dirname(HUB)                      # 工作区根(素材中心的上一级目录)
+    roots = [os.path.realpath(root)]
+    extra = os.environ.get("VITUAL_HUB_EXT_ROOTS", "")
+    for r in extra.split(";"):
+        r = r.strip()
+        if r:
+            roots.append(os.path.realpath(r))
+    return roots
+
+EXT_ROOTS = _load_ext_roots()
+
+
+def external_path_allowed(p):
+    """外部引用路径白名单:realpath 后必须落在某个允许根内,否则视为越权。
+
+    用途:① `ingest_external` 登记时拒绝工作区外的文件;
+    ② `/api/file` 读取前再校验一次,即使索引库被写坏,也读不到工作区外的任何文件。"""
+    try:
+        p = os.path.realpath(p)
+    except OSError:
+        return False
+    return any(p == r or p.startswith(r + os.sep) for r in EXT_ROOTS)
+
 # 按扩展名分类。audio 单独成类便于检索。
 KINDS = {
     "images": {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".tif", ".tiff", ".ico", ".heic"},
@@ -138,6 +164,17 @@ def get_material(mid):
     return dict(r) if r else None
 
 
+def _update_material(mid, **fields):
+    """就地更新素材字段(描述/标签等),按 id 定位。"""
+    if not fields:
+        return
+    con = _con()
+    cols = ", ".join(f"{k}=?" for k in fields)
+    con.execute(f"UPDATE materials SET {cols} WHERE id=?", list(fields.values()) + [mid])
+    con.commit()
+    con.close()
+
+
 def all_materials():
     con = _con()
     con.row_factory = sqlite3.Row
@@ -175,8 +212,20 @@ def _path_tokens(p):
     return _tokens(" ".join(parts[-3:]))
 
 
+def _tok_w(t):
+    """token 类型权重:英文/数字意图词全权;中文 bigram 噪声大降权;中文单字更弱。
+    必要性:本库元数据是英文,中文问句真正起作用的是同义词表扩出的英文词;
+    而中文描述(如 bilibili 视频标题)与查询中文 bigram 任意重叠会造成大量误召回、
+    把真正命中的英文素材挤下前排。降权中文后,英文意图词重新主导排序。"""
+    if t[:2] == "b:":
+        return 0.5
+    if t[:2] == "c:":
+        return 0.3
+    return 1.0
+
+
 def _score(q_tokens, m):
-    """加权近似打分:query token 与素材各字段 token 重叠累计。
+    """加权近似打分:query token 与素材各字段 token 重叠累计(按类型加权,见 _tok_w)。
 
     含一层**松匹配**:英文/数字 token 长度 ≥5 时,互为子串也算命中(权重 0.6)。
     实测必要性:数据里是 `demosaic`,查 `mosaic` 时严格分词匹配不上;
@@ -186,16 +235,16 @@ def _score(q_tokens, m):
         dt = _path_tokens(m.get(field, "")) if field == "rel_path" else _tokens(m.get(field, ""))
         ov = q_tokens & dt
         if ov:
-            sc += w * len(ov)
+            sc += w * sum(_tok_w(t) for t in ov)
             continue
-        loose = 0
+        loose = 0.0
         for qt in q_tokens:
             if len(qt) < 5 or qt[:2] in ("c:", "b:"):
                 continue
             if any(qt in d for d in dt):
-                loose += 1
+                loose += _tok_w(qt) * 0.6
         if loose:
-            sc += w * 0.6 * loose
+            sc += w * loose
     return sc
 
 
@@ -303,6 +352,12 @@ def embed_probe(refresh=False):
             cands = [hit] + [c for c in cands if c != hit]
         else:
             cands = [want] + cands
+    elif cands:
+        # 未显式指定时,优先多语模型(bge-m3 对本库中文查询更友好),
+        # 否则退回 nomic 等英文单语模型。语义在此库只作"词法未命中时的召回兜底"。
+        pref = [c for c in cands if c.split(":")[0] == "bge-m3"]
+        if pref:
+            cands = pref + [c for c in cands if c not in pref]
     if cands:
         _EMBED_CACHE.update(ok=True, model=cands[0])
     return _EMBED_CACHE
@@ -352,6 +407,210 @@ def ensure_ollama(timeout=15):
         if embed_probe(refresh=True)["ok"]:
             break
     return embed_probe()
+
+
+# ---------- 自动打标(本地 LLM,零外部依赖) ----------
+def chat_models():
+    """列出 ollama 中具备「生成」能力的模型(排除仅 embedding 的)。无则空列表。
+
+    用途:自动打标走本地 LLM 生成描述/标签;离线、无 API key。没有 chat 模型时
+    调用方应优雅跳过(见 auto_tag_material 的 skipped 状态),不抛错、不阻断检索。"""
+    try:
+        tags = _http_json(_embed_url() + "/api/tags", timeout=8)
+    except Exception:
+        return []
+    out = []
+    for m in tags.get("models", []):
+        caps = m.get("capabilities") or []
+        if "embedding" in caps:          # 只做向量的模型不能生成文本
+            continue
+        out.append(m["name"])
+    return out
+
+
+def _safe_json(s):
+    """尽力从模型输出里解析出第一个 JSON 对象(去 ```围栏/控制符/尾逗号)。"""
+    if not s:
+        return None
+    s = s.strip()
+    if s.startswith("```"):
+        s = re.sub(r"^```[a-zA-Z]*\n?", "", s)
+        s = re.sub(r"\n?```$", "", s).strip()
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+    m = re.search(r"\{.*\}", s, re.S)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            return None
+    return None
+
+
+def _build_tag_prompt(m):
+    p = m.get("external_path") or m.get("rel_path") or ""
+    dirs = [d for d in os.path.dirname(p).replace("\\", "/").split("/") if d][-3:]
+    return (
+        "你是多媒体素材库的管理员。请为一则素材提炼元数据。\n"
+        f"文件名: {m.get('name', '')}\n"
+        f"类型: {m.get('kind', '')}\n"
+        f"已有标签: {m.get('tags', '')}\n"
+        f"所在目录: {' / '.join(dirs)}\n"
+        f"已有描述: {(m.get('description') or '').strip()}\n\n"
+        "用一行 JSON 回复(不要解释、不要 markdown 围栏):\n"
+        '{"desc": "<中文短描述,≤40字,说明这是什么/用于什么>", '
+        '"tags": ["<英文小写标签1>", ...最多8个]}\n'
+        "标签只用素材库已有的英文词(dehardsub/deblur/codeformer/segment/bilibili/"
+        "subs/out/fixed...),不要造中文标签,也不要重复已有标签。")
+
+
+def auto_tag_material(m, dry=False, model=None, models=None):
+    """用本地 LLM 为单条素材生成描述+英文标签。
+
+    返回 dict: status ∈ ok|dry|skipped|error|parse_error。
+    - 无 chat 模型 → skipped(不调网络、不抛错)
+    - dry=True 只返回模型建议,不写库
+    - 写库策略:描述仅在原文为空或过短(<20字)时覆盖;标签追加去重,
+      保留 sp|/type: 等既有溯源标签不动。"""
+    if models is None:
+        models = chat_models()
+    if not models:
+        return {"id": m["id"], "status": "skipped", "reason": "no_chat_model"}
+    model = model or models[0]
+    try:
+        r = _http_json(_embed_url() + "/api/generate", timeout=90,
+                       payload={"model": model, "prompt": _build_tag_prompt(m),
+                                "format": "json", "stream": False})
+    except Exception as e:
+        return {"id": m["id"], "status": "error", "reason": f"{type(e).__name__}: {e}"}
+    data = _safe_json((r.get("response") or "").strip())
+    if not data:
+        return {"id": m["id"], "status": "parse_error", "raw": (r.get("response") or "")[:200]}
+    desc = (data.get("desc") or "").strip()
+    tags = [str(t).strip().lower() for t in (data.get("tags") or []) if str(t).strip()]
+    if dry:
+        return {"id": m["id"], "status": "dry", "desc": desc, "tags": tags}
+    cur = get_material(m["id"])
+    cur_desc = (cur.get("description") or "").strip()
+    new_desc = desc if (not cur_desc or len(cur_desc) < 20) else cur_desc
+    cur_tags = [t.strip() for t in (cur.get("tags") or "").split(",") if t.strip()]
+    added = []
+    for t in tags:
+        if t not in cur_tags:
+            cur_tags.append(t)
+            added.append(t)
+    _update_material(m["id"], description=new_desc, tags=",".join(cur_tags))
+    return {"id": m["id"], "status": "ok", "desc": new_desc, "added_tags": added}
+
+
+def auto_tag_all(limit=0, dry=False, model=None):
+    """批量为全部素材打标。没有 chat 模型时整批 skipped(秒回,不调网络)。"""
+    models = chat_models()
+    ms = all_materials()
+    if limit:
+        ms = ms[:limit]
+    return [auto_tag_material(m, dry=dry, model=model, models=models) for m in ms]
+
+
+# ---------- 规则打标(离线、确定性、零模型) ----------
+# 关键词 → 英文标签。只加「有区分度、type: 未覆盖」的语义标签;
+# 不复制 type:render/media/test/notes 等(会沦为词法打分噪声,见 2026-09-27 回归复盘),
+# 且 subs 只用真实字幕扩展名(srt/ass/vtt/subs),不用 subtitle/caption(会命中 pipeline 目录名)。
+_RULE_TAGS = [
+    (("dehardsub", "hardsub"), "dehardsub"),
+    (("deblur", "clean", "sharpen"), "deblur"),
+    (("segment", "clip", "cut", "slice"), "segment"),
+    (("srt", "ass", "vtt", "subs"), "subs"),
+    (("cmp", "compare", "对比"), "cmp"),
+    (("codeformer", "gfpgan", "face", "restore", "fixed", "修复"), "facefix"),
+    (("benchmark", "bench", "基准"), "benchmark"),
+    (("bilibili", "b站"), "bilibili"),
+    (("combine", "merge", "合成", "合并"), "combine"),
+    (("watermark", "logo", "水印", "台标"), "watermark"),
+    (("out", "final", "成品", "修好"), "out"),
+]
+
+# 主标签 → 中文短描述模板(描述为空时填充)。
+_RULE_DESC = {
+    "dehardsub": "去字幕、保留背景的素材",
+    "deblur": "画面去模糊/增强清晰的素材",
+    "segment": "按时间切出的视频片段",
+    "subs": "字幕文本(外挂字幕)文件",
+    "cmp": "渲染/处理前后对比结果",
+    "facefix": "人脸修复(超分/还原)素材",
+    "benchmark": "基准测试视频",
+    "bilibili": "B站下载的素材",
+    "combine": "合成/合并后的素材",
+    "watermark": "含水印/台标的素材",
+    "render": "渲染结果",
+    "out": "处理完成的成品",
+    "probe": "抽帧预览图",
+    "test": "测试用素材",
+    "media": "媒体素材",
+    "notes": "笔记/说明文档",
+}
+
+
+def _rule_scan(m):
+    # 只扫素材自身属性(name/tags/description/kind) + 路径 basename,
+    # 不扫整条目录树——否则 subtitle_pipeline/mode-renders/outputs 等通用文件夹名
+    # 会被 subs/out/media 等关键词误命中,造成全员误标。type: 已表达的 render/media 不重复加。
+    parts = [str(m.get(k, "")) for k in ("name", "tags", "description", "kind")]
+    p = m.get("external_path") or m.get("rel_path") or ""
+    if p:
+        parts.append(os.path.basename(p))
+    text = " ".join(parts).lower()
+    return [tag for keys, tag in _RULE_TAGS if any(k in text for k in keys)]
+
+
+def rule_tag_material(m, dry=False):
+    """离线、确定性的规则打标:从文件名/路径/标签/描述抽英文标签 + 生成中文短描述。
+    不依赖任何模型;保留既有标签、仅追加新识别项,描述仅在为空时填充(非破坏式)。"""
+    cur = get_material(m["id"])
+    cur_tags = [t.strip() for t in (cur.get("tags") or "").split(",") if t.strip()]
+    found = _rule_scan(m)
+    added = [t for t in found if t not in cur_tags]
+    new_tags = cur_tags + added
+    cur_desc = (cur.get("description") or "").strip()
+    if cur_desc:
+        new_desc = cur_desc
+    else:
+        new_desc = _RULE_DESC.get(found[0], "媒体素材") if found else "媒体素材"
+    if dry:
+        return {"id": m["id"], "status": "dry", "tags": new_tags, "added": added, "desc": new_desc}
+    _update_material(m["id"], description=new_desc, tags=",".join(new_tags))
+    return {"id": m["id"], "status": "ok", "added_tags": added, "desc": new_desc}
+
+
+def rule_tag_all(limit=0, dry=False):
+    """批量规则打标。非破坏式:只追加标签、仅在描述为空时填充。"""
+    ms = all_materials()
+    if limit:
+        ms = ms[:limit]
+    return [rule_tag_material(m, dry=dry) for m in ms]
+
+
+# 规则打标曾写入的全部标签(含早期较宽的 test/media/render/probe/notes);
+# 回滚时剥离这些,但保留 bridge 合法写入的 bilibili 等。
+_RULE_ADDED_TAGS = {"dehardsub", "deblur", "segment", "subs", "cmp", "facefix",
+                    "benchmark", "bilibili", "combine", "watermark", "out",
+                    "test", "media", "render", "probe", "notes"}
+
+
+def rule_tag_cleanup():
+    """回滚规则打标:剥离本模块写入的标签(保留 bridge 合法写入的 bilibili 等)。
+    非破坏式,不改描述。返回移除的标签总数。"""
+    removed = 0
+    for m in all_materials():
+        cur = get_material(m["id"])
+        tags = [t.strip() for t in (cur.get("tags") or "").split(",") if t.strip()]
+        new = [t for t in tags if t not in _RULE_ADDED_TAGS or t == "bilibili"]
+        if len(new) != len(tags):
+            _update_material(m["id"], tags=",".join(new))
+            removed += len(tags) - len(new)
+    return removed
 
 
 def embed_texts(texts, model=None):
@@ -543,7 +802,7 @@ def semantic_rank(q, base_rows, lexical_rows=None):
     K = int(os.environ.get("VITUAL_RRF_K", "60"))        # RRF 常数
     # 词法权重 >1 的含义:**精确关键词命中永远排在纯语义发现之前**,
     # 语义只负责"词法完全没命中时"的召回(实测该策略兼顾精度与召回)。
-    wl = float(os.environ.get("VITUAL_HYBRID_WLEX", "1.0"))
+    wl = float(os.environ.get("VITUAL_HYBRID_WLEX", "20"))
 
     def fused(m):
         mid = m["id"]
@@ -581,7 +840,7 @@ QUERY_SYNONYMS = {
     "锐化": ["deblur", "sharpen"],
     "马赛克": ["mosaic"],
     "人脸": ["face", "codeformer", "gfpgan"],
-    "修复": ["restore", "codeformer", "fix"],
+    "修复": ["restore", "codeformer", "fix", "fixed"],
     "增强": ["enhance", "upscale", "esrgan"],
     "对比": ["cmp", "compare", "comparison"],
     "渲染": ["render"],
@@ -620,6 +879,21 @@ QUERY_SYNONYMS = {
     "元数据": ["meta"],
     "保留": ["keep"],
     "已修复": ["fixed"],
+    # ↓ 日常口语补充(数据驱动:对齐语料真实 token out/fixed/final/segment/combine…)
+    "修好": ["fixed", "repaired", "out"],
+    "成品": ["out", "final", "result"],
+    "切": ["cut", "split", "clip", "segment"],
+    "时间段": ["segment", "clip", "time"],
+    "剪辑": ["edit", "cut", "clip"],
+    "切片": ["segment", "clip", "slice"],
+    "合成": ["combine", "combined"],
+    "合并": ["merge", "combine"],
+    "水印": ["watermark", "logo"],
+    "台标": ["logo", "watermark"],
+    "效果": ["result", "out", "cmp"],
+    "对比图": ["cmp", "compare"],
+    "画面": ["frame", "scene"],
+    "背景": ["background", "bg"],
 }
 
 # 「泛化词」:命中面太宽,只在查询里没有更具体概念时才展开。
@@ -771,6 +1045,10 @@ def ingest_external(src, source="", tags="", description="", kind=None):
     视频等大文件不进 materials/ 仓库,只在索引里记 external_path,预览时按需读取,
     避免重复占盘。按 sha256 去重。"""
     src = os.path.abspath(src)
+    if not external_path_allowed(src):
+        return {"status": "rejected",
+                "reason": "external_path outside allowed roots "
+                          "(set VITUAL_HUB_EXT_ROOTS to widen)"}
     if not os.path.exists(src) or os.path.isdir(src):
         return None
     sha = compute_sha256(src)

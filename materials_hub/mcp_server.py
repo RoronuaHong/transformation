@@ -4,7 +4,9 @@
 注册示例(claude_desktop_config.json / CodeBuddy MCP 配置):
   {"mcpServers": {"materials-hub": {
       "command": "python",
-      "args": ["d:/MineWeb/2026/Vitual/materials_hub/mcp_server.py"]}}}
+      "args": ["d:/MineWeb/2026/Vitual/materials_hub/mcp_server.py", "--token", "<TOKEN>"],
+      "env": {"VITUAL_HUB_TOKEN": "<TOKEN>"}}}}
+  # 未设 VITUAL_HUB_TOKEN 时不需要 --token(本机开放);一旦设了 token,MCP 客户端必须传一致的 --token 才能启动。
 
 协议:MCP stdio 传输 = 按行分隔的 JSON-RPC 2.0(每行一条,行内不得有换行)。
 stdout 只走协议;日志一律 stderr。语义后端(ollama)没起会顺手自动拉起。
@@ -12,6 +14,21 @@ stdout 只走协议;日志一律 stderr。语义后端(ollama)没起会顺手自
 import sys, os, json
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import core
+
+# 鉴权(与 HTTP server 共用 VITUAL_HUB_TOKEN):若环境变量设了 token,MCP 客户端必须在启动参数里
+# 传一致的 --token,否则拒绝启动 —— 防止本机任何进程都能无鉴权调起素材中心 Agent 接口。
+HUB_TOKEN = os.environ.get("VITUAL_HUB_TOKEN", "").strip()
+_mcp_tok = None
+for _i, _a in enumerate(sys.argv):
+    if _a == "--token" and _i + 1 < len(sys.argv):
+        _mcp_tok = sys.argv[_i + 1]
+if HUB_TOKEN and _mcp_tok is None:
+    sys.stderr.write("[materials-hub] VITUAL_HUB_TOKEN is set but MCP client did not pass "
+                     "--token; refusing to start (add \"--token\" \"<same>\" to mcp args).\n")
+    sys.exit(2)
+if HUB_TOKEN and _mcp_tok != HUB_TOKEN:
+    sys.stderr.write("[materials-hub] MCP --token mismatch; refusing to start.\n")
+    sys.exit(2)
 
 
 def _brief(m):

@@ -18,10 +18,36 @@ from core import (
     distinct_tags, make_thumb, thumb_path, thumbs_status, purge_thumbs,
     missing_thumbnail_ids, thumb_failure_reason, health, broken_externals,
     prune_broken_externals, external_stats, build_embeddings, embed_status,
-    ensure_ollama,
+    ensure_ollama, external_path_allowed,
 )
 
 PORT = 8000
+# 鉴权(可选):设置 VITUAL_HUB_TOKEN 后,所有请求(含面板)都需带 token(Bearer 头或 ?token=),
+# 否则返回 401。未设置则保持本地开放(向后兼容)。
+HUB_TOKEN = os.environ.get("VITUAL_HUB_TOKEN", "").strip()
+# 绑定地址:默认只听本机 127.0.0.1;要跨机访问再设 VITUAL_HUB_HOST=0.0.0.0 且务必同时设 token。
+HUB_HOST = os.environ.get("VITUAL_HUB_HOST", "127.0.0.1").strip()
+
+
+def _authorized(handler):
+    if not HUB_TOKEN:
+        return True
+    auth = handler.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        if auth[len("Bearer "):].strip() == HUB_TOKEN:
+            return True
+    tok = urllib.parse.parse_qs(urllib.parse.urlparse(handler.path).query).get("token", [""])[0]
+    return tok == HUB_TOKEN
+
+
+def _safe_resolve(base, rel):
+    """防 ../ 穿越:把 base+rel 解析为真实路径,确保仍落在 base 内;否则返回 None。"""
+    base = os.path.realpath(base)
+    target = (os.path.realpath(os.path.join(base, rel))
+              if not os.path.isabs(rel) else os.path.realpath(rel))
+    if target == base or target.startswith(base + os.sep):
+        return target
+    return None
 
 # 批量生成封面的后台任务状态(抽帧耗时,放后台线程 + 前端轮询进度)
 _THUMB_JOB = {"running": False, "total": 0, "done": 0, "made": 0, "error": ""}
@@ -132,6 +158,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
+        if not _authorized(self):
+            return self._send(401, json.dumps({"error": "unauthorized"}, ensure_ascii=False).encode(),
+                              "application/json; charset=utf-8")
         u = urllib.parse.urlparse(self.path)
         p = u.path
         if p in ("/", "/index.html"):
@@ -244,10 +273,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, b"not found")
             if m.get("location") == "external":
                 fp = m["external_path"]
+                if not external_path_allowed(fp):
+                    return self._send(403, b"forbidden")
             else:
-                fp = m["rel_path"]
-                if not os.path.isabs(fp):
-                    fp = os.path.join(HUB, fp)
+                fp = _safe_resolve(HUB, m["rel_path"])
+                if not fp:
+                    return self._send(403, b"forbidden")
             if not os.path.exists(fp):
                 return self._send(404, b"missing")
             mt = mimetypes.guess_type(fp)[0]
@@ -261,6 +292,9 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, b"not found")
 
     def do_POST(self):
+        if not _authorized(self):
+            return self._send(401, json.dumps({"error": "unauthorized"}, ensure_ascii=False).encode(),
+                              "application/json; charset=utf-8")
         u = urllib.parse.urlparse(self.path)
         p = u.path
         length = int(self.headers.get("Content-Length", 0))
@@ -360,8 +394,9 @@ def main():
         print("ollama unavailable -> semantic search falls back to lexical"
               + (f" ({st['err']})" if st.get("err") else ""))
     init_hub()
-    srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"Materials Hub running -> http://localhost:{PORT}")
+    srv = ThreadingHTTPServer((HUB_HOST, PORT), Handler)
+    auth = " (token required: VITUAL_HUB_TOKEN set)" if HUB_TOKEN else " (open, no token)"
+    print(f"Materials Hub running -> http://{HUB_HOST}:{PORT}{auth}")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
