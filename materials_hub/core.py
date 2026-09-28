@@ -505,10 +505,9 @@ def _normalize_llm_tags(raw):
                     or ("\u4e00" <= ch <= "\u9fff"))
         if not s or s in seen or s in _LLM_TAG_STOP:
             continue
-        if s == "sp" or s.startswith("type:") or s.startswith("job:"):
+        # 拦掉系统溯源标签(sp / type / job: 前缀),含模型漏写冒号的 typerender 变体
+        if s == "sp" or s.startswith(("type", "job:")):
             continue
-        if s == "type" or (s.startswith("type") and not s.startswith("type:")):
-            continue  # 拦掉模型把 type:render 拼成无冒号串(typerender)的情况
         if len(s) > _LLM_TAG_MAX_LEN:
             continue
         seen.add(s)

@@ -166,3 +166,6 @@ tools/
 
 # ── Materials Hub 派生数据（索引库在库内、封面缓存与失败标记 *.jpg.fail 不在全局规则里）──
 materials_hub/index/
+# 本地素材库与回收站（运行时数据，不入库）
+materials_hub/materials/
+materials_hub/trash/
