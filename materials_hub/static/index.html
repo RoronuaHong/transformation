@@ -173,7 +173,7 @@
   <aside>
     <h3 data-i18n="typeLabel"></h3>
     <div id="kindFacets"></div>
-    <h3 data-i18n="tagsLabel"></h3>
+    <h3 data-i18n="tagsLabel" data-i18n-title="tagSys" style="cursor:help"></h3>
     <div class="tagcloud" id="tagCloud"></div>
     <button class="asidebtn" id="clearFacet" style="display:none" data-i18n="clearFilter"></button>
   </aside>
@@ -236,7 +236,7 @@ zh:{appTitle:"素材中心",searchPh:"搜索名称/标签/描述… (按 / 聚�
    copyFailT:"复制失败",uploadedT:"已上传 {n} 个文件",ingestT:"ingest/ 整理完成",scanT:"materials/ 扫描完成",
    idxT:"语义索引构建已启动",thumbT:"封面生成已启动",noEmbed:"未发现本地 embedding 模型",noFFmpeg:"本机未安装 ffmpeg,已回退浏览器截帧",
    thumbServer:"服务端抽帧(缓存 {n})",thumbClient:"浏览器截帧(本机无 ffmpeg)",thumbGen:"生成中 {d}/{t}",
-   unavailW:"不可用",buildingW:"构建中 {d}/{t}",notEnabled:"未启用(无本地 embedding 模型)",warn:"告警(失效 {n})",dropHint:"松手即可上传"},
+   unavailW:"不可用",buildingW:"构建中 {d}/{t}",notEnabled:"未启用(无本地 embedding 模型)",warn:"告警(失效 {n})",dropHint:"松手即可上传",tagSys:"标签体系:sp=来自 subtitle_pipeline;type:xx=产物类别;job:xx=所属任务;lang:xx=语言;其余为处理类型或自定义标签。悬停任意标签可见解释,点击可筛选。",tag_sp:"来自 subtitle_pipeline 处理流水线的素材",tag_type:"产物类别(type: 后缀:render=渲染产物 media=原始媒体 notes=笔记 benchmark=基准测试 subs=字幕 test=测试)",tag_job:"所属任务:冒号后是任务 ID,点击标签可筛出该任务全部产物",tag_lang:"语言标记(lang: 后为语种代码)",tag_bili:"来源平台:B 站下载",tag_proc:"处理类型标签:标记素材经历过的处理(去字幕/去模糊/切片/对比图等)",tag_custom:"自定义/历史标签:由规则或人工添加,用于检索过滤"},
 ja:{appTitle:"素材ハブ",searchPh:"名前/タグ/説明を検索…(/ でフォーカス)",modeAuto:"自動(セマンティック+キーワード)",modeLex:"キーワード一致",
    modeSem:"セマンティックのみ",sortRel:"関連度順",newest:"新しい順",oldest:"古い順",nameAZ:"名前 A→Z",sizeDesc:"サイズが大きい順",
    tools:"ツール ▾",refresh:"↻ 更新",upload:"⬆ アップロード",ingest:"ingest/ を整理",scan:"materials/ をスキャン",
@@ -254,7 +254,7 @@ ja:{appTitle:"素材ハブ",searchPh:"名前/タグ/説明を検索…(/ でフ�
    copiedT:"パスをコピーしました",copyFailT:"コピー失敗",uploadedT:"{n} 件アップロードしました",ingestT:"ingest/ 整理完了",
    scanT:"materials/ スキャン完了",idxT:"セマンティック索引の構築を開始",thumbT:"カバー生成を開始",
    noEmbed:"ローカル embedding モデルが見つかりません",noFFmpeg:"ffmpeg がないためブラウザ截帧にフォールバック",
-   thumbServer:"サーバー抽帧(キャッシュ {n})",thumbClient:"ブラウザ抽帧(ffmpeg なし)",thumbGen:"生成中 {d}/{t}",unavailW:"不可",buildingW:"構築中 {d}/{t}",notEnabled:"無効(ローカル embedding モデルなし)",warn:"警告(不通 {n})",dropHint:"放すとアップロード"},
+   thumbServer:"サーバー抽帧(キャッシュ {n})",thumbClient:"ブラウザ抽帧(ffmpeg なし)",thumbGen:"生成中 {d}/{t}",unavailW:"不可",buildingW:"構築中 {d}/{t}",notEnabled:"無効(ローカル embedding モデルなし)",warn:"警告(不通 {n})",dropHint:"放すとアップロード",tagSys:"タグ体系:sp=subtitle_pipeline 由来;type:xx=成果物種別;job:xx=所属タスク;lang:xx=言語;その他は処理種別やカスタム。ホバーで説明、クリックで絞り込み。",tag_sp:"subtitle_pipeline ワークフロー由来の素材",tag_type:"成果物種別(render=生成物 media=元メディア notes=ノート benchmark=ベンチマーク subs=字幕 test=テスト)",tag_job:"所属タスク:コロン以降はタスク ID。クリックで全成果物に絞り込み",tag_lang:"言語タグ(lang: の後ろは言語コード)",tag_bili:"ソース:ビリビリからダウンロード",tag_proc:"処理タグ:素材への処理内容(字幕除去/ブレ除去/セグメント/比較など)",tag_custom:"カスタム/履歴タグ:ルールまたは手動で追加、検索フィルタ用"},
 ko:{appTitle:"소재 허브",searchPh:"이름/태그/설명 검색…(/ 포커스)",modeAuto:"자동(시맨틱+키워드)",modeLex:"키워드 일치",
    modeSem:"시맨틱만",sortRel:"관련도순",newest:"최신순",oldest:"오래된순",nameAZ:"이름 A→Z",sizeDesc:"크기 큰순",
    tools:"도구 ▾",refresh:"↻ 새로고침",upload:"⬆ 파일 업로드",ingest:"ingest/ 정리",scan:"materials/ 스캔",
@@ -272,7 +272,7 @@ ko:{appTitle:"소재 허브",searchPh:"이름/태그/설명 검색…(/ 포커�
    copiedT:"경로 복사됨",copyFailT:"복사 실패",uploadedT:"{n}개 업로드됨",ingestT:"ingest/ 정리 완료",
    scanT:"materials/ 스캔 완료",idxT:"시맨틱 인덱스 구축 시작",thumbT:"커버 생성 시작",
    noEmbed:"로컬 embedding 모델이 없습니다",noFFmpeg:"ffmpeg 이 없어 브라우저 썸네일로 대체",
-   thumbServer:"서버 썸네일(캐시 {n})",thumbClient:"브라우저 썸네일(ffmpeg 없음)",thumbGen:"생성 중 {d}/{t}",unavailW:"불가",buildingW:"구축 중 {d}/{t}",notEnabled:"비활성(로컬 embedding 모델 없음)",warn:"경고(끊김 {n})",dropHint:"놓으면 업로드됩니다"},
+   thumbServer:"서버 썸네일(캐시 {n})",thumbClient:"브라우저 썸네일(ffmpeg 없음)",thumbGen:"생성 중 {d}/{t}",unavailW:"불가",buildingW:"구축 중 {d}/{t}",notEnabled:"비활성(로컬 embedding 모델 없음)",warn:"경고(끊김 {n})",dropHint:"놓으면 업로드됩니다",tagSys:"태그 체계:sp=subtitle_pipeline 산출;type:xx=결과물 종류;job:xx=소속 작업;lang:xx=언어;나머지는 처리 유형 또는 사용자 태그. 호버하면 설명, 클릭하면 필터링.",tag_sp:"subtitle_pipeline 워크플로에서 온 소재",tag_type:"결과물 종류(render=렌더링 결과 media=원본 미디어 notes=노트 benchmark=벤치마크 subs=자막 test=테스트)",tag_job:"소속 작업:콜론 뒤는 작업 ID. 클릭하면 해당 작업 전체로 필터링",tag_lang:"언어 태그(lang: 뒤는 언어 코드)",tag_bili:"출처:빌리빌리 다운로드",tag_proc:"처리 태그:적용된 처리(자막 제거/블러 제거/세그먼트/비교 등)",tag_custom:"사용자/기록 태그:규칙 또는 수동 추가, 검색 필터용"},
 en:{appTitle:"Material Hub",searchPh:"Search name/tag/description… (press /)",modeAuto:"Auto (semantic + keyword)",
    modeLex:"Exact keyword",modeSem:"Semantic only",sortRel:"Sort: relevance",newest:"Newest first",oldest:"Oldest first",
    nameAZ:"Name A→Z",sizeDesc:"Largest first",tools:"Tools ▾",refresh:"↻ Refresh",upload:"⬆ Upload files",
@@ -292,7 +292,7 @@ en:{appTitle:"Material Hub",searchPh:"Search name/tag/description… (press /)",
    copiedT:"Path copied",copyFailT:"Copy failed",uploadedT:"Uploaded {n} file(s)",ingestT:"ingest/ tidy done",
    scanT:"materials/ scan done",idxT:"Semantic index build started",thumbT:"Cover generation started",
    noEmbed:"No local embedding model found",noFFmpeg:"ffmpeg not found, falling back to browser thumbnails",
-   thumbServer:"server thumbs (cached {n})",thumbClient:"browser thumbnails (no ffmpeg)",thumbGen:"generating {d}/{t}",buildingW:"building {d}/{t}",notEnabled:"not enabled (no local embedding model)",warn:"alert ({n} broken)",dropHint:"Drop to upload"},
+   thumbServer:"server thumbs (cached {n})",thumbClient:"browser thumbnails (no ffmpeg)",thumbGen:"generating {d}/{t}",buildingW:"building {d}/{t}",notEnabled:"not enabled (no local embedding model)",warn:"alert ({n} broken)",dropHint:"Drop to upload",tagSys:"Tag system: sp = from subtitle_pipeline; type:x = product kind; job:x = owning task; lang:x = language; others are processing or custom tags. Hover for details, click to filter.",tag_sp:"From the subtitle_pipeline workflow",tag_type:"Product kind (render=rendered output, media=raw media, notes=notes, benchmark=benchmark, subs=subtitles, test=test)",tag_job:"Owning task: id after the colon; click to filter all its products",tag_lang:"Language tag (code after lang:)",tag_bili:"Source: downloaded from Bilibili",tag_proc:"Processing tag: what was done to the asset (dehardsub/deblur/segments/comparison…)",tag_custom:"Custom or legacy tag added by rules or manually, used for filtering"},
 ru:{appTitle:"Хаб материалов",searchPh:"Поиск по имени/тегам/описанию… (/ — фокус)",modeAuto:"Авто (семантика+ключ. слова)",
    modeLex:"Точное совпадение",modeSem:"Только семантика",sortRel:"По релевантности",newest:"Сначала новые",
    oldest:"Сначала старые",nameAZ:"Имя А→Я",sizeDesc:"Размер: сначала большие",tools:"Инструменты ▾",
@@ -316,7 +316,7 @@ ru:{appTitle:"Хаб материалов",searchPh:"Поиск по имени/
    thumbT:"Создание обложек запущено",noEmbed:"Локальная embedding-модель не найдена",
    noFFmpeg:"ffmpeg не найден, используется захват кадров в браузере",thumbServer:"обложки на сервере (кэш {n})",
    thumbClient:"обложки в браузере (нет ffmpeg)",thumbGen:"создание {d}/{t}",unavailW:"недоступно",
-   buildingW:"построение {d}/{t}",notEnabled:"отключено (нет локальной embedding-модели)",warn:"внимание ({n} битых)",dropHint:"Отпустите для загрузки"},
+   buildingW:"построение {d}/{t}",notEnabled:"отключено (нет локальной embedding-модели)",warn:"внимание ({n} битых)",dropHint:"Отпустите для загрузки",tagSys:"Система тегов:sp=из subtitle_pipeline;type:xx=вид результата;job:xx=задача;lang:xx=язык;остальные — тип обработки или пользовательские. Наведите для пояснения, клик — фильтр.",tag_sp:"Материал из конвейера subtitle_pipeline",tag_type:"Вид результата (render=результат, media=исходное медиа, notes=заметки, benchmark=бенчмарк, subs=субтитры, test=тест)",tag_job:"Задача-владелец: после двоеточия id; клик фильтрует все её результаты",tag_lang:"Языковая метка (код после lang:)",tag_bili:"Источник: скачано с Bilibili",tag_proc:"Тег обработки: что сделано с материалом (удаление субтитров/деблюр/сегменты/сравнение…)",tag_custom:"Пользовательский или исторический тег, для фильтрации"},
 hi:{appTitle:"सामग्री हब",searchPh:"नाम/टैग/विवरण खोजें… (/ फ़ोकस)",modeAuto:"स्वतः (सिमेंटिक+कीवर्ड)",
    modeLex:"सटीक कीवर्ड",modeSem:"केवल सिमेंटिक",sortRel:"प्रासंगिकता क्रम",newest:"नवीनतम पहले",oldest:"सबसे पुराने पहले",
    nameAZ:"नाम A→Z",sizeDesc:"आकार: बड़े पहले",tools:"टूल ▾",refresh:"↻ रिफ्रेश",upload:"⬆ फ़ाइलें अपलोड करें",
@@ -336,7 +336,7 @@ hi:{appTitle:"सामग्री हब",searchPh:"नाम/टैग/वि
    copiedT:"पाथ कॉपी हुआ",copyFailT:"कॉपी विफल",uploadedT:"{n} फ़ाइलें अपलोड हुईं",ingestT:"ingest/ व्यवस्था पूर्ण",
    scanT:"materials/ स्कैन पूर्ण",idxT:"सिमेंटिक इंडेक्स निर्माण शुरू",thumbT:"कवर निर्माण शुरू",
    noEmbed:"कोई स्थानीय embedding मॉडल नहीं मिला",noFFmpeg:"ffmpeg नहीं मिला, ब्राउज़र थंबनेल पर जा रहे हैं",
-   thumbServer:"सर्वर थंबनेल (कैश {n})",thumbClient:"ब्राउज़र थंबनेल (ffmpeg नहीं)",thumbGen:"बन रहे हैं {d}/{t}",unavailW:"अनुपलब्ध",buildingW:"निर्माण {d}/{t}",notEnabled:"अक्षम (कोई स्थानीय embedding मॉडल नहीं)",warn:"चेतावनी ({n} टूटे)",dropHint:"छोड़ें और अपलोड होगा"}
+   thumbServer:"सर्वर थंबनेल (कैश {n})",thumbClient:"ब्राउज़र थंबनेल (ffmpeg नहीं)",thumbGen:"बन रहे हैं {d}/{t}",unavailW:"अनुपलब्ध",buildingW:"निर्माण {d}/{t}",notEnabled:"अक्षम (कोई स्थानीय embedding मॉडल नहीं)",warn:"चेतावनी ({n} टूटे)",dropHint:"छोड़ें और अपलोड होगा",tagSys:"टैग प्रणाली:sp=subtitle_pipeline से;type:xx=उत्पाद प्रकार;job:xx=संबद्ध कार्य;lang:xx=भाषा;शेष प्रक्रिया या कस्टम टैग। होवर = विवरण, क्लिक = फ़िल्टर।",tag_sp:"subtitle_pipeline वर्कफ़्लो से आई सामग्री",tag_type:"उत्पाद प्रकार (render=रेंडर आउटपुट media=मूल मीडिया notes=नोट्स benchmark=बेंचमार्क subs=उपशीर्षक test=टेस्ट)",tag_job:"संबद्ध कार्य:कोलन के बाद कार्य ID; क्लिक से उसकी सभी निर्मितियाँ फ़िल्टर",tag_lang:"भाषा टैग (lang: के बाद भाषा कोड)",tag_bili:"स्रोत:Bilibili से डाउनलोड",tag_proc:"प्रक्रिया टैग:सामग्री पर क्या हुआ (सबटाइटल हटाना/डिब्लर/सेगमेंट/तुलना…)",tag_custom:"कस्टम/इतिहास टैग:नियमों या मैन्युअल रूप से जोड़ा गया, खोज फ़िल्टर हेतु"}
 };
 
 let LANG = localStorage.getItem("hub_lang") || "zh";
@@ -347,6 +347,7 @@ function applyI18n(){
   document.title = t("appTitle") + " · Materials Hub";
   for(const el of document.querySelectorAll("[data-i18n]")) el.textContent = t(el.dataset.i18n);
   for(const el of document.querySelectorAll("[data-i18n-ph]")) el.placeholder = t(el.dataset.i18nPh);
+  for(const el of document.querySelectorAll("[data-i18n-title]")) el.title = t(el.dataset.i18nTitle);
 }
 function setLang(l){
   LANG = l; localStorage.setItem("hub_lang", l);
@@ -368,6 +369,20 @@ let THUMB_SERVER=false;            // 服务端能否抽帧(ffmpeg 可用)
 const thumbCache=new Map();        // id -> dataURL:浏览器截帧结果,避免重复抽
 let page=1, pageSize=48, totalRows=0;   // 分页状态
 let view = "grid";                 // grid | list
+
+
+/* ---------- 标签解释(tooltip):按前缀归类,与流水线受控词表对应 ---------- */
+const TAG_PROC = new Set(["dehardsub","deblur","segment","segments","cmp","facefix","benchmark","combine",
+  "watermark","out","fixed","fix","fast","probe","verify","test","render","demosaic_test","mode-renders","type"]);
+function tagTip(tag){
+  if(tag==="sp") return t("tag_sp");
+  if(tag==="bilibili") return t("tag_bili");
+  if(tag.startsWith("type:")) return t("tag_type");
+  if(tag.startsWith("job:")) return t("tag_job")+" ["+tag.slice(4)+"]";
+  if(tag.startsWith("lang:")) return t("tag_lang");
+  if(TAG_PROC.has(tag)) return t("tag_proc");
+  return t("tag_custom");
+}
 
 /* ---------- toast(非阻塞提示) ---------- */
 function toast(msg, err){
@@ -439,7 +454,7 @@ async function _load(){
     }
     const size=(m.size/1048576).toFixed(2)+" MB";
     const chips=(m.tags||"").split(",").map(x=>x.trim()).filter(Boolean).slice(0,4)
-      .map(x=>`<span class="chip">${x}</span>`).join("");
+      .map(x=>`<span class="chip" title="${tagTip(x)}">${x}</span>`).join("");
     const desc=(m.description||"").replace(/\n+/g," ").slice(0,90);
     c.innerHTML = thumb + `
       <div class="body">
@@ -480,7 +495,7 @@ function renderFacets(st, f){
     for(const tg of tags.slice(0,24)){
       const s=document.createElement("span");
       s.className="tagchip"+(f.tag===tg.tag?" on":"");
-      s.textContent=tg.tag; s.title=`${tg.tag} (${tg.count})`;
+      s.textContent=tg.tag; s.title=`${tg.tag} (${tg.count}) — ${tagTip(tg.tag)}`;
       s.onclick=()=>{ $("#tag").value = (f.tag===tg.tag?"":tg.tag); reload(); };
       tc.appendChild(s);
     }
