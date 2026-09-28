@@ -64,8 +64,126 @@ def t_stats(a):
     return core.health()
 
 
+# ---------- MCP Resources(只读侧的素材视图,2026 最佳实践:读用 Resources / 写用 Tools) ----------
+def _resources_list():
+    """把「最近登记」「某 job 全套」这类只读、订阅式数据暴露为 Resource,
+    Agent 可像读文件一样按需拉取,比反复调 search 更省 token。"""
+    return [
+        {"uri": "hub://recent", "name": "最近登记的素材",
+         "description": "按时间倒序的最新素材(默认 10 条);hub://recent/{n} 可指定条数",
+         "mimeType": "application/json"},
+        {"uri": "hub://job", "name": "某 subtitle_pipeline job 全套素材",
+         "description": "hub://job/{jobid} 返回该 job 通过 bridge 登记的全部素材",
+         "mimeType": "application/json"},
+        {"uri": "hub://history", "name": "写操作审计日志",
+         "description": "按时间倒序的标签/描述/删除/打标/OCR 变更记录;hub://history/{n} 指定条数",
+         "mimeType": "application/json"},
+    ]
+
+
+def _resource_read(uri):
+    p = uri.replace("hub://", "").strip("/").split("/")
+    if p[0] == "recent":
+        n = int(p[1]) if len(p) > 1 and p[1].isdigit() else 10
+        rows = sorted(core.all_materials(),
+                      key=lambda m: m.get("created_at", ""), reverse=True)[:n]
+        return [_brief(m) for m in rows]
+    if p[0] == "job":
+        jid = p[1] if len(p) > 1 else ""
+        return [_brief(m) for m in (core.search("", tag="job:" + jid) if jid else [])]
+    if p[0] == "history":
+        n = int(p[1]) if len(p) > 1 and p[1].isdigit() else 50
+        return core.get_history(limit=n)
+    raise ValueError("unknown resource: " + uri)
+
+
+# ---------- 写操作护栏(2026 最佳实践:破坏性工具必须 confirm=true + 人工复核) ----------
+def _require_confirm(a):
+    """任何写/删操作都必须显式 confirm=true,否则拒绝。
+    防止 Agent 自主调用误改素材库(对应 E 维度「写必确认」护栏)。"""
+    if not a.get("confirm") is True:
+        raise ValueError("write operation requires confirm=true (Human-in-the-loop)")
+
+
+def t_update_tags(a):
+    _require_confirm(a)
+    mid = a.get("id", "")
+    if not core.get_material(mid):
+        raise ValueError("not found: " + mid)
+    core.update_tags(mid, a.get("tags", ""))
+    return {"ok": True, "id": mid}
+
+
+def t_register(a):
+    _require_confirm(a)
+    path = a.get("path", "")
+    if not path:
+        raise ValueError("path required")
+    r = core.ingest_external(path, source=a.get("source", "mcp"),
+                             tags=a.get("tags", ""), description=a.get("description", ""))
+    if r is None:
+        raise ValueError("cannot register (missing/unsupported file): " + path)
+    return r
+
+
+def t_text_preview(a):
+    """只读:返回素材描述 + 关联文本文件(.md/.txt/.srt/.ass/.json)前 N 字符,
+    供 Agent 在不拉整文件的前提下理解长文档内容(省 token)。"""
+    m = core.get_material(a.get("id", ""))
+    if not m:
+        raise ValueError("not found: " + a.get("id", ""))
+    n = int(a.get("chars") or 2000)
+    txt = (m.get("description") or "").strip()
+    ep = m.get("external_path") or ""
+    if not txt and ep and ep.lower().endswith((".md", ".txt", ".srt", ".ass", ".json", ".vtt")):
+        try:
+            with open(ep, "r", encoding="utf-8", errors="ignore") as f:
+                txt = f.read(n)
+        except Exception:
+            txt = ""
+    return {"id": m["id"], "name": m.get("name", ""), "preview": txt[:n]}
+
+
+def t_chunk_search(a):
+    """只读:长文档父子分块检索(见 core.chunk_search)。适合在 description/笔记里
+    按段落精准命中,而非整段匹配。返回命中的素材(按最佳子块得分排序)。"""
+    return [_brief(m) for m in core.chunk_search(
+        a.get("q", ""), limit=int(a.get("limit") or 10),
+        kind=a.get("kind", ""), tag=a.get("tag", ""))]
+
+
+def t_run_ocr(a):
+    """写(派生数据):对视频/图片做画面 OCR,文本落 sidecar 并追加 description。
+    会改 description,故仍需 confirm=true;已有结果幂等返回 cached(不重跑)。"""
+    _require_confirm(a)
+    mid = a.get("id", "")
+    if not core.get_material(mid):
+        raise ValueError("not found: " + mid)
+    return core.ocr_material(mid, frames=int(a.get("frames") or 5),
+                             force=bool(a.get("force")))
+
+
+# ---------- Deep Agent(路线 C:编排层在 agent.py,经 MCP 暴露给宿主) ----------
+def t_agent_run(a):
+    import agent
+    # 写权限双重护栏:MCP confirm=true(人工复核)→ 才向 agent 传 allow_write,
+    # agent 内部写工具此时才注册;缺省一律只读,与既有写护栏同构。
+    return agent.agent_run(a.get("task", ""),
+                           allow_write=(a.get("confirm") is True),
+                           max_steps=int(a.get("max_steps") or 12))
+
+
+def t_agent_status(a):
+    import agent
+    return agent.agent_status(a.get("task_id", ""))
+
+
 HANDLERS = {"search_materials": t_search, "get_material": t_get,
-            "list_tags": t_tags, "hub_stats": t_stats}
+            "list_tags": t_tags, "hub_stats": t_stats,
+            "update_tags": t_update_tags, "register_asset": t_register,
+            "read_text_preview": t_text_preview, "chunk_search_materials": t_chunk_search,
+            "run_ocr": t_run_ocr,
+            "agent_run": t_agent_run, "agent_status": t_agent_status}
 # __PART2__
 _SCHEMA_OBJ = {"type": "object", "properties": {
     "q": {"type": "string", "description": "关键词或中文自然语言问句"},
@@ -73,6 +191,8 @@ _SCHEMA_OBJ = {"type": "object", "properties": {
     "tag": {"type": "string"},
     "mode": {"type": "string", "enum": ["auto", "lexical", "semantic"]},
     "limit": {"type": "integer"}}}
+_CONFIRM = {"type": "object", "properties": {
+    "confirm": {"type": "boolean", "description": "必须为 true 才允许写/删操作(人工复核护栏)"}}}
 
 TOOLS = [
     {"name": "search_materials", "description": "检索素材库(344+ 条,支持中文自然语言问句,内置中英同义词+语义混合排序)",
@@ -83,6 +203,35 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer"}}}},
     {"name": "hub_stats", "description": "素材库健康快照(总量/种类/重复/引用完整性/封面/字节)",
      "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "read_text_preview", "description": "只读:返回素材描述/关联文本文件前 N 字符,理解长文档而不拉整文件(省 token)",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string"}, "chars": {"type": "integer"}}, "required": ["id"]}},
+    {"name": "chunk_search_materials", "description": "只读:长文档父子分块检索,按段落精准命中 description/笔记",
+     "inputSchema": {"type": "object", "properties": {
+         "q": {"type": "string"}, "kind": {"type": "string"},
+         "tag": {"type": "string"}, "limit": {"type": "integer"}}}},
+    {"name": "update_tags", "description": "写:更新素材标签(需 confirm=true)",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string"}, "tags": {"type": "string"},
+         "confirm": {"type": "boolean"}}, "required": ["id", "confirm"]}},
+    {"name": "register_asset", "description": "写:登记外部文件引用(不复制,按原路径索引,需 confirm=true)",
+     "inputSchema": {"type": "object", "properties": {
+         "path": {"type": "string"}, "source": {"type": "string"},
+         "tags": {"type": "string"}, "description": {"type": "string"},
+         "confirm": {"type": "boolean"}}, "required": ["path", "confirm"]}},
+    {"name": "run_ocr", "description": "写(派生数据):视频/图片画面 OCR(离线 rapidocr,ffmpeg 采样帧),文本入 sidecar 并追加 description 使画面文字可被检索。已有结果幂等返回;需 confirm=true",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string"}, "frames": {"type": "integer"},
+         "force": {"type": "boolean"}, "confirm": {"type": "boolean"}},
+         "required": ["id", "confirm"]}},
+    {"name": "agent_run", "description": "Deep Agent 编排:LLM 先拆待办再逐步调用素材工具完成多步任务(检索综合/巡检/整理)。默认只读;写任务需 confirm=true(人工复核)。长任务:本地 LLM 多轮,可能耗时 1-3 分钟。状态可事后用 agent_status 查询。",
+     "inputSchema": {"type": "object", "properties": {
+         "task": {"type": "string", "description": "自然语言任务(中文)"},
+         "confirm": {"type": "boolean", "description": "仅写类任务设 true(启用 agent 内写工具)"},
+         "max_steps": {"type": "integer"}}, "required": ["task"]}},
+    {"name": "agent_status", "description": "查询 Deep Agent 任务的待办/步骤轨迹/总结",
+     "inputSchema": {"type": "object", "properties": {
+         "task_id": {"type": "string"}}, "required": ["task_id"]}},
 ]
 # __PART3__
 def _dispatch(req):
@@ -92,8 +241,24 @@ def _dispatch(req):
     m = req.get("method", "")
     if m == "initialize":
         v = req.get("params", {}).get("protocolVersion", "2024-11-05")
-        return {"protocolVersion": v, "capabilities": {"tools": {}},
-                "serverInfo": {"name": "materials-hub", "version": "1.0"}}
+        # 动态能力声明(2026 最佳实践:按运行环境声明,而非固定值):
+        #  - 有 embedding 模型 → 语义检索可用;否则 Agent 应走纯词法
+        #  - 设了 VITUAL_RERANK_MODEL → 开启 stage-2 重排
+        #  - 设了 VITUAL_HUB_TOKEN → 已鉴权
+        cap = {"tools": {}, "resources": {}}
+        return {"protocolVersion": v, "capabilities": cap,
+                "serverInfo": {"name": "materials-hub", "version": "1.0", "hub": {
+                    "semantic": core.embed_probe()["ok"],
+                    "reranker": bool(os.environ.get("VITUAL_RERANK_MODEL", "").strip()),
+                    "token_required": bool(HUB_TOKEN),
+                    "count": core.count_materials(),
+                }}}
+    if m == "resources/list":
+        return {"resources": _resources_list()}
+    if m == "resources/read":
+        uri = (req.get("params", {}) or {}).get("uri", "")
+        return {"contents": [{"uri": uri, "mimeType": "application/json",
+                              "text": json.dumps(_resource_read(uri), ensure_ascii=False)}]}
     if m == "tools/list":
         return {"tools": TOOLS}
     if m == "tools/call":

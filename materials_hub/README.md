@@ -151,7 +151,8 @@ python cli.py embed                # 增量构建语义检索索引
 python cli.py embed --force        # 全量重建;--status 只看状态
 python cli.py search --file q.txt  # 中文查询建议走文件(Windows 终端 GBK 代码页会弄坏命令行中文)
 python cli.py search --stdin       # 或从标准输入读查询
-python eval_search.py --baseline  # 检索质量评估(中文查询 P@5/R@20,带 lexical↔auto 对比,回归门禁)
+python eval_search.py --baseline  # 检索质量评估(16 查询人工标注 ground truth,P@5/R@20/MRR/NDCG@10,lexical↔auto 对比,回归门禁)
+python cli.py ocr <id> [--force]  # 视频画面 OCR(离线 rapidocr,文本入检索;--all 批量)
 ```
 
 ## 联动 subtitle_pipeline(快速上手)
@@ -269,14 +270,20 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 3. 稠密排名与词法排名用 **RRF 融合**(词法权重默认 1.0),因此**语义只负责补召回,不会埋掉精确关键词命中**;
 4. 结果集 = 稠密相似度过线(默认 0.25)∪ 词法命中的,再按融合分排序。
 
-**实测(本库 344 条真实素材,9 个中文查询,ground truth 按真实目录/类型标注)**
+**实测(本库 344 条真实素材;历史演进在 9 宽查询上测,2026-09-28 起权威口径为 16 查询人工标注 ground truth)**
 
 | 阶段 | P@5 | R@20 |
 |---|---|---|
 | 原始词法(中文查询) | 0.00 | 0.00 |
 | + 领域同义词表 | 0.44 | 0.52 |
 | + 长词松匹配 | 0.53 | 0.63 |
-| **+ 语义混合** | **0.71** | **0.71** |
+| + 语义混合 | 0.71 | 0.71 |
+| + 同义词补齐 & 中文 bigram 降权(9 宽查询) | 0.96 | 0.69 |
+| **权威口径:16 查询 human-ground-truth(2026-09-28)** | **0.86** | **0.82** |
+
+> 16 查询口径含 7 组窄查询(相关集 1–6 条),并新增 **MRR=1.00 / NDCG@10≈0.98**:全部查询 top1 必对、
+> 窄查询召回全进 top20。为什么权威口径 P@5 反而比 0.96 低?——9 宽查询相关集最大 87 条,指标饱和虚高;
+> 窄查询才对"无关条目混进 top5"敏感。详见 `eval_search.py` 与《最佳实践》§15.4。
 
 个别查询收益更明显:「把模糊画面变清晰」0.20 → 0.80(P@5)、「按时间切的片段」0.00 → 0.16(R@20)。
 
@@ -288,6 +295,9 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 | `VITUAL_EMBED_MODEL` | 自动发现 | 指定 embedding 模型 |
 | `VITUAL_EMBED_MIN_COS` | `0.25` | 稠密相似度入选阈值(居中后) |
 | `VITUAL_RRF_K` / `VITUAL_HYBRID_WLEX` | `60` / `1.0` | RRF 常数 / 词法权重(调大更偏精确关键词) |
+| `VITUAL_RERANK_MODEL` | 空(关闭) | 可选 stage-2 重排:设 `bge-reranker-v2-m3` 走 ollama cross-encoder;`lexical` 为内置离线弱基线(实测会劣化排序,勿用于生产);`VITUAL_RERANK_TOP` 控制精排候选量(默认 60) |
+| `VITUAL_CACHE_SEARCH` / `VITUAL_CACHE_PERSIST` | 关 / 关 | 查询内存缓存 / 额外落盘 `index/search_cache.pkl`(跨会话复用) |
+| `VITUAL_OCR_PYTHON` | 自动发现 | 画面 OCR 用的 python(需装 rapidocr;默认自动找 `subtitle_pipeline/.venv`) |
 
 **已知限制(实测结论,别指望它做多语检索)**
 - `nomic-embed-text` 是**英文单语**模型,中文查询真正起作用的是**同义词表 + 松匹配**这一层;
@@ -384,7 +394,7 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 - **怎么判断索引指向的文件都还在?** `GET /api/health` 的 `ok` 字段即答案(或看状态栏是否显示「引用完整」)。
 - **能用自然语言搜吗?** 能。默认走「词法(同义词+松匹配)+ 语义」混合排序,问句不必含连续子串;精确过滤用 `type:` / `job:` / `lang:` 标签。
 - **语义检索要不要额外装东西?** 不用装 Python 包。只要本机 ollama 里有 embedding 模型(`ollama pull nomic-embed-text`)即可,全离线;没有就自动退回词法。
-- **为什么中文查询要靠同义词表?** 因为手边能离线拿到的 embedding 模型(nomic-embed-text)是英文单语的,而本库元数据也是英文;词表把中文意图映射到语料词汇,实测把中文查询 P@5 从 0.00 拉到 0.44,再叠加语义到 0.71;后经同义词补齐 + 中文 bigram 降权,纯词法 P@5 已到 **~0.96**(`python eval_search.py` 可复测)。注意:英文单语模型下语义检索的边际增益已转负,换 `bge-m3` 等多语模型(`VITUAL_EMBED_MODEL` 已支持离线切换)才能重新转正。
+- **为什么中文查询要靠同义词表?** 因为手边能离线拿到的 embedding 模型(nomic-embed-text/bge-m3 建库前)是英文单语的,而本库元数据也是英文;词表把中文意图映射到语料词汇。现状(2026-09-28,16 查询人工标注):**P@5=0.86 / R@20=0.82 / MRR=1.00 / NDCG@10≈0.98**,`python eval_search.py` 可复测。注意:英文单语模型下语义检索的边际增益≈0(16 查询实测 lift≈0),换多语 chat/embedding 组合或 cross-encoder 重排(`VITUAL_RERANK_MODEL`)才可能再抬;重排启用前必须过评估门禁——内置 `lexical` 弱基线实测会把 P@5 从 0.86 打到 0.31。
 - **检索结果变了?** 若新增了大量素材,记得 `python cli.py embed`(或面板按钮 / `bridge --embed`)刷新语义索引;未建向量的条目仍走词法,不会丢。
 - **视频封面是怎么来的?** 服务端用自动发现的 ffmpeg 抽第 1 秒的帧,存 `index/thumbs/<id>.jpg` 复用;本机确实没有 ffmpeg 时,前端用 `<video> + canvas` 截帧兜底。两种模式都只对进入视口的卡片生效。
 - **为什么有几个视频显示「封面不可用」?** 那些源文件本身损坏(典型报错 `moov atom not found`,多为上游写入中断的 mp4)。抽帧失败会留 `.fail` 标记不再重试;**源文件修好后**用 `POST /api/thumbs {"purge":true}` 清标记再生成即可。
@@ -404,5 +414,31 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 > **鉴权**:一旦设了 `VITUAL_HUB_TOKEN`,MCP 客户端必须在 `--token` 里传一致的令牌,否则 server 启动即拒绝(`sys.exit(2)`)——防止本机任意进程无鉴权调起素材中心 Agent 接口。
 
 工具:`search_materials(q,kind?,tag?,mode?,limit?)` 中文自然语言检索 /
-`get_material(id)` / `list_tags(limit?)` / `hub_stats()`。
+`get_material(id)` / `list_tags(limit?)` / `hub_stats()` /
+`chunk_search_materials(q,limit?)` 长文档父子分块检索(覆盖 .md/.txt/.srt 关联文本全文)/
+`read_text_preview(id,limit?)` 只读预览描述与关联文本前 N 字符(省 token)/
+`run_ocr(id,confirm)` 视频画面 OCR 离线识别(rapidocr,文本入检索)/
+`update_tags(id,tags,confirm)` 与 `register_asset(path,...,confirm)` **写工具(强制 `confirm=true`,缺省即拒绝,防 Agent 误改)**。
+
+Resources(订阅式只读,比 tool 更省 token):`hub://recent/{n}` 最新素材、`hub://job/{jobid}` 某 subtitle_pipeline job 全套、
+`hub://history/{n}` **写操作审计日志**(标签/描述/删除/打标/OCR 变更,谁在何时改了什么);
+`initialize` 按运行环境动态声明能力(`serverInfo.hub` 透出 semantic/reranker/token_required/count 实时标志)。
 启动时会顺手自动拉起 ollama(失败不影响词法检索)。日志走 stderr,协议走 stdout。
+
+## Deep Agent(路线 C:stdlib 编排 + MCP 暴露)
+
+`agent.py` 是 **Deep Agent 架构**(2026-09-28 拍板,区别于单轮 tool-calling)的核心编排层——
+LLM 先把任务拆成待办,再逐步调用素材工具完成,长观察落盘、子代理隔离上下文。四支柱:
+
+| 支柱 | 实现 |
+|---|---|
+| **Planning tool** | 任务先由 LLM 拆成 3–6 条 todos,逐步推进;状态持久化 `index/agent_workspace/<task_id>/state.json`,随时 `agent_status` 查轨迹 |
+| **上下文卸载** | 观察 >1200 字符落盘 `<ws>/notes/step_NNN.json`,上下文只留指针+前 200 字符(与 `chunk_search`/`read_text_preview` 同一省 token 哲学) |
+| **Subagents** | `retrieve`(LLM 驱动:多查询→汇总,只回摘要)与 `maintain`(确定性巡检 health+broken,零幻觉不走 LLM) |
+| **详细系统提示** | 角色+工具表+规则齐备;**写工具默认不存在**,仅 `allow_write=True` 才注册(MCP 侧再叠 `confirm=true` 人工复核,双重护栏) |
+
+- **LLM 后端**:本机 ollama chat 模型(与 auto_tag 同一发现逻辑);无 chat 模型 → `skipped` 优雅降级。
+- **MCP 工具**(共 10 个):`agent_run(task, confirm?, max_steps?)` 默认只读,写任务需 `confirm=true`;`agent_status(task_id)` 查待办/步骤/总结。长任务(本地 LLM 多轮)可能耗时 1–3 分钟。
+- **CLI**:`python cli.py agent --task "..." [--write] [--max-steps 12]` / `--status <id>` / `--file task.txt`(中文规避终端 GBK)。
+- **为什么是"路线 C"**:官方 `deepagents` 库依赖 langchain/langgraph,与零依赖哲学冲突;故编排自实现、协议走既有 MCP——未来可无缝切官方库或接入 CodeBuddy/Claude 等宿主。
+- **离线测试**:`tests/test_agent.py`(9 例,mock LLM 脚本回放,不连 ollama)。

@@ -6,6 +6,8 @@
 import os
 import re
 import json
+import time
+import pickle
 import sqlite3
 import shutil
 import hashlib
@@ -18,6 +20,7 @@ MATERIALS = os.path.join(HUB, "materials")
 INGEST = os.path.join(HUB, "ingest")
 TRASH = os.path.join(HUB, "trash")
 INDEX_DIR = os.path.join(HUB, "index")
+OCR_DIR = os.path.join(INDEX_DIR, "ocr")       # 视频画面 OCR 文本 sidecar(派生,可重建)
 INDEX_DB = os.path.join(INDEX_DIR, "hub.db")
 STATIC = os.path.join(HUB, "static")
 THUMBS = os.path.join(INDEX_DIR, "thumbs")  # 视频封面缓存(派生数据,可随时删)
@@ -61,7 +64,7 @@ KINDS = {
 
 def init_hub():
     """创建标准目录结构并初始化数据库。幂等。"""
-    for d in [MATERIALS, INGEST, TRASH, INDEX_DIR, STATIC]:
+    for d in [MATERIALS, INGEST, TRASH, INDEX_DIR, OCR_DIR, STATIC]:
         os.makedirs(d, exist_ok=True)
     for k in list(KINDS) + ["other"]:
         os.makedirs(os.path.join(MATERIALS, k), exist_ok=True)
@@ -141,8 +144,53 @@ def _init_db():
             con.execute(f"ALTER TABLE materials ADD COLUMN {col} {ddl}")
         except sqlite3.OperationalError:
             pass
+    # 写操作审计(对齐 2026 MCP 安全实践「谁在何时改了什么」,见最佳实践 §17.3):
+    # 只记录显式变更(标签/描述/删除/打标/OCR),bridge 批量登记不记(幂等同步非人为变更)。
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS history(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT,
+            actor TEXT,
+            action TEXT,
+            target_id TEXT,
+            detail TEXT
+        )"""
+    )
     con.commit()
     con.close()
+
+
+# ---------- 写操作审计 ----------
+def log_history(actor, action, target_id="", detail=""):
+    """记录一条写操作审计。任何失败都不抛错(审计不该阻塞业务)。"""
+    try:
+        con = _con()
+        con.execute(
+            "INSERT INTO history(ts,actor,action,target_id,detail) VALUES(?,?,?,?,?)",
+            (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+             actor or "app", action, target_id or "", (detail or "")[:300]),
+        )
+        con.commit()
+        con.close()
+    except Exception:
+        pass
+
+
+def get_history(limit=50, target_id=""):
+    """按时间倒序返回写操作审计记录(可选按素材过滤)。"""
+    con = _con()
+    con.row_factory = sqlite3.Row
+    if target_id:
+        rows = con.execute(
+            "SELECT * FROM history WHERE target_id=? ORDER BY id DESC LIMIT ?",
+            (target_id, int(limit)),
+        ).fetchall()
+    else:
+        rows = con.execute(
+            "SELECT * FROM history ORDER BY id DESC LIMIT ?", (int(limit),)
+        ).fetchall()
+    con.close()
+    return [dict(r) for r in rows]
 
 
 def add_material(**kw):
@@ -300,11 +348,148 @@ def search(q="", kind="", tag="", limit=None, offset=0, mode="auto"):
                     否则纯词法加权(与旧行为一致)
     mode="lexical"  强制词法;mode="semantic" 强制语义(无向量时自动回退词法)
     limit=None 表示不分页;offset 在排序之后生效(全局偏移,非页内)。"""
+    ck = (q, kind, tag, limit, offset, mode)
+    if os.environ.get("VITUAL_CACHE_SEARCH"):
+        if ck in _SEARCH_CACHE:
+            return _SEARCH_CACHE[ck]
     rows, _ = _ranked(q, kind, tag, mode)
     if offset > 0 or limit is not None:
         end = None if limit is None else offset + limit
         rows = rows[offset:end]
+    if os.environ.get("VITUAL_CACHE_SEARCH"):
+        if len(_SEARCH_CACHE) < 2000:        # 简易内存缓存(同查询重复率不低,省重算)
+            _SEARCH_CACHE[ck] = rows
+            _cache_persist()                 # 开启持久化时落盘
     return rows
+
+
+# ---------- 查询结果缓存(可选,默认关;§15.2 生产 RAG 的语义缓存思路本地版) ----------
+_CACHE_PATH = os.path.join(INDEX_DIR, "search_cache.pkl")
+
+
+def _cache_load():
+    if not os.environ.get("VITUAL_CACHE_PERSIST"):
+        return {}
+    try:
+        with open(_CACHE_PATH, "rb") as f:
+            return pickle.load(f)
+    except Exception:
+        return {}
+
+
+def _cache_persist():
+    if not os.environ.get("VITUAL_CACHE_PERSIST"):
+        return
+    try:
+        with open(_CACHE_PATH, "wb") as f:
+            pickle.dump(dict(_SEARCH_CACHE), f)
+    except Exception:
+        pass
+
+
+_SEARCH_CACHE = _cache_load() if os.environ.get("VITUAL_CACHE_PERSIST") else {}
+
+
+# 长文档父子分块:除库内 description 外,这些扩展名的「关联文本文件」也参与分块检索
+# (对应 §15.2:把 .md/笔记/字幕文本本身也做成可检索的子块,而非只看元数据)。
+_TEXT_EXT = (".md", ".txt", ".srt", ".ass", ".vtt", ".json", ".csv", ".py",
+            ".yaml", ".yml", ".toml", ".log")
+
+
+def _material_text(m):
+    """素材可检索的全文:库内 description + 关联文本文件内容(若 external_path/rel_path
+    指向可读文本文件)+ 视频画面 OCR sidecar(index/ocr/<id>.txt,若已生成)。
+    媒体文件本身不读,只取文本类。只读、不写、不越权。"""
+    parts = [(m.get("description") or "").strip()]
+    p = m.get("external_path") or ""
+    if not p:
+        rp = m.get("rel_path", "")
+        if rp and not os.path.isabs(rp):
+            p = os.path.join(HUB, rp)
+    if p and p.lower().endswith(_TEXT_EXT) and os.path.isfile(p):
+        try:
+            with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                parts.append(f.read())
+        except Exception:
+            pass
+    sc = ocr_sidecar_path(m.get("id", ""))
+    if sc and os.path.isfile(sc):
+        try:
+            with open(sc, "r", encoding="utf-8", errors="ignore") as f:
+                parts.append(f.read())
+        except Exception:
+            pass
+    return "\n".join(x for x in parts if x)
+
+
+def _split_chunks(text, size=140, overlap=30):
+    """把长文本切成 ~size 字符的子块(父子分块思想:子块精检、父块=整素材)。
+    先按段落/换行切,段落超长再按句末标点/空格切;overlap 让边界语义不丢。"""
+    if not text or not text.strip():
+        return []
+    paras = [p.strip() for p in re.split(r"\n+", text) if p.strip()]
+    chunks, buf = [], ""
+    def flush():
+        nonlocal buf
+        if buf:
+            chunks.append(buf); buf = ""
+    for p in paras:
+        if len(buf) + len(p) <= size:
+            buf = (buf + "\n" + p).strip()
+            continue
+        flush()
+        if len(p) <= size:
+            chunks.append(p); continue
+        for piece in re.split(r"(?<=[。！？!?；;])", p):
+            piece = piece.strip()
+            if not piece:
+                continue
+            if len(piece) <= size:
+                chunks.append(piece)
+            else:
+                step = max(1, size - overlap)
+                for i in range(0, len(piece), step):
+                    chunks.append(piece[i:i + size])
+    flush()
+    return chunks
+
+
+def chunk_score(qt, m):
+    """对单个素材做父子分块打分:把全文(description+关联文本文件)切成子块,
+    词法匹配每个子块,返回最佳子块得分。供 chunk_search 复用。"""
+    best = 0.0
+    for c in _split_chunks(_material_text(m)):
+        sc = _score(qt, {"description": c})        # 复用加权打分(只看子块文本)
+        if sc > best:
+            best = sc
+    return best
+
+
+def chunk_search(q, limit=10, kind="", tag=""):
+    """长文档父子分块检索(对应 §15.2 生产 RAG 的 Parent-Child 分块):
+    对每个素材的全文(description + 关联文本文件,见 `_material_text`)做子块切分,
+    词法匹配子块,返回命中的素材(按最佳子块得分降序)。适合在长笔记/字幕文本里
+    按段落精准命中,而非整段模糊匹配。纯只读、零副作用;由 MCP `chunk_search_materials` 暴露。"""
+    qt = _tokens(q)
+    if not qt:
+        return []
+    con = _con(); con.row_factory = sqlite3.Row
+    sql = ("SELECT id,name,description,tags,kind,rel_path,ai_tags,size,ext,location,"
+           "external_path FROM materials WHERE 1=1")
+    params = []
+    if kind:
+        sql += " AND kind=?"; params.append(kind)
+    if tag:
+        sql += " AND tags LIKE ?"; params.append(f"%{tag}%")
+    rows = con.execute(sql, params).fetchall(); con.close()
+    hits = []
+    for m in rows:
+        m = dict(m)                     # sqlite3.Row 无 .get(),统一转 dict 供 _material_text/_score 使用
+        s = chunk_score(qt, m)
+        if s > 0:
+            hits.append((s, m))
+    hits.sort(key=lambda x: -x[0])
+    return [dict(r) for _, r in hits[:limit]]
 
 
 def count_materials(q="", kind="", tag="", mode="auto"):
@@ -327,6 +512,44 @@ def _http_json(url, payload=None, timeout=90):
                                  headers={"Content-Type": "application/json"} if data else {})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8"))
+
+
+# ---------- 可选 stage-2 重排(cross-encoder reranker) ----------
+def _ollama_rerank(q, docs, model=None):
+    """可选 stage-2 重排:本地 ollama cross-encoder reranker(如 bge-reranker-v2-m3)。
+
+    调用 ollama `/api/rerank`,返回按相关性降序的文档下标列表;任何异常(未配模型 /
+    模型不存在 / 服务没起)都返回 None —— 调用方据此跳过重排,降级为原 RRF 融合结果。
+    这是生产 RAG 的标准二阶段:bi-encoder 召回 Top-N → cross-encoder 精排 Top-K。
+    默认不启用,需设 VITUAL_RERANK_MODEL 才生效,零模型依赖下对旧行为零影响。"""
+    model = model or os.environ.get("VITUAL_RERANK_MODEL", "").strip()
+    if not model or not docs:
+        return None
+    try:
+        r = _http_json(_embed_url() + "/api/rerank",
+                       {"model": model, "query": q, "documents": docs,
+                        "top_n": len(docs)}, timeout=60)
+        order = sorted(r.get("results", []), key=lambda x: -x.get("relevance_score", 0))
+        return [x["index"] for x in order]
+    except Exception:
+        return None
+
+
+def _lexical_rerank(q, docs, model=None):
+    """内置离线 reranker(无需 ollama/cross-encoder):按「查询词在文档中的加权命中数」对候选重排。
+
+    这是 stage-2 重排管线的**离线可用弱基线**——用于验证二阶段架构本身、以及在拿不到
+    cross-encoder 时给出一个可跑的 A/B 对照组。它本质是「更强的词法重排」,无法像
+    cross-encoder 那样建模查询-文档交互,故真目标仍是设 VITUAL_RERANK_MODEL=bge-reranker-v2-m3
+    走 `_ollama_rerank`。任何异常都返回 None(降级为原 RRF 融合)。"""
+    qt = _tokens(q)
+    if not qt or not docs:
+        return None
+    scored = []
+    for d in docs:
+        dt = set(_tokens(d))
+        scored.append(sum(_tok_w(t) for t in qt if t in dt))
+    return sorted(range(len(docs)), key=lambda i: -scored[i])
 
 
 def embed_probe(refresh=False):
@@ -362,10 +585,6 @@ def embed_probe(refresh=False):
     if cands:
         _EMBED_CACHE.update(ok=True, model=cands[0])
     return _EMBED_CACHE
-
-
-def embed_ready():
-    return embed_probe()["ok"]
 
 
 def _ollama_exe():
@@ -555,6 +774,8 @@ def auto_tag_material(m, dry=False, model=None, models=None):
             cur_ai.append(t)
             added.append(t)
     _update_material(m["id"], description=new_desc, ai_tags=",".join(cur_ai))
+    log_history("app", "auto_tag", m["id"],
+                f"ai_tags+={added!r}; desc={'set' if new_desc == desc and desc else 'kept'}")
     return {"id": m["id"], "status": "ok", "desc": new_desc, "added_tags": added}
 
 
@@ -682,6 +903,7 @@ def rule_tag_material(m, dry=False):
     if dry:
         return {"id": m["id"], "status": "dry", "tags": new_tags, "added": added, "desc": new_desc}
     _update_material(m["id"], description=new_desc, tags=",".join(new_tags))
+    log_history("app", "rule_tag", m["id"], f"tags+={added!r}")
     return {"id": m["id"], "status": "ok", "added_tags": added, "desc": new_desc}
 
 
@@ -918,6 +1140,23 @@ def semantic_rank(q, base_rows, lexical_rows=None):
             if dense.get(m["id"], -1) >= min_cos or m["id"] in lex_ids]
     if not keep:
         return (lexical_rows or []), True
+
+    # 可选 stage-2 重排(cross-encoder):只对召回的 Top-N 精排,其余保持 RRF 顺序附后。
+    # 默认关闭(VITUAL_RERANK_MODEL 未设即跳过),零模型依赖下行为与旧版完全一致。
+    rerank_model = os.environ.get("VITUAL_RERANK_MODEL", "").strip()
+    if rerank_model:
+        top_n = min(len(keep), int(os.environ.get("VITUAL_RERANK_TOP", "60")))
+        top, rest = keep[:top_n], keep[top_n:]
+        docs = [f"{m.get('name', '')} {m.get('description', '')} "
+                f"{m.get('tags', '')} {m.get('ai_tags', '')}" for m in top]
+        if rerank_model == "lexical":
+            order = _lexical_rerank(q, docs, rerank_model)   # 内置离线弱基线,无需 ollama
+        else:
+            order = _ollama_rerank(q, docs, rerank_model)   # 真目标:ollama cross-encoder
+        if order is not None:
+            # stage-2 精排生效:直接以重排顺序返回,**不可再用 fused 重排**(否则会覆盖重排结果)
+            return [top[i] for i in order] + rest, True
+
     return sorted(keep, key=fused), True
 
 
@@ -993,15 +1232,26 @@ QUERY_SYNONYMS = {
     "台标": ["logo", "watermark"],
     "效果": ["result", "out", "cmp"],
     "对比图": ["cmp", "compare"],
-    "画面": ["frame", "scene"],
+    # 「画面→frame/scene」已删(2026-09-28):泛场景词展开让 name 含 frame 的条目
+    # (name 权重 3.0)压过 description 含 lama 的真答案(1.5),Lama 查询 P@5 卡 0.20 根因。
     "背景": ["background", "bg"],
+    # ↓ 2026-09-28 由窄查询评估暴露的领域缺口(数据驱动:语料里真实存在的 token)
+    "字形": ["glyph"],
+    "繁体": ["hant", "zh-hant"],
+    "去马赛克": ["demosaic"],
+    # 注1:「补全→fill/inpaint」试加过,R@20 0.80→0.20(fill 命名条目稀释),已撤。
+    #      Lama 类查询靠查询词自带 lama 字面 token 即可命中。
+    # 注2:「画面→frame/scene」已删——泛场景词展开让 name 含 frame 的条目(纯字段名
+    #      匹配)压过 description 含 Lama 的真答案(Lama 查询 P@5 0.20 的根因)。
 }
 
 # 「泛化词」:命中面太宽,只在查询里没有更具体概念时才展开。
-# 实测边界:只收**媒体类型词**(video/mp4/png/jpg/audio…会匹配几百个文件名,
+# 实测边界:只收**媒体类型词**(video/mp4/png/jpg…会匹配几百个文件名,
 # 纯稀释);而 对比→cmp/compare、结果→out/final 是**答案型词**(compare10s/final_*
 # 正是用户要的),降权它们反而把最佳答案挤出前排(渲染结果对比实测回归),保持强展开。
-_WEAK_SYNONYMS = {"视频", "图片", "音频", "音轨", "状态"}
+# 2026-09-28:音频/音轨 也移出 weak——weak 是全有全无抑制,查询里只要有 b站/字幕等
+# 强概念,音频→audio/m4a 就永不展开;而 m4a 全库仅 2 条,是高精度答案词(b站音频实测)。
+_WEAK_SYNONYMS = {"视频", "图片", "状态"}
 
 
 def expand_query(q):
@@ -1053,17 +1303,22 @@ def duplicates():
 
 
 def update_tags(mid, tags):
+    old = (get_material(mid) or {}).get("tags", "")
     con = _con()
     con.execute("UPDATE materials SET tags=? WHERE id=?", (tags, mid))
     con.commit()
     con.close()
+    log_history("app", "update_tags", mid, f"tags: {old!r} -> {tags!r}")
 
 
 def update_description(mid, desc):
+    old = (get_material(mid) or {}).get("description", "")
     con = _con()
     con.execute("UPDATE materials SET description=? WHERE id=?", (desc, mid))
     con.commit()
     con.close()
+    log_history("app", "update_description", mid,
+                f"desc: {old!r} -> {desc!r}")
 
 
 def remove_material(mid):
@@ -1081,6 +1336,8 @@ def remove_material(mid):
     con.execute("DELETE FROM materials WHERE id=?", (mid,))
     con.commit()
     con.close()
+    log_history("app", "remove", mid,
+                f"removed: {m.get('name', '')} (location={m.get('location', '')})")
 
 
 # ---------- 采集 / 整理 ----------
@@ -1386,6 +1643,171 @@ def thumb_failure_reason(mid):
         return "unreadable"
     lines = [l for l in txt.splitlines() if l.strip()]
     return lines[-1][:200] if lines else ""
+
+
+# ---------- 视频画面 OCR(对齐 §17.2「OCR 入库即可搜」,见最佳实践 §17) ----------
+def ocr_sidecar_path(mid):
+    """素材的 OCR 文本 sidecar 路径(index/ocr/<id>.txt;派生数据,可随时重建)。"""
+    mid = str(mid or "").strip()
+    if not mid or any(c in mid for c in "\\/.:"):
+        return None                              # 防路径拼接注入
+    return os.path.join(OCR_DIR, mid + ".txt")
+
+
+def _ocr_python():
+    """承载 rapidocr 的 python 解释器:优先 VITUAL_OCR_PYTHON,自动发现 SP venv。
+    找不到返回 None(OCR 能力优雅缺位,其余功能不受影响)。"""
+    env = os.environ.get("VITUAL_OCR_PYTHON", "").strip()
+    if env and os.path.isfile(env):
+        return env
+    cand = os.path.join(os.path.dirname(HUB), "subtitle_pipeline", ".venv",
+                        "Scripts", "python.exe")
+    return cand if os.path.isfile(cand) else None
+
+
+def _ffprobe_path():
+    exe = ffmpeg_path()
+    if not exe:
+        return None
+    cand = os.path.join(os.path.dirname(exe), "ffprobe.exe")
+    if os.name != "nt":
+        cand = cand.replace(".exe", "")
+    return cand if os.path.isfile(cand) else None
+
+
+def _probe_duration(path):
+    """视频时长(秒);探测失败返回 0(退化为只抽 1 帧)。"""
+    exe = _ffprobe_path()
+    if not exe:
+        return 0.0
+    flags = 0x08000000 if os.name == "nt" else 0
+    try:
+        p = subprocess.run(
+            [exe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=30, creationflags=flags)
+        return float((p.stdout or b"0").decode("utf-8", "ignore").strip() or 0)
+    except Exception:
+        return 0.0
+
+
+def _parse_ocr_runner_stdout(raw):
+    """解析 ocr_runner.py 的 stdout JSON(容忍前置日志:取最后一个 '{' 起的 JSON)。"""
+    s = (raw or "").decode("utf-8", "ignore")
+    i = s.find("[")
+    j = s.rfind("]")
+    if i < 0 or j <= i:
+        return None
+    try:
+        data = json.loads(s[i:j + 1])
+        return data if isinstance(data, list) else None
+    except Exception:
+        return None
+
+
+def ocr_material(mid, frames=5, force=False):
+    """对视频/图片素材做画面 OCR(离线,rapidocr 由 SP venv 提供):
+    ffmpeg 采样帧 → ocr_runner 子进程识别 → 文本落 sidecar `index/ocr/<id>.txt`
+    并追加到 description(` [OCR] ...`,词法/语义检索即刻可命中)。
+    幂等:已有 sidecar 且未 force 时直接返回 cached。变更记入 history 审计。"""
+    m = get_material(mid)
+    if not m:
+        return {"id": mid, "status": "error", "reason": "not_found"}
+    if m.get("kind") not in ("videos", "images"):
+        return {"id": mid, "status": "skipped", "reason": f"kind={m.get('kind')}"}
+    sc = ocr_sidecar_path(mid)
+    if not sc:
+        return {"id": mid, "status": "error", "reason": "bad_id"}
+    if os.path.isfile(sc) and not force:
+        return {"id": mid, "status": "cached", "chars": os.path.getsize(sc)}
+    src = _abs_source(m)
+    if not src or not os.path.exists(src):
+        return {"id": mid, "status": "error", "reason": "source_missing"}
+    exe = ffmpeg_path()
+    ocr_py = _ocr_python()
+    runner = os.path.join(HUB, "ocr_runner.py")
+    if not exe:
+        return {"id": mid, "status": "skipped", "reason": "no_ffmpeg"}
+    if not ocr_py:
+        return {"id": mid, "status": "skipped", "reason": "no_ocr_python"}
+    if m["kind"] == "images":
+        imgs, stamps = [(src, 0.0)], [None]
+    else:
+        dur = _probe_duration(src)
+        frames = max(1, min(int(frames or 5), 10))
+        if dur > 0.5:
+            stamps = [round(dur * f, 2) for f in (0.1, 0.3, 0.5, 0.7, 0.9)][:frames]
+        else:
+            stamps = [0.0]
+        flags = 0x08000000 if os.name == "nt" else 0
+        imgs = []
+        for i, t in enumerate(stamps):
+            out = os.path.join(OCR_DIR, f"_f{i}.jpg")
+            cmd = [exe, "-v", "error", "-y", "-ss", str(t), "-i", src,
+                   "-frames:v", "1", "-vf", "scale=960:-2", "-q:v", "4", out]
+            try:
+                subprocess.run(cmd, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=60,
+                               creationflags=flags)
+            except Exception:
+                continue
+            if os.path.exists(out) and os.path.getsize(out) > 0:
+                imgs.append((out, t))
+        if not imgs:
+            return {"id": mid, "status": "error", "reason": "frame_extract_failed"}
+    try:
+        env = dict(os.environ, PYTHONIOENCODING="utf-8")   # 防 GBK 管道乱码(双保险)
+        p = subprocess.run([ocr_py, runner] + [f for f, _ in imgs],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           timeout=600, creationflags=0x08000000 if os.name == "nt" else 0,
+                           env=env)
+        data = _parse_ocr_runner_stdout(p.stdout)
+    except Exception:
+        data = None
+    if data is None:
+        return {"id": mid, "status": "error", "reason": "ocr_runner_failed"}
+    by_file = {d.get("file", ""): d for d in data}
+    lines = []
+    total = 0
+    for f, t in imgs:
+        d = by_file.get(f) or {}
+        txt = (d.get("text") or "").strip()
+        if txt:
+            tag = f"[{t}s] " if t is not None else ""
+            lines.append(f"{tag}{txt}")
+            total += len(txt)
+        try:
+            if f != src:
+                os.remove(f)                     # 清理临时抽帧
+        except OSError:
+            pass
+    os.makedirs(OCR_DIR, exist_ok=True)
+    with open(sc, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    # description 追加 OCR 摘要(幂等:先剥旧 [OCR] 段),使主检索/语义建库即刻可命中
+    cur_desc = (m.get("description") or "").strip()
+    base = re.sub(r"\s*\[OCR\][\s\S]*$", "", cur_desc).strip()
+    new_desc = (base + ("\n" if base else "") + "[OCR] " + "\n".join(lines)[:400]).strip()
+    if new_desc != cur_desc:
+        _update_material(mid, description=new_desc)
+    log_history("app", "ocr", mid, f"frames={len(imgs)} chars={total}")
+    return {"id": mid, "status": "ok", "frames": len(imgs), "chars": total,
+            "sample": "\n".join(lines)[:200]}
+
+
+def ocr_all(limit=0, force=False):
+    """批量 OCR:对全部视频/图片素材补齐 sidecar(默认跳过已有)。"""
+    out = []
+    ms = [m for m in all_materials() if m.get("kind") in ("videos", "images")]
+    if limit:
+        ms = ms[:limit]
+    for m in ms:
+        sc = ocr_sidecar_path(m["id"])
+        if not force and sc and os.path.isfile(sc):
+            continue
+        out.append(ocr_material(m["id"], force=force))
+    return out
 
 
 def thumbs_status():

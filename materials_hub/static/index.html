@@ -151,7 +151,7 @@ async function load(){
     (ex.broken
       ? `外部引用 ${ex.external} 条,<span id="brokenLink" style="cursor:pointer;color:var(--dup)">失效 ${ex.broken}</span>`
       : `外部引用 ${ex.external||0} 条,引用完整`) +
-    ` · 语义 <span id="embedInfo"></span> · 健康 <span id="healthInfo"></span>`;
+    ` · 语义 <span id="embedInfo"></span> · 健康 <span id="healthInfo"></span> · <span id="renderCheck"></span>`;
   const hl=$("#healthInfo"); if(hl) hl.onclick=openHealth;
   const dl=$("#dupLink"); if(dl) dl.onclick=openDupes;
   const bl=$("#brokenLink"); if(bl) bl.onclick=openBroken;
@@ -203,6 +203,21 @@ async function load(){
   refreshThumbInfo();
   renderPager(pages);
   syncHash();
+  verifyRender(rows.length);   // 渲染后 DOM 计数核验:证明卡片真的画进 DOM,而非空壳
+}
+
+/* 渲染后 DOM 计数核验:把实际画出 .card 的数量与本次返回的 rows 数量比对,
+   结果同时写进 stats 行(可见)与 window.__renderCheck(供无头浏览器程序化读取)。
+   这是「卡片真的渲染了」的最直接证据,不依赖肉眼看图。 */
+function verifyRender(expected){
+  const n = document.querySelectorAll("#grid .card").length;
+  const ok = (n === expected);
+  window.__renderCheck = {expected, rendered:n, ok, at:Date.now()};
+  const el = document.getElementById("renderCheck");
+  if(el){
+    el.textContent = `· 已渲染 ${n}/${expected} 张` + (ok ? "" : " ⚠ 不一致");
+    el.style.color = ok ? "var(--acc)" : "var(--dup)";
+  }
 }
 
 function renderPager(pages){

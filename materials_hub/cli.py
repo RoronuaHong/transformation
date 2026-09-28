@@ -18,6 +18,12 @@
   python cli.py autotag --rule      离线规则打标:确定性关键词提取标签(预览,不写库)
   python cli.py autotag --rule --apply  写库(仅追加标签、为空时补中文描述,非破坏式)
   python cli.py autotag --rule --undo   回滚规则打标写入的标签(保留 bridge 的 bilibili)
+  python cli.py ocr <id> [--force]      画面 OCR(离线 rapidocr,需 SP venv)入检索
+  python cli.py ocr --all [--limit N]   批量补齐视频/图片的 OCR 文本
+  python cli.py agent --task "..."      Deep Agent 多步任务(LLM 拆待办→逐步执行,见 agent.py)
+  python cli.py agent --task "..." --write  允许 agent 写(标签/登记;默认只读)
+  python cli.py agent --status <id>     查看某次 agent 任务的状态与轨迹
+  python cli.py agent --file task.txt   中文任务用 UTF-8 文件传(规避终端 GBK)
 """
 import sys
 import os
@@ -28,6 +34,7 @@ from core import (
     build_embeddings, embed_status, embed_probe, expand_query,
     auto_tag_all, chat_models, rule_tag_all, rule_tag_cleanup,
     autotag_undo, AUTOTAG_BACKUP,
+    ocr_material, ocr_all, _ocr_python,
 )
 
 
@@ -105,6 +112,31 @@ def main():
             print(f"[{i}/{len(ids)}] {'ok  ' if ok else 'FAIL'} {m['name']}", flush=True)
         print(f"thumbs done: {made} ok, {fail} failed | status: {thumbs_status()}")
 
+    elif cmd == "ocr":
+        # 画面 OCR:python cli.py ocr <id> [--force] | ocr --all [--limit N]
+        if not _ocr_python():
+            print("no OCR python found; hint: 装有 rapidocr 的 venv python,",
+                  "或设 VITUAL_OCR_PYTHON=<path>")
+            return
+        if "--all" in args:
+            args.remove("--all")
+            limit = 0
+            if "--limit" in args:
+                i = args.index("--limit")
+                limit = int(args[i + 1])
+                del args[i:i + 2]
+            res = ocr_all(limit=limit, force="--force" in args)
+            ok = sum(1 for r in res if r.get("status") == "ok")
+            print(f"ocr done: {ok}/{len(res)} ok")
+            for r in res:
+                print(" ", r)
+            return
+        mid = next((a for a in args if not a.startswith("-")), "")
+        if not mid:
+            print("usage: python cli.py ocr <id> [--force] | ocr --all")
+            return
+        print(ocr_material(mid, force="--force" in args))
+
     elif cmd == "embed":
         st = embed_status()
         if "--status" in args:
@@ -162,6 +194,32 @@ def main():
         for x in res[:25]:
             extra = x.get("desc") or x.get("reason") or ""
             print(f"  {x['id']}  {x['status']}  {extra}")
+
+    elif cmd == "agent":
+        import agent
+        import json as _json
+        if "--status" in args:
+            tid = args[args.index("--status") + 1] if len(args) > args.index("--status") + 1 else ""
+            print(_json.dumps(agent.agent_status(tid), ensure_ascii=False, indent=2))
+            return
+        a = args[1:]
+        if a and a[0] == "--stdin":           # 中文任务同 search:规避终端 GBK
+            try:
+                sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+            task = sys.stdin.read().strip()
+        elif a and a[0] == "--file" and len(a) > 1:
+            with open(a[1], encoding="utf-8-sig") as f:
+                task = f.read().strip()
+        else:
+            task = " ".join(a)
+        if not task:
+            print(__doc__)
+            return
+        max_steps = int(args[args.index("--max-steps") + 1]) if "--max-steps" in args else 12
+        r = agent.agent_run(task, allow_write="--write" in args, max_steps=max_steps)
+        print(_json.dumps(r, ensure_ascii=False, indent=2))
 
     else:
         print(__doc__)

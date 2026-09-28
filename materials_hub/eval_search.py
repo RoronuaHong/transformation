@@ -15,6 +15,7 @@ tags/name/description/path 即判相关 —— 这是 README 里 P@5 提升叙�
 import os
 import sys
 import json
+import math
 import argparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -31,6 +32,14 @@ EVAL_QUERIES = [
     "基准测试视频",
     "b站下载的字幕",
     "修好的成品",
+    # 窄查询(2026-09-28 补):相关集 1-6 条,大相关性集下 P@5 饱和无法区分排序,靠这些恢复区分度
+    "去马赛克处理结果",
+    "用 Lama 补全的画面",
+    "字形检测的渲染输出",
+    "视觉语言模型抽的关键帧",
+    "繁体中文字幕 srt",
+    "去台标 delogo 处理的片段",
+    "b站视频的音频文件",
 ]
 
 GT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eval_ground_truth.json")
@@ -79,7 +88,7 @@ def evaluate(mode, gt=None):
             total_rel[q] = len(heuristic_rel(q, corpora))
 
     per_q = []
-    p5_sum = r20_sum = 0.0
+    p5_sum = r20_sum = mrr_sum = ndcg_sum = 0.0
     for q in EVAL_QUERIES:
         rows = core.search(q, limit=20, mode=mode)
         ids = [m["id"] for m in rows]
@@ -93,11 +102,23 @@ def evaluate(mode, gt=None):
         top20 = ids[:20]
         p5 = sum(1 for i in top5 if i in rel_set) / 5.0
         r20 = sum(1 for i in top20 if i in rel_set) / total if total else 0.0
+        # MRR / NDCG@10:对排序质量敏感,P@5 在大相关性集下饱和时用它区分 lexical vs auto
+        mrr = 0.0
+        for i, mid in enumerate(ids):
+            if mid in rel_set:
+                mrr = 1.0 / (i + 1)
+                break
+        k = 10
+        dcg = sum(1.0 / math.log2(i + 2) for i, mid in enumerate(ids[:k]) if mid in rel_set)
+        idcg = sum(1.0 / math.log2(i + 2) for i in range(min(k, total))) or 1.0
+        ndcg = dcg / idcg
         p5_sum += p5
         r20_sum += r20
-        per_q.append((q, p5, r20, len(ids)))
+        mrr_sum += mrr
+        ndcg_sum += ndcg
+        per_q.append((q, p5, r20, mrr, ndcg, len(ids)))
     n = len(EVAL_QUERIES)
-    return per_q, p5_sum / n, r20_sum / n
+    return per_q, p5_sum / n, r20_sum / n, mrr_sum / n, ndcg_sum / n
 
 
 def main():
@@ -110,18 +131,19 @@ def main():
     oracle = "human-ground-truth" if gt else "heuristic(synonym-expansion)"
 
     def _show(mode):
-        per, p5, r20 = evaluate(mode, gt)
+        per, p5, r20, mrr, ndcg = evaluate(mode, gt)
         print(f"\n=== mode={mode}  (oracle: {oracle}) ===")
-        print(f"{'query':<22}{'P@5':>8}{'R@20':>8}{'hits':>6}")
-        for q, a, b, h in per:
-            print(f"{q:<20}{a:>8.2f}{b:>8.2f}{h:>6}")
-        print(f"{'MEAN':<20}{p5:>8.2f}{r20:>8.2f}")
-        return p5, r20
+        print(f"{'query':<22}{'P@5':>8}{'R@20':>8}{'MRR':>8}{'NDCG@10':>9}{'hits':>6}")
+        for q, a, b, m, g, h in per:
+            print(f"{q:<20}{a:>8.2f}{b:>8.2f}{m:>8.2f}{g:>9.2f}{h:>6}")
+        print(f"{'MEAN':<20}{p5:>8.2f}{r20:>8.2f}{mrr:>8.2f}{ndcg:>9.2f}")
+        return p5, r20, mrr, ndcg
 
     if args.baseline:
-        la, ra = _show("lexical")
-        ba, rb = _show("auto")
-        print(f"\nlift(auto - lexical):  P@5 {ba-la:+.2f}   R@20 {rb-ra:+.2f}")
+        la, ra, lm, ln = _show("lexical")
+        ba, rb, bm, bn = _show("auto")
+        print(f"\nlift(auto - lexical):  P@5 {ba-la:+.2f}   R@20 {rb-ra:+.2f}   "
+              f"MRR {bm-lm:+.2f}   NDCG@10 {bn-ln:+.2f}")
     else:
         _show(args.mode)
 
