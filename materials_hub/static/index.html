@@ -1,12 +1,13 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>素材中心 · Materials Hub</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%234f8cff'/%3E%3Ctext x='8' y='12' font-size='10' text-anchor='middle' fill='white'%3E%E7%B4%A0%3C/text%3E%3C/svg%3E">
 <style>
-  :root{--bg:#0f1115;--card:#1a1d24;--line:#2a2f3a;--fg:#e6e8ec;--mut:#8b93a1;--acc:#4f8cff;--dup:#ff6b6b;--ok:#4ade80;--side:#141720}
+  :root{--bg:#0f1115;--card:#1a1d24;--line:#2a2f3a;--fg:#e6e8ec;--mut:#8b93a1;--acc:#4f8cff;--dup:#ff6b6b;--ok:#4ade80;--side:#141720;--shadow:rgba(0,0,0,.5)}
+  html[data-theme="light"]{--bg:#f2f4f8;--card:#ffffff;--line:#d8dde5;--fg:#1b2027;--mut:#5f6874;--side:#e9ecf2;--shadow:rgba(30,40,60,.18)}
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,"Microsoft YaHei",sans-serif}
   input,select,button,textarea{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit}
@@ -15,21 +16,21 @@
   button:disabled{opacity:.45;cursor:default}
   kbd{background:var(--card);border:1px solid var(--line);border-radius:4px;padding:0 5px;font-size:11px;color:var(--mut)}
 
-  /* ---- 顶栏:品牌 + 过滤器 + 工具收纳 ---- */
-  header{padding:10px 16px;border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:center;flex-wrap:wrap;position:sticky;top:0;background:var(--bg);z-index:40}
+  header{padding:10px 16px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-wrap:wrap;position:sticky;top:0;background:var(--bg);z-index:40}
   header h1{font-size:15px;margin:0 8px 0 0;font-weight:700;white-space:nowrap}
   header h1 span{color:var(--acc)}
   .fbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;flex:1}
-  #q{width:240px}
-  .tools{position:relative}
+  #q{width:230px}
+  .tools{position:relative;display:flex;gap:6px;align-items:center}
+  .iconbtn{padding:7px 9px;font-size:14px;line-height:1}
   .menu{display:none;position:absolute;right:0;top:110%;background:var(--card);border:1px solid var(--line);border-radius:10px;
-    min-width:190px;padding:6px;z-index:80;box-shadow:0 8px 24px rgba(0,0,0,.5)}
+    min-width:200px;padding:6px;z-index:80;box-shadow:0 8px 24px var(--shadow)}
   .menu.open{display:block}
   .menu button{display:block;width:100%;text-align:left;background:none;border:none;border-radius:6px;padding:8px 10px}
   .menu button:hover{background:rgba(79,140,255,.12)}
   .menu .sep{border-top:1px solid var(--line);margin:5px 0}
+  #langSel{max-width:120px}
 
-  /* ---- 主体:左 facet 侧栏 + 右内容区 ---- */
   .layout{display:flex;min-height:calc(100vh - 54px)}
   aside{width:200px;flex:0 0 200px;border-right:1px solid var(--line);padding:14px 12px;background:var(--side)}
   aside h3{font-size:12px;color:var(--mut);margin:14px 0 8px;text-transform:uppercase;letter-spacing:.08em}
@@ -51,7 +52,6 @@
   .stats a{color:var(--acc);cursor:pointer;text-decoration:none}
   .stats a.bad{color:var(--dup)}
 
-  /* ---- 卡片网格 ---- */
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}
   .grid.list{grid-template-columns:1fr;gap:8px}
   .grid.list .card{flex-direction:row;align-items:center}
@@ -69,9 +69,8 @@
   .thumb video{width:100%;height:140px;object-fit:cover;background:#000}
   .thumb .ph{color:var(--mut);font-size:34px}
   .thumb .pill{border:1px solid var(--line);border-radius:10px;padding:6px 14px;color:var(--mut);
-    font-size:12px;letter-spacing:.1em;text-transform:uppercase;background:rgba(255,255,255,.03)}
+    font-size:12px;letter-spacing:.1em;text-transform:uppercase;background:rgba(127,127,127,.06)}
   .badge{position:absolute;left:6px;top:6px;background:rgba(0,0,0,.62);border:1px solid var(--line);color:var(--mut);font-size:11px;padding:2px 6px;border-radius:6px}
-  .badge.dup{color:var(--dup);border-color:var(--dup)}
   .badges{display:flex;flex-wrap:wrap;gap:4px;padding:0 10px}
   .chip{font-size:10.5px;border:1px solid var(--line);border-radius:10px;padding:1px 7px;color:var(--mut)}
   .body{padding:10px;display:flex;flex-direction:column;gap:4px}
@@ -83,8 +82,7 @@
   .pager button{padding:5px 12px;font-size:13px}
   .pager button:disabled{opacity:.45;cursor:default}
 
-  /* ---- 详情弹窗 ---- */
-  .modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:flex-start;justify-content:center;padding:40px 16px;z-index:60;overflow:auto}
+  .modal{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:flex-start;justify-content:center;padding:40px 16px;z-index:60;overflow:auto}
   .modal.show{display:flex}
   .modal .box{background:var(--card);border:1px solid var(--line);border-radius:12px;max-width:720px;width:100%;padding:18px}
   .modal h2{margin:0 0 10px;font-size:16px;word-break:break-all}
@@ -92,7 +90,7 @@
   .modal .prev img{max-width:100%;max-height:430px}
   .modal .prev video{width:100%;max-height:430px}
   .modal .prev .ph{color:var(--mut);font-size:60px;padding:50px}
-  .modal .kv{display:grid;grid-template-columns:76px 1fr;gap:4px 10px;font-size:12.5px;color:var(--mut);margin-bottom:10px}
+  .modal .kv{display:grid;grid-template-columns:110px 1fr;gap:4px 10px;font-size:12.5px;color:var(--mut);margin-bottom:10px}
   .modal .kv b{color:var(--fg);font-weight:500;word-break:break-all}
   .modal textarea.desc{width:100%;min-height:64px;resize:vertical}
   .modal .tagin{width:100%}
@@ -104,15 +102,14 @@
   .modal .item .nm{flex:1;word-break:break-all}
   .modal .item button{font-size:12px;padding:3px 8px}
 
-  /* ---- toast ---- */
   #toasts{position:fixed;right:16px;bottom:16px;display:flex;flex-direction:column;gap:8px;z-index:100}
   .toast{background:var(--card);border:1px solid var(--acc);border-radius:10px;padding:10px 14px;font-size:13px;
-    box-shadow:0 6px 18px rgba(0,0,0,.5);animation:tin .18s ease-out}
+    box-shadow:0 6px 18px var(--shadow);animation:tin .18s ease-out}
   .toast.err{border-color:var(--dup)}
   @keyframes tin{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 
-  /* ---- 加载 / 空态 ---- */
-  #busy{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(15,17,21,.45);z-index:90}
+  #busy{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(15,17,21,.35);z-index:90}
+  html[data-theme="light"] #busy{background:rgba(240,242,246,.5)}
   #busy.show{display:flex}
   .spin{width:34px;height:34px;border:3px solid var(--line);border-top-color:var(--acc);border-radius:50%;animation:sp .8s linear infinite}
   @keyframes sp{to{transform:rotate(360deg)}}
@@ -125,64 +122,73 @@
 </head>
 <body>
 <header>
-  <h1>素材<span>中心</span></h1>
+  <h1><span>◆</span> <span data-i18n="appTitle">素材中心</span></h1>
   <div class="fbar">
-    <input id="q" placeholder="搜索名称/标签/描述… (按 / 聚焦)">
+    <input id="q" data-i18n-ph="searchPh">
     <select id="mode" title="检索方式">
-      <option value="auto">自动(语义+关键词)</option>
-      <option value="lexical">精确关键词</option>
-      <option value="semantic">纯语义</option>
+      <option value="auto" data-i18n="modeAuto"></option>
+      <option value="lexical" data-i18n="modeLex"></option>
+      <option value="semantic" data-i18n="modeSem"></option>
     </select>
     <select id="sort" title="排序">
-      <option value="">相关性排序</option>
-      <option value="newest">最新优先</option>
-      <option value="oldest">最早优先</option>
-      <option value="name">名称 A→Z</option>
-      <option value="size">体积从大到小</option>
+      <option value="" data-i18n="sortRel"></option>
+      <option value="newest" data-i18n="newest"></option>
+      <option value="oldest" data-i18n="oldest"></option>
+      <option value="name" data-i18n="nameAZ"></option>
+      <option value="size" data-i18n="sizeDesc"></option>
     </select>
-    <button id="viewT" title="网格/列表视图切换">▦</button>
+    <button id="viewT" class="iconbtn" title="网格/列表">▦</button>
   </div>
   <div class="tools">
-    <button id="toolsBtn">工具 ▾</button>
+    <select id="langSel" title="Language / 语言">
+      <option value="zh">中文</option>
+      <option value="ja">日本語</option>
+      <option value="ko">한국어</option>
+      <option value="en">English</option>
+      <option value="ru">Русский</option>
+      <option value="hi">हिन्दी</option>
+    </select>
+    <button id="themeBtn" class="iconbtn" title="主题">🌗</button>
+    <button id="toolsBtn" data-i18n="tools">工具 ▾</button>
     <div class="menu" id="toolsMenu">
-      <button id="refresh">↻ 刷新</button>
-      <button id="pick">⬆ 上传文件</button>
+      <button id="refresh" data-i18n="refresh"></button>
+      <button id="pick" data-i18n="upload"></button>
       <div class="sep"></div>
-      <button id="ingest">整理 ingest/</button>
-      <button id="scan">扫描 materials/</button>
-      <button id="thumbs">生成封面</button>
-      <button id="embed">构建语义索引</button>
+      <button id="ingest" data-i18n="ingest"></button>
+      <button id="scan" data-i18n="scan"></button>
+      <button id="thumbs" data-i18n="genThumbs"></button>
+      <button id="embed" data-i18n="buildIndex"></button>
       <div class="sep"></div>
-      <button id="dupes">重复清理</button>
-      <button id="exportJson">导出 JSON</button>
-      <button id="exportCsv">导出 CSV</button>
+      <button id="dupes" data-i18n="dupes"></button>
+      <button id="exportJson" data-i18n="exportJson"></button>
+      <button id="exportCsv" data-i18n="exportCsv"></button>
     </div>
   </div>
   <input id="file" type="file" multiple hidden>
   <!-- 标签下拉保留为隐藏元素:filters()/populateTags()/hash 同步仍以它为数据源,UI 上由左侧标签云呈现 -->
-  <select id="tag" hidden><option value="">全部标签</option></select>
+  <select id="tag" hidden><option value=""></option></select>
 </header>
 
 <div class="layout">
   <aside>
-    <h3>类型</h3>
+    <h3 data-i18n="typeLabel"></h3>
     <div id="kindFacets"></div>
-    <h3>标签</h3>
+    <h3 data-i18n="tagsLabel"></h3>
     <div class="tagcloud" id="tagCloud"></div>
-    <button class="asidebtn" id="clearFacet" style="display:none">✕ 清除过滤</button>
+    <button class="asidebtn" id="clearFacet" style="display:none" data-i18n="clearFilter"></button>
   </aside>
   <div class="main">
-    <div class="stats" id="stats">加载中…</div>
+    <div class="stats" id="stats">…</div>
     <div class="grid" id="grid"></div>
     <div class="pager">
-      <button id="prev">上一页</button>
+      <button id="prev" data-i18n="prevPage"></button>
       <span id="pageInfo"></span>
-      <button id="next">下一页</button>
+      <button id="next" data-i18n="nextPage"></button>
       <select id="pageSize">
-        <option value="24">24 / 页</option>
-        <option value="48" selected>48 / 页</option>
-        <option value="96">96 / 页</option>
-        <option value="0">全部</option>
+        <option value="24">24</option>
+        <option value="48" selected>48</option>
+        <option value="96">96</option>
+        <option value="0" data-i18n="all"></option>
       </select>
     </div>
   </div>
@@ -190,23 +196,20 @@
 
 <div id="detModal" class="modal"><div class="box" id="detBox"></div></div>
 <div id="dupModal" class="modal"><div class="box">
-  <h2>重复素材(按 SHA-256 相同)</h2>
+  <h2 data-i18n="dupTitle"></h2>
   <div id="dupBody"></div>
-  <div style="text-align:right;margin-top:12px"><button id="dupClose">关闭</button></div>
+  <div style="text-align:right;margin-top:12px"><button id="dupClose" data-i18n="close"></button></div>
 </div></div>
 <div id="brokenModal" class="modal"><div class="box">
-  <h2>失效的外部引用</h2>
-  <div class="meta" style="margin-bottom:8px">
-    这些条目指向的原文件已被上游删除或移动。清理只删索引记录,<b>不会删除任何磁盘文件</b>;
-    原文件恢复后再跑一次 bridge 即可重新登记。
-  </div>
+  <h2 data-i18n="brokenTitle"></h2>
+  <div class="meta" style="margin-bottom:8px" data-i18n="brokenNote"></div>
   <div id="brokenBody"></div>
   <div style="text-align:right;margin-top:12px">
-    <button id="brokenPrune">清理全部</button>
-    <button id="brokenClose">关闭</button>
+    <button id="brokenPrune" data-i18n="pruneAll"></button>
+    <button id="brokenClose" data-i18n="close"></button>
   </div>
 </div></div>
-<div id="drop">松手即可上传</div>
+<div id="drop" data-i18n="dropHint">松手即可上传</div>
 <div id="busy"><div class="spin"></div></div>
 <div id="toasts"></div>
 
@@ -214,24 +217,176 @@
 const $ = s => document.querySelector(s);
 const api = (p,o)=>fetch(p,o).then(r=>r.json());
 
+/* ================= i18n(中/日/韩/英/俄/印地) ================= */
+const I18N = {
+zh:{appTitle:"素材中心",searchPh:"搜索名称/标签/描述… (按 / 聚焦)",modeAuto:"自动(语义+关键词)",modeLex:"精确关键词",modeSem:"纯语义",
+   sortRel:"相关性排序",newest:"最新优先",oldest:"最早优先",nameAZ:"名称 A→Z",sizeDesc:"体积从大到小",tools:"工具 ▾",
+   refresh:"↻ 刷新",upload:"⬆ 上传文件",ingest:"整理 ingest/",scan:"扫描 materials/",genThumbs:"生成封面",buildIndex:"构建语义索引",
+   dupes:"重复清理",exportJson:"导出 JSON",exportCsv:"导出 CSV",typeLabel:"类型",tagsLabel:"标签",clearFilter:"✕ 清除过滤",
+   all:"全部",kind_images:"图片",kind_videos:"视频",kind_docs:"文档",kind_audio:"音频",kind_subs:"字幕",kind_other:"其他",
+   prevPage:"上一页",nextPage:"下一页",perPage:"/ 页",noMatch:"无匹配结果",pageOf:"第 {p} / {n} 页 · 共 {t} 条",
+   statTotal:"库内",dupesW:"重复",groupsW:"组",extW:"外部引用",refsOk:"引用完整",brokenW:"失效",semW:"语义",healthW:"健康",
+   renderedW:"已渲染",empty:"没有匹配的素材",emptyHint:"试试清空过滤、切换「精确关键词」、或换个说法",
+   copyPath:"复制路径",openNew:"新窗口打开",save:"保存",del:"删除",close:"关闭",typeSize:"类型 / 体积",regTime:"登记时间",
+   loc:"位置",path:"路径",tagsPh:"标签,逗号分隔",descPh:"描述…",fileMissing:"原文件缺失",coverBad:"封面不可用",
+   dupTitle:"重复素材(按 SHA-256 相同)",dupEmpty:"没有重复素材 🎉",dupSame:"个相同文件 · sha256",pruneAll:"清理全部",
+   pruneMsg:"已清理 {n} 条失效索引(磁盘文件未动)",brokenTitle:"失效的外部引用",
+   brokenNote:"这些条目指向的原文件已被上游删除或移动。清理只删索引记录,不会删除任何磁盘文件;原文件恢复后再跑一次 bridge 即可重新登记。",
+   refsIntact:"引用完整,没有失效项",confirmDel:"删除 {name} ?",savedT:"已保存",deletedT:"已删除",copiedT:"路径已复制",
+   copyFailT:"复制失败",uploadedT:"已上传 {n} 个文件",ingestT:"ingest/ 整理完成",scanT:"materials/ 扫描完成",
+   idxT:"语义索引构建已启动",thumbT:"封面生成已启动",noEmbed:"未发现本地 embedding 模型",noFFmpeg:"本机未安装 ffmpeg,已回退浏览器截帧",
+   thumbServer:"服务端抽帧(缓存 {n})",thumbClient:"浏览器截帧(本机无 ffmpeg)",thumbGen:"生成中 {d}/{t}",cachedW:"缓存",
+   unavailW:"不可用",buildingW:"构建中 {d}/{t}",notEnabled:"未启用(无本地 embedding 模型)",warn:"告警(失效 {n})"},
+ja:{appTitle:"素材ハブ",searchPh:"名前/タグ/説明を検索…(/ でフォーカス)",modeAuto:"自動(セマンティック+キーワード)",modeLex:"キーワード一致",
+   modeSem:"セマンティックのみ",sortRel:"関連度順",newest:"新しい順",oldest:"古い順",nameAZ:"名前 A→Z",sizeDesc:"サイズが大きい順",
+   tools:"ツール ▾",refresh:"↻ 更新",upload:"⬆ アップロード",ingest:"ingest/ を整理",scan:"materials/ をスキャン",
+   genThumbs:"カバー生成",buildIndex:"セマンティック索引構築",dupes:"重複チェック",exportJson:"JSON 出力",exportCsv:"CSV 出力",
+   typeLabel:"種類",tagsLabel:"タグ",clearFilter:"✕ フィルタ解除",all:"すべて",kind_images:"画像",kind_videos:"動画",
+   kind_docs:"ドキュメント",kind_audio:"音声",kind_subs:"字幕",kind_other:"その他",prevPage:"前へ",nextPage:"次へ",
+   perPage:"/ ページ",noMatch:"該当なし",pageOf:"{p} / {n} ページ · 全 {t} 件",statTotal:"登録",dupesW:"重複",groupsW:"組",
+   extW:"外部参照",refsOk:"参照は完全",brokenW:"不通",semW:"セマンティック",healthW:"健康",renderedW:"描画済み",
+   empty:"該当する素材がありません",emptyHint:"フィルタ解除や「キーワード一致」への切替をお試しください",
+   copyPath:"パスをコピー",openNew:"新しいタブで開く",save:"保存",del:"削除",close:"閉じる",typeSize:"種類 / サイズ",
+   regTime:"登録日時",loc:"場所",path:"パス",tagsPh:"タグ(カンマ区切り)",descPh:"説明…",fileMissing:"元ファイルなし",
+   coverBad:"カバー不可",dupTitle:"重複素材(SHA-256 同一)",dupEmpty:"重複なし 🎉",dupSame:"件の同一ファイル · sha256",
+   pruneAll:"すべて整理",pruneMsg:"不通インデックス {n} 件を整理しました(ディスクファイルは未変更)",brokenTitle:"不通の外部参照",
+   brokenNote:"これらの参照先ファイルは上流で削除/移動されました。整理はインデックス削除のみでディスクファイルは変更しません。復元後 bridge を再実行すると再登録されます。",
+   refsIntact:"参照は完全です",confirmDel:"{name} を削除しますか?",savedT:"保存しました",deletedT:"削除しました",
+   copiedT:"パスをコピーしました",copyFailT:"コピー失敗",uploadedT:"{n} 件アップロードしました",ingestT:"ingest/ 整理完了",
+   scanT:"materials/ スキャン完了",idxT:"セマンティック索引の構築を開始",thumbT:"カバー生成を開始",
+   noEmbed:"ローカル embedding モデルが見つかりません",noFFmpeg:"ffmpeg がないためブラウザ截帧にフォールバック",
+   thumbServer:"サーバー抽帧(キャッシュ {n})",thumbClient:"ブラウザ抽帧(ffmpeg なし)",thumbGen:"生成中 {d}/{t}",
+   cachedW:"キャッシュ",unavailW:"不可",buildingW:"構築中 {d}/{t}",notEnabled:"無効(ローカル embedding モデルなし)",warn:"警告(不通 {n})"},
+ko:{appTitle:"소재 허브",searchPh:"이름/태그/설명 검색…(/ 포커스)",modeAuto:"자동(시맨틱+키워드)",modeLex:"키워드 일치",
+   modeSem:"시맨틱만",sortRel:"관련도순",newest:"최신순",oldest:"오래된순",nameAZ:"이름 A→Z",sizeDesc:"크기 큰순",
+   tools:"도구 ▾",refresh:"↻ 새로고침",upload:"⬆ 파일 업로드",ingest:"ingest/ 정리",scan:"materials/ 스캔",
+   genThumbs:"커버 생성",buildIndex:"시맨틱 인덱스 구축",dupes:"중복 정리",exportJson:"JSON 내보내기",exportCsv:"CSV 내보내기",
+   typeLabel:"종류",tagsLabel:"태그",clearFilter:"✕ 필터 해제",all:"전체",kind_images:"이미지",kind_videos:"동영상",
+   kind_docs:"문서",kind_audio:"오디오",kind_subs:"자막",kind_other:"기타",prevPage:"이전",nextPage:"다음",
+   perPage:"/ 페이지",noMatch:"결과 없음",pageOf:"{p} / {n} 페이지 · 총 {t}건",statTotal:"보유",dupesW:"중복",groupsW:"조",
+   extW:"외부 참조",refsOk:"참조 정상",brokenW:"끊김",semW:"시맨틱",healthW:"상태",renderedW:"렌더링",
+   empty:"일치하는 소재가 없습니다",emptyHint:"필터 해제 또는 「키워드 일치」 전환을 시도해 보세요",
+   copyPath:"경로 복사",openNew:"새 탭에서 열기",save:"저장",del:"삭제",close:"닫기",typeSize:"종류 / 크기",
+   regTime:"등록 시각",loc:"위치",path:"경로",tagsPh:"태그(쉼표 구분)",descPh:"설명…",fileMissing:"원본 파일 없음",
+   coverBad:"커버 불가",dupTitle:"중복 소재(SHA-256 동일)",dupEmpty:"중복 없음 🎉",dupSame:"개 동일 파일 · sha256",
+   pruneAll:"모두 정리",pruneMsg:"끊긴 인덱스 {n}건 정리 완료(디스크 파일 미변경)",brokenTitle:"끊긴 외부 참조",
+   brokenNote:"이 항목들의 원본 파일은 업스트림에서 삭제/이동되었습니다. 정리는 인덱스만 삭제하며 디스크 파일은 변경하지 않습니다. 복원 후 bridge를 다시 실행하면 재등록됩니다.",
+   refsIntact:"참조가 정상입니다",confirmDel:"{name} 을(를) 삭제할까요?",savedT:"저장됨",deletedT:"삭제됨",
+   copiedT:"경로 복사됨",copyFailT:"복사 실패",uploadedT:"{n}개 업로드됨",ingestT:"ingest/ 정리 완료",
+   scanT:"materials/ 스캔 완료",idxT:"시맨틱 인덱스 구축 시작",thumbT:"커버 생성 시작",
+   noEmbed:"로컬 embedding 모델이 없습니다",noFFmpeg:"ffmpeg 이 없어 브라우저 썸네일로 대체",
+   thumbServer:"서버 썸네일(캐시 {n})",thumbClient:"브라우저 썸네일(ffmpeg 없음)",thumbGen:"생성 중 {d}/{t}",
+   cachedW:"캐시",unavailW:"불가",buildingW:"구축 중 {d}/{t}",notEnabled:"비활성(로컬 embedding 모델 없음)",warn:"경고(끊김 {n})"},
+en:{appTitle:"Material Hub",searchPh:"Search name/tag/description… (press /)",modeAuto:"Auto (semantic + keyword)",
+   modeLex:"Exact keyword",modeSem:"Semantic only",sortRel:"Sort: relevance",newest:"Newest first",oldest:"Oldest first",
+   nameAZ:"Name A→Z",sizeDesc:"Largest first",tools:"Tools ▾",refresh:"↻ Refresh",upload:"⬆ Upload files",
+   ingest:"Tidy ingest/",scan:"Scan materials/",genThumbs:"Generate covers",buildIndex:"Build semantic index",
+   dupes:"Duplicates",exportJson:"Export JSON",exportCsv:"Export CSV",typeLabel:"TYPE",tagsLabel:"TAGS",
+   clearFilter:"✕ Clear filters",all:"All",kind_images:"Images",kind_videos:"Videos",kind_docs:"Docs",kind_audio:"Audio",
+   kind_subs:"Subtitles",kind_other:"Other",prevPage:"Prev",nextPage:"Next",perPage:"/ page",noMatch:"No matches",
+   pageOf:"Page {p} / {n} · {t} items",statTotal:"assets",dupesW:"duplicates",groupsW:"sets",extW:"external refs",
+   refsOk:"refs intact",brokenW:"broken",semW:"semantic",healthW:"health",renderedW:"rendered",empty:"No matching materials",
+   emptyHint:"Try clearing filters or switching to Exact keyword",copyPath:"Copy path",openNew:"Open in new tab",
+   save:"Save",del:"Delete",close:"Close",typeSize:"Kind / size",regTime:"Registered",loc:"Location",path:"Path",
+   tagsPh:"tags, comma separated",descPh:"Description…",fileMissing:"source missing",coverBad:"no cover",
+   dupTitle:"Duplicate assets (same SHA-256)",dupEmpty:"No duplicates 🎉",dupSame:"identical files · sha256",
+   pruneAll:"Prune all",pruneMsg:"Pruned {n} stale index entries (disk files untouched)",brokenTitle:"Broken external references",
+   brokenNote:"These entries point to files deleted or moved upstream. Pruning removes index records only and never touches disk files; re-run bridge after the source is restored.",
+   refsIntact:"References intact, nothing broken",confirmDel:"Delete {name} ?",savedT:"Saved",deletedT:"Deleted",
+   copiedT:"Path copied",copyFailT:"Copy failed",uploadedT:"Uploaded {n} file(s)",ingestT:"ingest/ tidy done",
+   scanT:"materials/ scan done",idxT:"Semantic index build started",thumbT:"Cover generation started",
+   noEmbed:"No local embedding model found",noFFmpeg:"ffmpeg not found, falling back to browser thumbnails",
+   thumbServer:"server thumbs (cached {n})",thumbClient:"browser thumbnails (no ffmpeg)",thumbGen:"generating {d}/{t}",
+   cachedW:"cached",unavailW:"unavailable",buildingW:"building {d}/{t}",notEnabled:"not enabled (no local embedding model)",warn:"alert ({n} broken)"},
+ru:{appTitle:"Хаб материалов",searchPh:"Поиск по имени/тегам/описанию… (/ — фокус)",modeAuto:"Авто (семантика+ключ. слова)",
+   modeLex:"Точное совпадение",modeSem:"Только семантика",sortRel:"По релевантности",newest:"Сначала новые",
+   oldest:"Сначала старые",nameAZ:"Имя А→Я",sizeDesc:"Размер: сначала большие",tools:"Инструменты ▾",
+   refresh:"↻ Обновить",upload:"⬆ Загрузить файлы",ingest:"Разобрать ingest/",scan:"Сканировать materials/",
+   genThumbs:"Создать обложки",buildIndex:"Построить семантич. индекс",dupes:"Дубликаты",exportJson:"Экспорт JSON",
+   exportCsv:"Экспорт CSV",typeLabel:"ТИП",tagsLabel:"ТЕГИ",clearFilter:"✕ Сбросить фильтры",all:"Все",
+   kind_images:"Изображения",kind_videos:"Видео",kind_docs:"Документы",kind_audio:"Аудио",kind_subs:"Субтитры",
+   kind_other:"Другое",prevPage:"Назад",nextPage:"Далее",perPage:"/ стр.",noMatch:"Нет совпадений",
+   pageOf:"Стр. {p} / {n} · всего {t}",statTotal:"материалов",dupesW:"дубликатов",groupsW:"наборов",
+   extW:"внешних ссылок",refsOk:"ссылки целы",brokenW:"битых",semW:"семантика",healthW:"здоровье",renderedW:"отрисовано",
+   empty:"Совпадений нет",emptyHint:"Попробуйте сбросить фильтры или включить «Точное совпадение»",
+   copyPath:"Копировать путь",openNew:"Открыть в новой вкладке",save:"Сохранить",del:"Удалить",close:"Закрыть",
+   typeSize:"Тип / размер",regTime:"Зарегистрировано",loc:"Расположение",path:"Путь",tagsPh:"теги, через запятую",
+   descPh:"Описание…",fileMissing:"исходник отсутствует",coverBad:"нет обложки",dupTitle:"Дубликаты (тот же SHA-256)",
+   dupEmpty:"Дубликатов нет 🎉",dupSame:"одинаковых файлов · sha256",pruneAll:"Очистить все",
+   pruneMsg:"Удалено {n} битых записей индекса (файлы на диске не тронуты)",brokenTitle:"Битые внешние ссылки",
+   brokenNote:"Эти записи указывают на файлы, удалённые или перемещённые выше по цепочке. Очистка удаляет только записи индекса и никогда не трогает файлы на диске; после восстановления запустите bridge повторно.",
+   refsIntact:"Ссылки целы, битых нет",confirmDel:"Удалить {name} ?",savedT:"Сохранено",deletedT:"Удалено",
+   copiedT:"Путь скопирован",copyFailT:"Не удалось скопировать",uploadedT:"Загружено файлов: {n}",
+   ingestT:"Разбор ingest/ завершён",scanT:"Сканирование materials/ завершено",idxT:"Построение семантического индекса запущено",
+   thumbT:"Создание обложек запущено",noEmbed:"Локальная embedding-модель не найдена",
+   noFFmpeg:"ffmpeg не найден, используется захват кадров в браузере",thumbServer:"обложки на сервере (кэш {n})",
+   thumbClient:"обложки в браузере (нет ffmpeg)",thumbGen:"создание {d}/{t}",cachedW:"кэш",unavailW:"недоступно",
+   buildingW:"построение {d}/{t}",notEnabled:"отключено (нет локальной embedding-модели)",warn:"внимание ({n} битых)"},
+hi:{appTitle:"सामग्री हब",searchPh:"नाम/टैग/विवरण खोजें… (/ फ़ोकस)",modeAuto:"स्वतः (सिमेंटिक+कीवर्ड)",
+   modeLex:"सटीक कीवर्ड",modeSem:"केवल सिमेंटिक",sortRel:"प्रासंगिकता क्रम",newest:"नवीनतम पहले",oldest:"सबसे पुराने पहले",
+   nameAZ:"नाम A→Z",sizeDesc:"आकार: बड़े पहले",tools:"टूल ▾",refresh:"↻ रिफ्रेश",upload:"⬆ फ़ाइलें अपलोड करें",
+   ingest:"ingest/ व्यवस्थित करें",scan:"materials/ स्कैन करें",genThumbs:"कवर बनाएं",buildIndex:"सिमेंटिक इंडेक्स बनाएं",
+   dupes:"डुप्लिकेट",exportJson:"JSON निर्यात",exportCsv:"CSV निर्यात",typeLabel:"प्रकार",tagsLabel:"टैग",
+   clearFilter:"✕ फ़िल्टर हटाएं",all:"सभी",kind_images:"चित्र",kind_videos:"वीडियो",kind_docs:"दस्तावेज़",kind_audio:"ऑडियो",
+   kind_subs:"उपशीर्षक",kind_other:"अन्य",prevPage:"पिछला",nextPage:"अगला",perPage:"/ पृष्ठ",noMatch:"कोई मेल नहीं",
+   pageOf:"पृष्ठ {p} / {n} · कुल {t}",statTotal:"सामग्री",dupesW:"डुप्लिकेट",groupsW:"सेट",extW:"बाहरी संदर्भ",
+   refsOk:"संदर्भ पूर्ण",brokenW:"टूटे",semW:"सिमेंटिक",healthW:"स्वास्थ्य",renderedW:"रेंडर किए",empty:"कोई मेल नहीं मिला",
+   emptyHint:"फ़िल्टर हटाएं या 「सटीक कीवर्ड」 पर स्विच करें",copyPath:"पाथ कॉपी करें",openNew:"नए टैब में खोलें",
+   save:"सहेजें",del:"हटाएं",close:"बंद करें",typeSize:"प्रकार / आकार",regTime:"पंजीकृत",loc:"स्थान",path:"पाथ",
+   tagsPh:"टैग, अल्पविराम से",descPh:"विवरण…",fileMissing:"स्रोत फ़ाइल अनुपलब्ध",coverBad:"कोई कवर नहीं",
+   dupTitle:"डुप्लिकेट सामग्री (समान SHA-256)",dupEmpty:"कोई डुप्लिकेट नहीं 🎉",dupSame:"समान फ़ाइलें · sha256",
+   pruneAll:"सब हटाएं",pruneMsg:"{n} पुरानी इंडेक्स प्रविष्टियाँ हटाई गईं (डिस्क फ़ाइलें अनछुई)",brokenTitle:"टूटे बाहरी संदर्भ",
+   brokenNote:"ये प्रविष्टियाँ ऐसी फ़ाइलों की ओर इशारा करती हैं जो अपस्ट्रीम में हटा दी गईं या हिल गईं। सफ़ाई केवल इंडेक्स हटाती है, डिस्क फ़ाइलें कभी नहीं छूती; स्रोत बहाल होने पर bridge दोबारा चलाएं।",
+   refsIntact:"संदर्भ पूर्ण, कुछ टूटा नहीं",confirmDel:"{name} हटाएं?",savedT:"सहेजा गया",deletedT:"हटाया गया",
+   copiedT:"पाथ कॉपी हुआ",copyFailT:"कॉपी विफल",uploadedT:"{n} फ़ाइलें अपलोड हुईं",ingestT:"ingest/ व्यवस्था पूर्ण",
+   scanT:"materials/ स्कैन पूर्ण",idxT:"सिमेंटिक इंडेक्स निर्माण शुरू",thumbT:"कवर निर्माण शुरू",
+   noEmbed:"कोई स्थानीय embedding मॉडल नहीं मिला",noFFmpeg:"ffmpeg नहीं मिला, ब्राउज़र थंबनेल पर जा रहे हैं",
+   thumbServer:"सर्वर थंबनेल (कैश {n})",thumbClient:"ब्राउज़र थंबनेल (ffmpeg नहीं)",thumbGen:"बन रहे हैं {d}/{t}",
+   cachedW:"कैश",unavailW:"अनुपलब्ध",buildingW:"निर्माण {d}/{t}",notEnabled:"अक्षम (कोई स्थानीय embedding मॉडल नहीं)",warn:"चेतावनी ({n} टूटे)"}
+};
+
+let LANG = localStorage.getItem("hub_lang") || "zh";
+function t(k){ return (I18N[LANG] && I18N[LANG][k]) || I18N.zh[k] || k; }
+function tfmt(k, vars){ let s=t(k); for(const [k2,v] of Object.entries(vars||{})) s=s.replace("{"+k2+"}", v); return s; }
+function applyI18n(){
+  document.documentElement.lang = LANG;
+  document.title = t("appTitle") + " · Materials Hub";
+  for(const el of document.querySelectorAll("[data-i18n]")) el.textContent = t(el.dataset.i18n);
+  for(const el of document.querySelectorAll("[data-i18n-ph]")) el.placeholder = t(el.dataset.i18nPh);
+}
+function setLang(l){
+  LANG = l; localStorage.setItem("hub_lang", l);
+  $("#langSel").value = l;
+  applyI18n(); load();
+}
+
+/* ================= 主题(深/浅) ================= */
+let THEME = localStorage.getItem("hub_theme") || "dark";
+function setTheme(th){
+  THEME = th; localStorage.setItem("hub_theme", th);
+  document.documentElement.dataset.theme = th;
+  $("#themeBtn").textContent = th==="dark" ? "☀" : "🌙";
+}
+$("#themeBtn").onclick=()=>setTheme(THEME==="dark"?"light":"dark");
+$("#langSel").onchange=e=>setLang(e.target.value);
+
 let THUMB_SERVER=false;            // 服务端能否抽帧(ffmpeg 可用)
 const thumbCache=new Map();        // id -> dataURL:浏览器截帧结果,避免重复抽
 let page=1, pageSize=48, totalRows=0;   // 分页状态
 let view = "grid";                 // grid | list
 
-/* ---------- toast(替代 alert 的非阻塞提示) ---------- */
+/* ---------- toast(非阻塞提示) ---------- */
 function toast(msg, err){
-  const t=document.createElement("div");
-  t.className="toast"+(err?" err":"");
-  t.textContent=msg;
-  $("#toasts").appendChild(t);
-  setTimeout(()=>{ t.style.opacity="0"; t.style.transition="opacity .3s"; setTimeout(()=>t.remove(),320); }, 2600);
+  const t2=document.createElement("div");
+  t2.className="toast"+(err?" err":"");
+  t2.textContent=msg;
+  $("#toasts").appendChild(t2);
+  setTimeout(()=>{ t2.style.opacity="0"; t2.style.transition="opacity .3s"; setTimeout(()=>t2.remove(),320); }, 2600);
 }
 const busy = on => $("#busy").classList.toggle("show", !!on);
 
-const filters = ()=>({q:$("#q").value.trim(), kind:$("#kindSel")?.value||kindSelValue(),
+const filters = ()=>({q:$("#q").value.trim(), kind:window.__kindVal||"",
                       tag:$("#tag").value, mode:$("#mode").value, sort:$("#sort").value});
-function kindSelValue(){ return window.__kindVal||""; }
 const qs = o => Object.entries(o).map(([k,v])=>`${k}=${encodeURIComponent(v)}`).join("&");
 function reload(){ page=1; load(); }    // 筛选条件变化时回到第 1 页
 
@@ -239,6 +394,9 @@ async function load(){
   busy(true);
   try{ await _load(); } finally { busy(false); }
 }
+
+const KIND_KEY = {images:"kind_images",videos:"kind_videos",docs:"kind_docs",audio:"kind_audio",subs:"kind_subs",other:"kind_other"};
+const kindName = k => t(KIND_KEY[k]||"kind_other");
 
 async function _load(){
   const f = filters();
@@ -253,34 +411,32 @@ async function _load(){
   THUMB_SERVER = !!(st.thumbs && st.thumbs.ffmpeg);
   renderFacets(st, f);
   const ex = st.external || {};
-  $("#stats").innerHTML = `库内 ${st.total} 个 · 重复 <a id="dupLink">${st.dupes}</a> 组 · ` +
-    Object.entries(st.kinds).map(([k,v])=>`${k}:${v}`).join("  ") +
-    ` · 封面 <span id="thumbInfo"></span> · ` +
+  $("#stats").innerHTML = `${t("statTotal")} ${st.total} · ${t("dupesW")} <a id="dupLink">${st.dupes}</a> ${t("groupsW")} · ` +
+    Object.entries(st.kinds).map(([k,v])=>`${kindName(k)}:${v}`).join("  ") +
+    ` · <span id="thumbInfo"></span> · ` +
     (ex.broken
-      ? `外部引用 ${ex.external} 条,<a id="brokenLink" class="bad">失效 ${ex.broken}</a>`
-      : `外部引用 ${ex.external||0} 条,引用完整`) +
-    ` · 语义 <span id="embedInfo"></span> · 健康 <a id="healthInfo"></a> · <span id="renderCheck"></span>`;
+      ? `${t("extW")} ${ex.external},<a id="brokenLink" class="bad">${t("brokenW")} ${ex.broken}</a>`
+      : `${t("extW")} ${ex.external||0},${t("refsOk")}`) +
+    ` · ${t("semW")} <span id="embedInfo"></span> · ${t("healthW")} <a id="healthInfo"></a> · <span id="renderCheck"></span>`;
   const hl=$("#healthInfo"); if(hl) hl.onclick=openHealth;
   const dl=$("#dupLink"); if(dl) dl.onclick=openDupes;
   const bl=$("#brokenLink"); if(bl) bl.onclick=openBroken;
   const grid=$("#grid"); grid.innerHTML="";
   if(!rows.length){
-    grid.innerHTML=`<div class="empty" style="grid-column:1/-1"><div class="big">🔍</div>没有匹配的素材<br>
-      <span style="font-size:12px">试试清空过滤、切换「精确关键词」、或换个说法</span></div>`;
+    grid.innerHTML=`<div class="empty" style="grid-column:1/-1"><div class="big">🔍</div>${t("empty")}<br>
+      <span style="font-size:12px">${t("emptyHint")}</span></div>`;
   }
   for(const m of rows){
     const c=document.createElement("div"); c.className="card";
     c.dataset.id=m.id;
     let thumb;
-    if(m.missing) thumb=`<div class="thumb" title="${m.external_path||""}"><div class="pill" style="border-color:var(--dup);color:var(--dup)">原文件缺失</div></div>`;
+    if(m.missing) thumb=`<div class="thumb" title="${m.external_path||""}"><div class="pill" style="border-color:var(--dup);color:var(--dup)">${t("fileMissing")}</div></div>`;
     else if(m.kind==="images") thumb=`<div class="thumb"><img src="/api/file/${m.id}" loading="lazy"></div>`;
     else if(m.kind==="videos"){
-      // 服务端已备好封面就直接写 poster(小 jpg,立即显示);
-      // 视频元数据仍靠 preload=metadata + 进视口才取,避免一次拉上百个视频。
       const poster = THUMB_SERVER && m.thumb;
       thumb=`<div class="thumb"><video data-id="${m.id}" src="/api/file/${m.id}" muted playsinline controls preload="metadata"` +
         (poster?` poster="/api/thumb/${m.id}"`:"") + `></video>` +
-        (THUMB_SERVER && !m.thumb ? `<div class="badge">封面不可用</div>` : "") + `</div>`;
+        (THUMB_SERVER && !m.thumb ? `<div class="badge">${t("coverBad")}</div>` : "") + `</div>`;
     }
     else if(m.kind==="audio") thumb=`<div class="thumb"><div class="ph">♪</div></div>`;
     else{
@@ -288,16 +444,16 @@ async function _load(){
       thumb=`<div class="thumb"><div class="pill">${ex}</div></div>`;
     }
     const size=(m.size/1048576).toFixed(2)+" MB";
-    const chips=(m.tags||"").split(",").map(t=>t.trim()).filter(Boolean).slice(0,4)
-      .map(t=>`<span class="chip">${t}</span>`).join("");
+    const chips=(m.tags||"").split(",").map(x=>x.trim()).filter(Boolean).slice(0,4)
+      .map(x=>`<span class="chip">${x}</span>`).join("");
     const desc=(m.description||"").replace(/\n+/g," ").slice(0,90);
     c.innerHTML = thumb + `
       <div class="body">
         <div class="name" title="${m.name}">${m.name}</div>
-        <div class="meta">${m.kind} · ${size}</div>
+        <div class="meta">${kindName(m.kind)} · ${size}</div>
         ${desc?`<p class="desc-p" title="${m.description||""}">${desc}</p>`:""}
       </div>
-      <div class="badges">${chips}${m.missing?`<span class="chip" style="color:var(--dup);border-color:var(--dup)">缺失</span>`:""}</div>`;
+      <div class="badges">${chips}${m.missing?`<span class="chip" style="color:var(--dup);border-color:var(--dup)">${t("fileMissing")}</span>`:""}</div>`;
     c.onclick=e=>{
       if(e.target.closest("video")) return;   // 视频卡片的原生控件不弹详情
       openDetail(m);
@@ -309,11 +465,10 @@ async function _load(){
   refreshThumbInfo();
   renderPager(pages);
   syncHash();
-  verifyRender(rows.length);   // 渲染后 DOM 计数核验:证明卡片真的画进 DOM,而非空壳
+  verifyRender(rows.length);
 }
 
-/* ---------- facet 侧栏(类型 chips + 标签云) ---------- */
-const KIND_CN = {images:"图片", videos:"视频", docs:"文档", audio:"音频", subs:"字幕", other:"其他"};
+/* ---------- facet 侧栏 ---------- */
 function renderFacets(st, f){
   const kf=$("#kindFacets"); kf.innerHTML="";
   const total=st.total||0;
@@ -321,35 +476,27 @@ function renderFacets(st, f){
     const d=document.createElement("div");
     d.className="facet"+(((f.kind||"")===val)?" on":"");
     d.innerHTML=`<span>${label}</span><span class="n">${n}</span>`;
-    d.onclick=()=>{ setKind(val); };
+    d.onclick=()=>{ window.__kindVal = val; reload(); };
     kf.appendChild(d);
   };
-  mk("", "全部", total);
-  for(const [k,v] of Object.entries(st.kinds||{})) mk(k, KIND_CN[k]||k, v);
-  // 标签云(前 24 个)
+  mk("", t("all"), total);
+  for(const [k,v] of Object.entries(st.kinds||{})) mk(k, kindName(k), v);
   api("/api/tags").then(tags=>{
     const tc=$("#tagCloud"); tc.innerHTML="";
-    for(const t of tags.slice(0,24)){
+    for(const tg of tags.slice(0,24)){
       const s=document.createElement("span");
-      s.className="tagchip"+(f.tag===t.tag?" on":"");
-      s.textContent=t.tag; s.title=`${t.tag} (${t.count})`;
-      s.onclick=()=>{ $("#tag").value = (f.tag===t.tag?"":t.tag); reload(); };
+      s.className="tagchip"+(f.tag===tg.tag?" on":"");
+      s.textContent=tg.tag; s.title=`${tg.tag} (${tg.count})`;
+      s.onclick=()=>{ $("#tag").value = (f.tag===tg.tag?"":tg.tag); reload(); };
       tc.appendChild(s);
     }
   }).catch(()=>{});
   $("#clearFacet").style.display = (f.kind||f.tag||f.q) ? "block" : "none";
 }
-function setKind(val){
-  window.__kindVal = val;
-  // 同步旧 select(隐藏)以兼容 filters();这里直接维护 __kindVal
-  reload();
-}
 $("#clearFacet").onclick=()=>{ $("#q").value=""; window.__kindVal=""; $("#tag").value=""; $("#sort").value=""; reload(); };
 
-/* ---------- 详情弹窗(点卡片打开:大预览+元数据+编辑) ---------- */
-let detCur=null;
+/* ---------- 详情弹窗 ---------- */
 function openDetail(m){
-  detCur=m;
   const size=(m.size/1048576).toFixed(2)+" MB";
   let prev;
   if(m.missing) prev=`<div class="prev"><div class="ph">⚠</div></div>`;
@@ -361,45 +508,45 @@ function openDetail(m){
     <h2>${m.name}</h2>
     ${prev}
     <div class="kv">
-      <span>类型 / 体积</span><b>${m.kind} · ${size}</b>
-      <span>登记时间</span><b>${m.created_at||"-"}</b>
-      <span>位置</span><b>${m.location||"-"}${m.missing?' <span style="color:var(--dup)">(原文件缺失)</span>':""}</b>
-      <span>路径</span><b title="${m.external_path||m.rel_path||""}">${(m.external_path||m.rel_path||"-")}</b>
+      <span>${t("typeSize")}</span><b>${kindName(m.kind)} · ${size}</b>
+      <span>${t("regTime")}</span><b>${m.created_at||"-"}</b>
+      <span>${t("loc")}</span><b>${m.location||"-"}${m.missing?' <span style="color:var(--dup)">('+t("fileMissing")+')</span>':""}</b>
+      <span>${t("path")}</span><b title="${m.external_path||m.rel_path||""}">${(m.external_path||m.rel_path||"-")}</b>
     </div>
-    <input class="tagin" placeholder="标签,逗号分隔" value="${m.tags||""}">
-    <textarea class="desc" placeholder="描述…">${m.description||""}</textarea>
+    <input class="tagin" placeholder="${t("tagsPh")}" value="${m.tags||""}">
+    <textarea class="desc" placeholder="${t("descPh")}">${m.description||""}</textarea>
     <div class="acts">
-      <button id="dCopy">复制路径</button>
-      ${m.missing?"":`<button id="dOpen">新窗口打开</button>`}
+      <button id="dCopy">${t("copyPath")}</button>
+      ${m.missing?"":`<button id="dOpen">${t("openNew")}</button>`}
       <span class="sp"></span>
-      <button id="dSave" style="border-color:var(--acc);color:var(--acc)">保存</button>
-      <button id="dDel" class="del" style="border-color:var(--dup);color:var(--dup)">删除</button>
-      <button id="dClose">关闭</button>
+      <button id="dSave" style="border-color:var(--acc);color:var(--acc)">${t("save")}</button>
+      <button id="dDel" style="border-color:var(--dup);color:var(--dup)">${t("del")}</button>
+      <button id="dClose">${t("close")}</button>
     </div>`;
   $("#detModal").classList.add("show");
   $("#dClose").onclick=closeDetail;
   $("#dCopy").onclick=()=>{
     const p=m.external_path||m.rel_path||"";
     (navigator.clipboard?navigator.clipboard.writeText(p):Promise.reject()).then(
-      ()=>toast("路径已复制"),()=>toast("复制失败",true));
+      ()=>toast(t("copiedT")),()=>toast(t("copyFailT"),true));
   };
   const open=$("#dOpen"); if(open) open.onclick=()=>window.open(`/api/file/${m.id}`);
   $("#dSave").onclick=async()=>{
     const tags=$("#detBox .tagin").value, desc=$("#detBox .desc").value;
     await api("/api/tag",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:m.id,tags})});
     await api("/api/describe",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:m.id,description:desc})});
-    toast("已保存");
+    toast(t("savedT"));
     closeDetail(); load();
   };
   $("#dDel").onclick=async()=>{
-    if(confirm("删除 "+m.name+" ?(外部引用只删索引,不动原文件)")){
+    if(confirm(tfmt("confirmDel",{name:m.name}))){
       await api("/api/remove",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:m.id})});
-      toast("已删除");
+      toast(t("deletedT"));
       closeDetail(); load();
     }
   };
 }
-function closeDetail(){ $("#detModal").classList.remove("show"); detCur=null; }
+function closeDetail(){ $("#detModal").classList.remove("show"); }
 $("#detModal").addEventListener("click",e=>{ if(e.target===e.currentTarget) closeDetail(); });
 
 /* ---------- 工具下拉菜单 ---------- */
@@ -426,29 +573,26 @@ $("#viewT").onclick=()=>{
   syncHash();
 };
 
-/* 渲染后 DOM 计数核验:把实际画出 .card 的数量与本次返回的 rows 数量比对,
-   结果同时写进 stats 行(可见)与 window.__renderCheck(供无头浏览器程序化读取)。
-   这是「卡片真的渲染了」的最直接证据,不依赖肉眼看图。 */
 function verifyRender(expected){
   const n = document.querySelectorAll("#grid .card").length;
   const ok = (n === expected);
   window.__renderCheck = {expected, rendered:n, ok, at:Date.now()};
   const el = document.getElementById("renderCheck");
   if(el){
-    el.textContent = `· 已渲染 ${n}/${expected} 张` + (ok ? "" : " ⚠ 不一致");
+    el.textContent = `· ${t("renderedW")} ${n}/${expected}` + (ok ? "" : " ⚠");
     el.style.color = ok ? "var(--acc)" : "var(--dup)";
   }
 }
 
 function renderPager(pages){
   $("#pageInfo").textContent = totalRows
-    ? `第 ${page} / ${Math.max(1, pages)} 页 · 共 ${totalRows} 条`
-    : "无匹配结果";
+    ? tfmt("pageOf",{p:page,n:Math.max(1,pages),t:totalRows})
+    : t("noMatch");
   $("#prev").disabled = page<=1;
   $("#next").disabled = page>=pages;
 }
 
-/* ---------- URL hash 同步:筛选项可收藏 / 可分享 / 可前进后退 ---------- */
+/* ---------- URL hash 同步 ---------- */
 function syncHash(){
   const f=filters(), o={};
   if(f.q) o.q=f.q;
@@ -463,7 +607,6 @@ function syncHash(){
 }
 
 function readHash(){
-  // 支持 query(?q=…)与 hash(#q=…)两种写法:hash 优先(便于分享/收藏)
   const p = new URLSearchParams(location.search.replace(/^\?/,""));
   const h = location.hash.replace(/^#/,"");
   if(h) for(const [k,v] of new URLSearchParams(h)) p.set(k,v);
@@ -479,13 +622,10 @@ function readHash(){
   pageSize = p.get("size")!==null ? (Number(p.get("size"))||0) : pageSize;
   if([...$("#pageSize").options].some(o=>o.value===String(pageSize))) $("#pageSize").value=String(pageSize);
   page = Math.max(1, Number(p.get("page"))||1);
-  return p.get("tag") || "";          // 标签下拉是异步填充的,留给调用方稍后设置
+  return p.get("tag") || "";
 }
 
-/* ---------- 视频封面 ----------
-   优先服务端 ffmpeg 抽帧(/api/thumb,磁盘缓存复用);
-   无 ffmpeg 时回退浏览器截帧:<video> 加载元数据 → seek 到 10% 处 → canvas 抓帧做 poster。
-   无论哪种模式都**进视口才取封面**,避免一次列出上百个视频时同时拉流/抽帧。 */
+/* ---------- 视频封面(服务端 ffmpeg 优先,浏览器截帧回退,进视口才取) ---------- */
 const thumbIO = (typeof IntersectionObserver!=="undefined")
   ? new IntersectionObserver(es=>{ for(const e of es){ if(e.isIntersecting){ thumbIO.unobserve(e.target); mountThumb(e.target); } } },{rootMargin:"300px"})
   : null;
@@ -499,7 +639,7 @@ function observeThumb(v){
 function mountThumb(v){
   if(v.dataset.mounted) return;
   v.dataset.mounted="1";
-  if(THUMB_SERVER) return;                // 服务端封面:poster 已在标签上,无需等观察器
+  if(THUMB_SERVER) return;
   clientThumb(v);
 }
 
@@ -518,49 +658,48 @@ function clientThumb(v){
   };
   v.addEventListener("seeked",grab,{once:true});
   v.addEventListener("loadedmetadata",()=>{
-    const t=Math.min(1,(v.duration||2)*0.1);
-    try{ v.currentTime = t>0 ? t : 0.1; }catch(e){}
-    setTimeout(grab,4000);   // 兜底:某些容器 seek 后不触发 seeked
+    const tm=Math.min(1,(v.duration||2)*0.1);
+    try{ v.currentTime = tm>0 ? tm : 0.1; }catch(e){}
+    setTimeout(grab,4000);
   },{once:true});
   try{ v.load(); }catch(e){}
 }
 
 let thumbJobActive=false, embedJobActive=false;
 
-async function refreshThumbInfo(){          // 同时刷新封面与语义索引状态(共用一次 /api/stats)
+async function refreshThumbInfo(){
   let st;
   try{ st = await api("/api/stats"); }catch(e){ return; }
 
-  const t = st.thumbs||{}, j = st.thumb_job||{};
+  const tt = st.thumbs||{}, j = st.thumb_job||{};
   const el = $("#thumbInfo");
   if(el){
-    let txt = t.ffmpeg
-      ? `服务端抽帧(缓存 ${t.cached}${t.failed?` · 不可用 ${t.failed}`:""})`
-      : "浏览器截帧(本机无 ffmpeg)";
-    if(j.running) txt += ` · 生成中 ${j.done}/${j.total}`;
+    let txt = tt.ffmpeg
+      ? tfmt("thumbServer",{n:tt.cached}) + (tt.failed?` · ${t("unavailW")} ${tt.failed}`:"")
+      : t("thumbClient");
+    if(j.running) txt += ` · ${tfmt("thumbGen",{d:j.done,t:j.total})}`;
     el.textContent = txt;
   }
-  const tbtn=$("#thumbs"); if(tbtn) tbtn.disabled = !t.ffmpeg || !!j.running;
+  const tbtn=$("#thumbs"); if(tbtn) tbtn.disabled = !tt.ffmpeg || !!j.running;
 
   const e = st.embed||{}, ej = e.job||{};
   const eel = $("#embedInfo");
   if(eel){
     let etxt;
-    if(!e.available) etxt = "未启用(无本地 embedding 模型)";
+    if(!e.available) etxt = t("notEnabled");
     else etxt = `${e.model} ${e.embedded}/${e.total}`;
-    if(ej.running) etxt += ` · 构建中 ${ej.done}/${ej.total}`;
+    if(ej.running) etxt += ` · ${tfmt("buildingW",{d:ej.done,t:ej.total})}`;
     else if(ej.error && e.available) etxt += ` · ${ej.error}`;
     eel.textContent = etxt;
   }
   const ebtn=$("#embed"); if(ebtn) ebtn.disabled = !e.available || !!ej.running;
 
-  // 健康检查(/api/health):服务整体状态
   try{
     const h = await api("/api/health");
     const he=$("#healthInfo");
     if(he){
       if(h.ok){ he.textContent="OK"; he.style.color="var(--acc)"; }
-      else { he.textContent="告警(失效 "+h.external.broken+")"; he.classList.add("bad"); }
+      else { he.textContent=tfmt("warn",{n:h.external.broken}); he.classList.add("bad"); }
     }
   }catch(e){}
 
@@ -569,38 +708,38 @@ async function refreshThumbInfo(){          // 同时刷新封面与语义索引
   if(ej.running){
     embedJobActive=true;
     setTimeout(refreshThumbInfo,1500);
-  }else if(embedJobActive){                 // 语义索引构建完毕 → 重搜一次
+  }else if(embedJobActive){
     embedJobActive=false;
     load();
   }
 }
 
-const refreshEmbedInfo = refreshThumbInfo;  // 「构建语义索引」按钮复用同一刷新
+const refreshEmbedInfo = refreshThumbInfo;
 
 $("#q").oninput=debounce(reload,250);
-$("#q").onkeydown=e=>{ if(e.key==="Enter"){ e.preventDefault(); reload(); } };  // 回车立即搜(随后防抖至多重跑一次,幂等)
+$("#q").onkeydown=e=>{ if(e.key==="Enter"){ e.preventDefault(); reload(); } };
 $("#sort").onchange=reload;
-$("#mode").onchange=reload;                       // 切换检索方式
+$("#mode").onchange=reload;
 $("#refresh").onclick=load;
 $("#embed").onclick=async()=>{
   const r = await api("/api/embed",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
-  if(r.available===false){ toast(r.hint||"未发现本地 embedding 模型",true); return; }
-  toast("语义索引构建已启动");
+  if(r.available===false){ toast(r.hint||t("noEmbed"),true); return; }
+  toast(t("idxT"));
   refreshEmbedInfo();
 };
 $("#prev").onclick=()=>{ if(page>1){ page--; load(); } };
 $("#next").onclick=()=>{ const pages=Math.max(1,Math.ceil(totalRows/pageSize)); if(page<pages){ page++; load(); } };
 $("#pageSize").onchange=e=>{ pageSize=Number(e.target.value)||0; page=1; load(); };
-$("#ingest").onclick=async()=>{ await api("/api/ingest",{method:"POST"}); toast("ingest/ 整理完成"); reload(); };  // 新素材在第 1 页
-$("#scan").onclick=async()=>{ await api("/api/scan",{method:"POST"}); toast("materials/ 扫描完成"); reload(); };
+$("#ingest").onclick=async()=>{ await api("/api/ingest",{method:"POST"}); toast(t("ingestT")); reload(); };
+$("#scan").onclick=async()=>{ await api("/api/scan",{method:"POST"}); toast(t("scanT")); reload(); };
 $("#pick").onclick=()=>$("#file").click();
 $("#exportJson").onclick=()=>window.open("/api/export?fmt=json");
 $("#exportCsv").onclick=()=>window.open("/api/export?fmt=csv");
 $("#dupes").onclick=openDupes;
 $("#thumbs").onclick=async()=>{
   const r = await api("/api/thumbs",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
-  if(r.ffmpeg===false){ toast(r.hint||"本机未安装 ffmpeg,已回退浏览器截帧",true); return; }
-  toast("封面生成已启动");
+  if(r.ffmpeg===false){ toast(r.hint||t("noFFmpeg"),true); return; }
+  toast(t("thumbT"));
   refreshThumbInfo();
 };
 $("#dupClose").onclick=()=>$("#dupModal").classList.remove("show");
@@ -611,8 +750,8 @@ async function upload(files){
     const fd=new FormData(); fd.append("file",f);
     await fetch("/api/upload",{method:"POST",body:fd});
   }
-  toast(`已上传 ${files.length} 个文件`);
-  reload();                                  // 上传后回第 1 页看新素材
+  toast(tfmt("uploadedT",{n:files.length}));
+  reload();
 }
 
 async function openDupes(){
@@ -620,17 +759,17 @@ async function openDupes(){
   const all = await api("/api/list");
   const byId={}; all.forEach(m=>byId[m.id]=m);
   const body=$("#dupBody"); body.innerHTML="";
-  if(!d.length){ body.innerHTML='<div class="meta">没有重复素材 🎉</div>'; }
+  if(!d.length){ body.innerHTML=`<div class="meta">${t("dupEmpty")}</div>`; }
   else for(const g of d){
     const ids=(g.ids||"").split(",").filter(Boolean);
     const grp=document.createElement("div"); grp.className="grp";
-    grp.innerHTML=`<div class="gh">${ids.length} 个相同文件 · sha256:${g.sha256.slice(0,12)}…</div>`;
+    grp.innerHTML=`<div class="gh">${ids.length} ${t("dupSame")}:${g.sha256.slice(0,12)}…</div>`;
     for(const id of ids){
-      const m=byId[id]; const nm=m?m.name:"(未知 "+id+")";
+      const m=byId[id]; const nm=m?m.name:"(?)";
       const it=document.createElement("div"); it.className="item";
-      it.innerHTML=`<span class="nm" title="${id}">${nm}</span><button class="del">删除</button>`;
+      it.innerHTML=`<span class="nm" title="${id}">${nm}</span><button class="del">${t("del")}</button>`;
       it.querySelector("button").onclick=async()=>{
-        if(confirm("删除 "+nm+" ?")){ await api("/api/remove",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})}); openDupes(); load(); }
+        if(confirm(tfmt("confirmDel",{name:nm}))){ await api("/api/remove",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})}); openDupes(); load(); }
       };
       grp.appendChild(it);
     }
@@ -639,18 +778,17 @@ async function openDupes(){
   $("#dupModal").classList.add("show");
 }
 
-/* ---------- 失效外部引用(引用完整性巡检) ---------- */
 async function openBroken(){
   const rows = await api("/api/broken");
   const body=$("#brokenBody"); body.innerHTML="";
   $("#brokenPrune").disabled = !rows.length;
   if(!rows.length){
-    body.innerHTML='<div class="meta">引用完整,没有失效项</div>';
+    body.innerHTML=`<div class="meta">${t("refsIntact")}</div>`;
   }else{
     for(const m of rows){
       const d=document.createElement("div"); d.className="item";
       d.title = m.external_path;
-      d.innerHTML=`<span class="nm">${m.name}</span><span class="meta">${m.kind} · ${m.source||"-"}</span>`;
+      d.innerHTML=`<span class="nm">${m.name}</span><span class="meta">${kindName(m.kind)} · ${m.source||"-"}</span>`;
       body.appendChild(d);
     }
   }
@@ -660,7 +798,7 @@ $("#brokenClose").onclick=()=>$("#brokenModal").classList.remove("show");
 async function openHealth(){const h=await api("/api/health");alert(JSON.stringify(h,null,2));}
 $("#brokenPrune").onclick=async()=>{
   const r = await api("/api/prune",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
-  toast(`已清理 ${r.pruned} 条失效索引(磁盘文件未动)`);
+  toast(tfmt("pruneMsg",{n:r.pruned}));
   $("#brokenModal").classList.remove("show");
   load();
 };
@@ -670,23 +808,26 @@ const drop=$("#drop");
 ["dragleave","drop"].forEach(ev=>document.addEventListener(ev,e=>{e.preventDefault();if(ev==="drop"||e.target===drop)drop.style.display="none";}));
 drop.ondrop=e=>{ e.preventDefault(); drop.style.display="none"; upload(e.dataTransfer.files); };
 
-function debounce(fn,ms){let t;return(...a)=>{clearTimeout(t);t=setTimeout(()=>fn(...a),ms);};}
+function debounce(fn,ms){let t3;return(...a)=>{clearTimeout(t3);t3=setTimeout(()=>fn(...a),ms);};}
 
-function selectTag(t){
-  if(!t) return;
-  if([...$("#tag").options].some(o=>o.value===t)) $("#tag").value=t;
+function selectTag(tg){
+  if(!tg) return;
+  if([...$("#tag").options].some(o=>o.value===tg)) $("#tag").value=tg;
 }
 
 (async function init(){
-  const tagFromHash = readHash();     // 先按 hash 还原筛选/分页
+  setTheme(THEME);
+  $("#langSel").value = LANG;
+  applyI18n();
+  const tagFromHash = readHash();
   await populateTags();
-  selectTag(tagFromHash);             // 标签下拉填充后才能选中
+  selectTag(tagFromHash);
   load();
 })();
 
-window.addEventListener("hashchange", ()=>{   // 支持浏览器前进/后退
-  const tag = readHash();
-  selectTag(tag);
+window.addEventListener("hashchange", ()=>{
+  const tg = readHash();
+  selectTag(tg);
   load();
 });
 
@@ -694,9 +835,9 @@ async function populateTags(){
   try{
     const tags = await api("/api/tags");
     const sel = $("#tag");
-    for(const t of tags){
+    for(const tg of tags){
       const o = document.createElement("option");
-      o.value = t.tag; o.textContent = `${t.tag} (${t.count})`;
+      o.value = tg.tag; o.textContent = `${tg.tag} (${tg.count})`;
       sel.appendChild(o);
     }
   }catch(e){}
