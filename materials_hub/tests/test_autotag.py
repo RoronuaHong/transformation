@@ -160,8 +160,9 @@ def test_normalize_llm_tags_guard():
     # 通用噪声标签(中英文)一律丢弃
     assert "video" not in out and "媒体" not in out and "scene" not in out
     assert "人物" not in out
-    # 系统溯源标签不动、不写入
-    assert "type:render" not in out and "sp" not in out and "job:9" not in out
+    # 系统溯源标签不动、不写入(冒号会被字符过滤剥掉,故按无冒号前缀严格校验)
+    assert all(not t.startswith(("type", "job", "sp")) for t in out), out
+    assert "job9" not in out and "typerender" not in out
     # 有意义的语义标签保留
     assert "dehardsub" in out
     assert "land-scape" in out          # 空格 → 连字符
@@ -169,6 +170,19 @@ def test_normalize_llm_tags_guard():
     assert ("a" * 25) not in out        # 超长(>20)丢弃
     assert out.count("dehardsub") == 1  # 去重保序
     assert len(out) <= core._LLM_TAG_MAX
+
+
+def test_normalize_drops_job_type_prefix_leak():
+    # 回归: 2026-09-28 验证发现的漏洞。字符过滤会剥掉冒号,
+    # job:fetch/type:render 若只按 "job:"/"type:" 校验会漏过(变成 jobfetch/typerender 入列)。
+    # 归一化后必须彻底丢弃, 不得有任何 type*/job* 前缀泄漏。
+    out = core._normalize_llm_tags(
+        ["job:fetch", "type:render", "Video", "媒体", "scene", "fix", "good", "Unknown"])
+    assert out == [], out
+    # 即便模型漏写冒号(typerender)也应拦掉
+    out2 = core._normalize_llm_tags(["typerender", "jobfetch", "deblur", "segment"])
+    assert "typerender" not in out2 and "jobfetch" not in out2, out2
+    assert "deblur" in out2 and "segment" in out2
 
 
 def test_autotag_drops_noise_tags_on_write():

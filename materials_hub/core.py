@@ -505,8 +505,9 @@ def _normalize_llm_tags(raw):
                     or ("\u4e00" <= ch <= "\u9fff"))
         if not s or s in seen or s in _LLM_TAG_STOP:
             continue
-        # 拦掉系统溯源标签(sp / type / job: 前缀),含模型漏写冒号的 typerender 变体
-        if s == "sp" or s.startswith(("type", "job:")):
+        # 拦掉系统溯源标签(sp / type / job 前缀)。注意上面的字符过滤会剥掉冒号,
+        # 故必须用无冒号前缀匹配(否则 job:fetch→jobfetch 会漏过)。
+        if s == "sp" or s.startswith(("type", "job")):
             continue
         if len(s) > _LLM_TAG_MAX_LEN:
             continue
