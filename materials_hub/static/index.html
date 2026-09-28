@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>素材中心 · Materials Hub</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%234f8cff'/%3E%3Ctext x='8' y='12' font-size='10' text-anchor='middle' fill='white'%3E%E7%B4%A0%3C/text%3E%3C/svg%3E">
 <style>
   :root{--bg:#0f1115;--card:#1a1d24;--line:#2a2f3a;--fg:#e6e8ec;--mut:#8b93a1;--acc:#4f8cff;--dup:#ff6b6b}
   *{box-sizing:border-box}
@@ -354,6 +355,7 @@ async function refreshThumbInfo(){          // 同时刷新封面与语义索引
 const refreshEmbedInfo = refreshThumbInfo;  // 「构建语义索引」按钮复用同一刷新
 
 $("#q").oninput=debounce(reload,250);
+$("#q").onkeydown=e=>{ if(e.key==="Enter"){ e.preventDefault(); reload(); } };  // 回车立即搜(随后防抖至多重跑一次,幂等)
 $("#kind").onchange=reload;
 $("#tag").onchange=reload;
 $("#refresh").onclick=load;
