@@ -342,17 +342,28 @@ def _ranked(q="", kind="", tag="", mode="auto"):
     return semantic_rank(q2, base, lex)
 
 
-def search(q="", kind="", tag="", limit=None, offset=0, mode="auto"):
+def search(q="", kind="", tag="", limit=None, offset=0, mode="auto", sort=""):
     """检索:自然语言问句 → 排序后返回,支持分页。
     mode="auto"     有 embedding 模型且素材已建向量 → 稠密+词法混合;
                     否则纯词法加权(与旧行为一致)
     mode="lexical"  强制词法;mode="semantic" 强制语义(无向量时自动回退词法)
-    limit=None 表示不分页;offset 在排序之后生效(全局偏移,非页内)。"""
-    ck = (q, kind, tag, limit, offset, mode)
+    limit=None 表示不分页;offset 在排序之后生效(全局偏移,非页内)。
+    sort=""         默认相关性/时间序;q 存在时=相关性,无 q=时间倒序。
+                    显式指定 "newest"/"oldest"/"name"/"size" 时覆盖相关性排序
+                    (DAM 面板的排序控件;在分页之前生效,全库级排序)。"""
+    ck = (q, kind, tag, limit, offset, mode, sort)
     if os.environ.get("VITUAL_CACHE_SEARCH"):
         if ck in _SEARCH_CACHE:
             return _SEARCH_CACHE[ck]
     rows, _ = _ranked(q, kind, tag, mode)
+    if sort in ("newest", "oldest", "name", "size"):
+        if sort == "name":
+            rows = sorted(rows, key=lambda m: (m.get("name") or "").lower())
+        elif sort == "size":
+            rows = sorted(rows, key=lambda m: m.get("size") or 0, reverse=True)
+        else:
+            key = lambda m: m.get("created_at") or ""        # noqa: E731
+            rows = sorted(rows, key=key, reverse=(sort == "newest"))
     if offset > 0 or limit is not None:
         end = None if limit is None else offset + limit
         rows = rows[offset:end]

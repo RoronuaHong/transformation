@@ -175,9 +175,11 @@ class Handler(BaseHTTPRequestHandler):
             lim = q.get("limit", [""])[0]
             off = q.get("offset", [""])[0]
             mode = q.get("mode", ["auto"])[0]
+            sort = q.get("sort", [""])[0]
             limit = int(lim) if lim.isdigit() else None   # 不传 limit = 不分页
             offset = int(off) if off.isdigit() else 0
-            rows = search(kw, kind, tag, limit=limit, offset=offset, mode=mode)
+            rows = search(kw, kind, tag, limit=limit, offset=offset, mode=mode,
+                          sort=sort if sort in ("newest", "oldest", "name", "size") else "")
             for m in rows:
                 # 给视频标注封面是否已就绪,前端据此决定要不要请求 poster
                 if m["kind"] == "videos":
