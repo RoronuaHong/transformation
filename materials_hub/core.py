@@ -1745,7 +1745,21 @@ def ocr_material(mid, frames=5, force=False):
     if not ocr_py:
         return {"id": mid, "status": "skipped", "reason": "no_ocr_python"}
     if m["kind"] == "images":
-        imgs, stamps = [(src, 0.0)], [None]
+        # 统一经 ffmpeg 标准化成 jpg 再识别:GIF(动图)/HEIC 等格式 cv2/RapidOCR 读不了,
+        # 而 ffmpeg 对所有图片格式通吃(GIF 取首帧动图起点);jpg/png 也顺手统一压缩带宽。
+        flags = 0x08000000 if os.name == "nt" else 0
+        std = os.path.join(OCR_DIR, "_f0.jpg")
+        cmd = [exe, "-v", "error", "-y", "-i", src, "-frames:v", "1",
+               "-vf", "scale=1280:-2", "-q:v", "4", std]
+        try:
+            subprocess.run(cmd, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=60,
+                           creationflags=flags)
+        except Exception:
+            std = None
+        if not std or not os.path.exists(std) or os.path.getsize(std) == 0:
+            return {"id": mid, "status": "error", "reason": "frame_extract_failed"}
+        imgs, stamps = [(std, 0.0)], [None]
     else:
         dur = _probe_duration(src)
         frames = max(1, min(int(frames or 5), 10))
