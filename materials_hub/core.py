@@ -135,7 +135,8 @@ def _init_db():
         )"""
     )
     for col, ddl in [("location", "TEXT DEFAULT 'internal'"),
-                     ("external_path", "TEXT DEFAULT ''")]:
+                     ("external_path", "TEXT DEFAULT ''"),
+                     ("ai_tags", "TEXT DEFAULT ''")]:
         try:
             con.execute(f"ALTER TABLE materials ADD COLUMN {col} {ddl}")
         except sqlite3.OperationalError:
@@ -466,13 +467,64 @@ def _build_tag_prompt(m):
         "subs/out/fixed...),不要造中文标签,也不要重复已有标签。")
 
 
+# ---------- LLM 标签归一化护栏 ----------
+# 防止 LLM 输出通用/噪声标签污染 tags(词法检索打分源)。
+# 见 2026-09-27/09-28 复盘: video/媒体/场景/人物 等通用标签会沦为词法噪声,拖垮 P@5。
+_LLM_TAG_STOP = {
+    # 语言/通用空标签(中英文)
+    "video","videos","media","multimedia","footage","clip","clips","scene","scenes",
+    "content","raw","person","people","character","characters","render","renders",
+    "material","materials","asset","assets","sample","samples","file","files",
+    "image","images","photo","photos","picture","pictures","audio","movie","movies",
+    "test","testing","demo","example","unknown","none","null","untitled","new","old",
+    "素材","视频","媒体","片段","场景","内容","人物","画面","渲染","测试","笔记",
+    "说明","预览","其他","无","空","默认","通用","杂","资料","文件","图片","照片",
+    # 通用动词/状态词(对检索无区分度,纯噪声)
+    "type","fix","fixed","fast","verify","verified","review","check","result",
+    "output","processed","final","clean","cleaned","enhanced","upscaled","restored",
+    "model","ai","tool","auto","batch","good","bad","best","high","low","quality",
+}
+_LLM_TAG_MAX = 6          # 单条最多保留的 LLM 标签数
+_LLM_TAG_MAX_LEN = 20     # 单标签最大长度(超长视为噪声/句子)
+AUTOTAG_BACKUP = os.path.join(INDEX_DIR, "autotag_backup.json")
+
+
+def _normalize_llm_tags(raw):
+    """把 LLM 返回的任意标签规整为安全、可用的 token。
+
+    - 小写、下划线/空格转连字符,仅保留 [a-z0-9 中文 -]
+    - 丢弃停用词/通用噪声标签、type:/sp/job: 等系统溯源标签、过长(>20)与超量(>6)标签
+    - 去重保序"""
+    out, seen = [], set()
+    for t in (raw or []):
+        if not t:
+            continue
+        s = str(t).strip().lower().replace("_", "-").replace(" ", "-")
+        s = "".join(ch for ch in s
+                    if ch == "-" or (ch.isascii() and ch.isalnum())
+                    or ("\u4e00" <= ch <= "\u9fff"))
+        if not s or s in seen or s in _LLM_TAG_STOP:
+            continue
+        if s == "sp" or s.startswith("type:") or s.startswith("job:"):
+            continue
+        if s == "type" or (s.startswith("type") and not s.startswith("type:")):
+            continue  # 拦掉模型把 type:render 拼成无冒号串(typerender)的情况
+        if len(s) > _LLM_TAG_MAX_LEN:
+            continue
+        seen.add(s)
+        out.append(s)
+        if len(out) >= _LLM_TAG_MAX:
+            break
+    return out
+
+
 def auto_tag_material(m, dry=False, model=None, models=None):
     """用本地 LLM 为单条素材生成描述+英文标签。
 
     返回 dict: status ∈ ok|dry|skipped|error|parse_error。
     - 无 chat 模型 → skipped(不调网络、不抛错)
     - dry=True 只返回模型建议,不写库
-    - 写库策略:描述仅在原文为空或过短(<20字)时覆盖;标签追加去重,
+    - 写库策略:描述仅在原文为空或过短(<20字)时覆盖;标签经归一化护栏后追加去重,
       保留 sp|/type: 等既有溯源标签不动。"""
     if models is None:
         models = chat_models()
@@ -489,29 +541,78 @@ def auto_tag_material(m, dry=False, model=None, models=None):
     if not data:
         return {"id": m["id"], "status": "parse_error", "raw": (r.get("response") or "")[:200]}
     desc = (data.get("desc") or "").strip()
-    tags = [str(t).strip().lower() for t in (data.get("tags") or []) if str(t).strip()]
+    tags = _normalize_llm_tags(data.get("tags"))
     if dry:
         return {"id": m["id"], "status": "dry", "desc": desc, "tags": tags}
     cur = get_material(m["id"])
     cur_desc = (cur.get("description") or "").strip()
     new_desc = desc if (not cur_desc or len(cur_desc) < 20) else cur_desc
-    cur_tags = [t.strip() for t in (cur.get("tags") or "").split(",") if t.strip()]
+    # LLM 标签写入独立列 ai_tags(供 Agent/MCP 读取),绝不污染词法打分用的 tags。
+    cur_ai = [t.strip() for t in (cur.get("ai_tags") or "").split(",") if t.strip()]
     added = []
     for t in tags:
-        if t not in cur_tags:
-            cur_tags.append(t)
+        if t not in cur_ai:
+            cur_ai.append(t)
             added.append(t)
-    _update_material(m["id"], description=new_desc, tags=",".join(cur_tags))
+    _update_material(m["id"], description=new_desc, ai_tags=",".join(cur_ai))
     return {"id": m["id"], "status": "ok", "desc": new_desc, "added_tags": added}
 
 
-def auto_tag_all(limit=0, dry=False, model=None):
-    """批量为全部素材打标。没有 chat 模型时整批 skipped(秒回,不调网络)。"""
+def auto_tag_all(limit=0, dry=False, model=None, backup=True):
+    """批量为全部素材打标。没有 chat 模型时整批 skipped(秒回,不调网络)。
+
+    写库前自动快照各素材 (tags, ai_tags) 到 AUTOTAG_BACKUP(仅当备份不存在时,
+    避免覆盖更早基线),可用 autotag_undo() 回滚本次写入。dry 模式不写库、不备份。"""
     models = chat_models()
     ms = all_materials()
     if limit:
         ms = ms[:limit]
+    if not dry and backup and models and not os.path.exists(AUTOTAG_BACKUP):
+        try:
+            snap = {m["id"]: {
+                "tags": (get_material(m["id"]) or {}).get("tags", "") or "",
+                "ai_tags": (get_material(m["id"]) or {}).get("ai_tags", "") or "",
+            } for m in ms}
+            with open(AUTOTAG_BACKUP, "w", encoding="utf-8") as f:
+                json.dump(snap, f, ensure_ascii=False)
+        except (OSError, ValueError):
+            pass
     return [auto_tag_material(m, dry=dry, model=model, models=models) for m in ms]
+
+
+def autotag_undo():
+    """回滚最近一次 auto_tag_all 写入的标签:从 AUTOTAG_BACKUP 恢复各素材
+    (tags, ai_tags),然后删除备份文件。非破坏式,不动描述;没有备份时返回 0。"""
+    if not os.path.exists(AUTOTAG_BACKUP):
+        return 0
+    try:
+        with open(AUTOTAG_BACKUP, "r", encoding="utf-8") as f:
+            snap = json.load(f)
+    except (OSError, ValueError):
+        return 0
+    n = 0
+    for mid, rec in snap.items():
+        cur = get_material(mid)
+        if not cur:
+            continue
+        if isinstance(rec, dict):
+            bak_tags = rec.get("tags", "") or ""
+            bak_ai = rec.get("ai_tags", "") or ""
+        else:  # 兼容旧格式(仅 tags 字符串)
+            bak_tags, bak_ai = (rec or ""), ""
+        changed = False
+        if (cur.get("tags") or "") != bak_tags:
+            changed = True
+        if (cur.get("ai_tags") or "") != bak_ai:
+            changed = True
+        if changed:
+            _update_material(mid, tags=bak_tags, ai_tags=bak_ai)
+            n += 1
+    try:
+        os.remove(AUTOTAG_BACKUP)
+    except OSError:
+        pass
+    return n
 
 
 # ---------- 规则打标(离线、确定性、零模型) ----------

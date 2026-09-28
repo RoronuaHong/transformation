@@ -221,7 +221,7 @@ class Handler(BaseHTTPRequestHandler):
                 import csv as _csv
                 import io as _io
                 cols = ["id", "kind", "ext", "name", "size", "sha256", "tags",
-                        "description", "source", "orig_name", "location",
+                        "ai_tags", "description", "source", "orig_name", "location",
                         "external_path", "created_at"]
                 buf = _io.StringIO()
                 w = _csv.writer(buf)

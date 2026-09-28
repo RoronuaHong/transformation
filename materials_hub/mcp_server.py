@@ -34,7 +34,8 @@ if HUB_TOKEN and _mcp_tok != HUB_TOKEN:
 def _brief(m):
     """工具返回的精简条目(不带巨型字段,省 token)。"""
     out = {k: m.get(k, "") for k in
-           ("id", "kind", "ext", "name", "size", "tags", "description", "location")}
+           ("id", "kind", "ext", "name", "size", "tags", "ai_tags",
+            "description", "location")}
     if m.get("location") == "external":
         out["external_path"] = m.get("external_path", "")
     return out

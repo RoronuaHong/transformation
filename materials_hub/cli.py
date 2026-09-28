@@ -27,6 +27,7 @@ from core import (
     thumbs_status, purge_thumbs, get_material,
     build_embeddings, embed_status, embed_probe, expand_query,
     auto_tag_all, chat_models, rule_tag_all, rule_tag_cleanup,
+    autotag_undo, AUTOTAG_BACKUP,
 )
 
 
@@ -144,6 +145,11 @@ def main():
             print("  提示: `ollama pull <一个 chat 模型, 如 qwen2.5:7b>`;或先用离线规则打标:")
             print("        python cli.py autotag --rule        # 预览")
             print("        python cli.py autotag --rule --apply # 写库(仅追加标签/补空描述)")
+            return
+        if "--undo" in args:
+            n = autotag_undo()
+            print(f"autotag UNDONE: 已恢复 {n} 条素材的 tags"
+                  f"{' (备份 ' + os.path.basename(AUTOTAG_BACKUP) + ' 已删除)' if n else ''}")
             return
         dry = "--dry" in args
         limit = int(args[args.index("--limit") + 1]) if "--limit" in args else 0
