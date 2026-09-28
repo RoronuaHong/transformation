@@ -19,6 +19,7 @@ from core import (
     missing_thumbnail_ids, thumb_failure_reason, health, broken_externals,
     prune_broken_externals, external_stats, build_embeddings, embed_status,
     ensure_ollama, external_path_allowed,
+    auto_process_all, pending_processing,
 )
 
 PORT = 8000
@@ -201,10 +202,15 @@ class Handler(BaseHTTPRequestHandler):
             kinds = {}
             for m in ms:
                 kinds[m["kind"]] = kinds.get(m["kind"], 0) + 1
+            # 自动处理链待处理数(videos/images 中还有缺项的素材条数;全库遍历成本低)
+            pending = sum(1 for m in ms
+                          if m.get("kind") in ("videos", "images")
+                          and any(pending_processing(m["id"]).values()))
             return self._json({"total": len(ms), "dupes": len(duplicates()), "kinds": kinds,
                                "thumbs": thumbs_status(), "thumb_job": dict(_THUMB_JOB),
                                "external": external_stats(),
-                               "embed": {**embed_status(), "job": dict(_EMBED_JOB)}})
+                               "embed": {**embed_status(), "job": dict(_EMBED_JOB)},
+                               "auto": {"pending": pending}})
         if p == "/api/health":
             return self._json(health())
         if p == "/api/broken":
@@ -373,6 +379,13 @@ class Handler(BaseHTTPRequestHandler):
                              daemon=True).start()
             return self._json({"running": True, "job": dict(_EMBED_JOB),
                                "model": info["model"]})
+
+        if p == "/api/auto":
+            # 事件驱动自动处理链:{"autotag":bool(默认 False),"limit":int(默认 0)}
+            # 对全部待处理素材依序跑 封面→OCR→镜头索引→pHash→(可选)打标→语义索引
+            r = auto_process_all(limit=int(body.get("limit") or 0),
+                                 autotag=bool(body.get("autotag")))
+            return self._json(r)
 
         if p == "/api/remove":
             remove_material(body.get("id"))

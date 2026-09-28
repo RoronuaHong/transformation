@@ -163,6 +163,21 @@ def t_run_ocr(a):
                              force=bool(a.get("force")))
 
 
+def t_shots(a):
+    """只读:返回视频镜头索引(片段 start/end 时间轴),供下游剪辑 Agent 按片段调用。
+    未建索引 → {"status":"none"}(不主动建,保持本工具纯只读零副作用)。"""
+    d = core.get_shots(a.get("id", ""))
+    if d is None:
+        return {"status": "none"}
+    return d
+
+
+def t_similar(a):
+    """只读:画面级近重复检测(dHash 感知哈希,汉明距离 ≤ max_dist)。
+    自身还没算过哈希 → {"status":"no_hash"}(不主动建,保持纯只读零副作用)。"""
+    return core.similar_assets(a.get("id", ""), int(a.get("max_dist") or 10))
+
+
 # ---------- Deep Agent(路线 C:编排层在 agent.py,经 MCP 暴露给宿主) ----------
 def t_agent_run(a):
     import agent
@@ -178,12 +193,22 @@ def t_agent_status(a):
     return agent.agent_status(a.get("task_id", ""))
 
 
+def t_auto(a):
+    """写(派生数据+可能的 AI 打标):对新素材跑全链路自动处理
+    (封面/OCR/镜头索引/pHash/语义索引,可选 LLM 打标)。
+    各步骤幂等(已处理过 → cached/skip),需要 confirm=true(人工复核)。"""
+    _require_confirm(a)
+    return core.auto_process_all(limit=int(a.get("limit") or 0),
+                                 autotag=bool(a.get("autotag")))
+
+
 HANDLERS = {"search_materials": t_search, "get_material": t_get,
             "list_tags": t_tags, "hub_stats": t_stats,
             "update_tags": t_update_tags, "register_asset": t_register,
             "read_text_preview": t_text_preview, "chunk_search_materials": t_chunk_search,
-            "run_ocr": t_run_ocr,
-            "agent_run": t_agent_run, "agent_status": t_agent_status}
+            "run_ocr": t_run_ocr, "get_shots": t_shots, "find_similar": t_similar,
+            "agent_run": t_agent_run, "agent_status": t_agent_status,
+            "auto_process": t_auto}
 # __PART2__
 _SCHEMA_OBJ = {"type": "object", "properties": {
     "q": {"type": "string", "description": "关键词或中文自然语言问句"},
@@ -224,6 +249,16 @@ TOOLS = [
          "id": {"type": "string"}, "frames": {"type": "integer"},
          "force": {"type": "boolean"}, "confirm": {"type": "boolean"}},
          "required": ["id", "confirm"]}},
+    {"name": "get_shots", "description": "只读:返回视频镜头索引(片段 start/end 时间轴, 供下游剪辑 Agent 按片段调用)",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string"}}, "required": ["id"]}},
+    {"name": "auto_process", "description": "写(派生数据+可能的AI打标):对新素材跑 封面/OCR/镜头索引/pHash/语义索引 全链路,各步骤幂等(已处理自动跳过);需 confirm=true",
+     "inputSchema": {"type": "object", "properties": {
+         "limit": {"type": "integer"}, "autotag": {"type": "boolean"},
+         "confirm": {"type": "boolean"}}, "required": ["confirm"]}},
+    {"name": "find_similar", "description": "只读:画面级近重复检测(dHash 感知哈希,汉明距离≤max_dist;与 sha256 精确去重互补)",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string"}, "max_dist": {"type": "integer"}}, "required": ["id"]}},
     {"name": "agent_run", "description": "Deep Agent 编排:LLM 先拆待办再逐步调用素材工具完成多步任务(检索综合/巡检/整理)。默认只读;写任务需 confirm=true(人工复核)。长任务:本地 LLM 多轮,可能耗时 1-3 分钟。状态可事后用 agent_status 查询。",
      "inputSchema": {"type": "object", "properties": {
          "task": {"type": "string", "description": "自然语言任务(中文)"},

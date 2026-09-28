@@ -20,6 +20,12 @@
   python cli.py autotag --rule --undo   回滚规则打标写入的标签(保留 bridge 的 bilibili)
   python cli.py ocr <id> [--force]      画面 OCR(离线 rapidocr,需 SP venv)入检索
   python cli.py ocr --all [--limit N]   批量补齐视频/图片的 OCR 文本
+  python cli.py shots <id> [--force]    镜头索引(ffmpeg 场景检测)→ index/shots/<id>.json 片段级 start/end
+  python cli.py shots --all [--limit N] 批量补齐全部视频的镜头索引
+  python cli.py phash <id> [--force]        dHash 感知哈希(ffmpeg 首帧 9x8 灰度)→ index/phash/<id>.txt
+  python cli.py phash --all [--limit N]     批量补齐全部图片/视频的感知哈希
+  python cli.py similar <id> [--max-dist N] 画面级近重复检测(汉明距离≤N,按距离升序)
+  python cli.py auto [--limit N] [--autotag]  一条命令跑完自动处理链:封面→OCR→镜头索引→pHash→(可选)打标→语义索引(幂等)
   python cli.py agent --task "..."      Deep Agent 多步任务(LLM 拆待办→逐步执行,见 agent.py)
   python cli.py agent --task "..." --write  允许 agent 写(标签/登记;默认只读)
   python cli.py agent --status <id>     查看某次 agent 任务的状态与轨迹
@@ -35,6 +41,9 @@ from core import (
     auto_tag_all, chat_models, rule_tag_all, rule_tag_cleanup,
     autotag_undo, AUTOTAG_BACKUP,
     ocr_material, ocr_all, _ocr_python,
+    build_shot_index, shots_all, shot_index_path,
+    phash_material, phash_all, similar_assets, phash_path,
+    auto_process_all, pending_processing,
 )
 
 
@@ -136,6 +145,87 @@ def main():
             print("usage: python cli.py ocr <id> [--force] | ocr --all")
             return
         print(ocr_material(mid, force="--force" in args))
+
+    elif cmd == "shots":
+        # 镜头索引:python cli.py shots <id> [--force] | shots --all [--limit N]
+        if "--all" in args:
+            args.remove("--all")
+            limit = 0
+            if "--limit" in args:
+                i = args.index("--limit")
+                limit = int(args[i + 1])
+                del args[i:i + 2]
+            res = shots_all(limit=limit, force="--force" in args)
+            ok = sum(1 for r in res if r.get("status") == "ok")
+            print(f"shots done: {ok}/{len(res)} ok")
+            for r in res:
+                print(" ", r)
+            return
+        mid = next((a for a in args if not a.startswith("-")), "")
+        if not mid:
+            print("usage: python cli.py shots <id> [--force] | shots --all")
+            return
+        r = build_shot_index(mid, force="--force" in args)
+        print(r)
+        sc = shot_index_path(mid)
+        if r.get("status") == "ok" and sc:
+            print(f"sidecar: {sc}")
+
+    elif cmd == "phash":
+        # pHash 近重复检测:python cli.py phash <id> [--force] | phash --all [--limit N]
+        if "--all" in args:
+            args.remove("--all")
+            limit = 0
+            if "--limit" in args:
+                i = args.index("--limit")
+                limit = int(args[i + 1])
+                del args[i:i + 2]
+            res = phash_all(limit=limit, force="--force" in args)
+            ok = sum(1 for r in res if r.get("status") == "ok")
+            print(f"phash done: {ok}/{len(res)} ok")
+            for r in res:
+                print(" ", r)
+            return
+        mid = next((a for a in args if not a.startswith("-")), "")
+        if not mid:
+            print("usage: python cli.py phash <id> [--force] | phash --all")
+            return
+        r = phash_material(mid, force="--force" in args)
+        print(r)
+        if r.get("status") == "ok" and phash_path(mid):
+            print(f"sidecar: {phash_path(mid)}")
+
+    elif cmd == "similar":
+        # 近重复列表:python cli.py similar <id> [--max-dist N]
+        mid = next((a for a in args if not a.startswith("-")), "")
+        if not mid:
+            print("usage: python cli.py similar <id> [--max-dist N]")
+            return
+        md = int(args[args.index("--max-dist") + 1]) if "--max-dist" in args else 10
+        r = similar_assets(mid, max_dist=md)
+        if r.get("status") == "no_hash":
+            print(f"{mid}: 还没有 phash sidecar(先跑 `python cli.py phash {mid}`)")
+            return
+        print(f"{mid} 的相似素材(汉明距离≤{md}, 共比较 {r.get('total', 0)} 条):")
+        for s in r.get("similar", []):
+            print(f"  dist={s['dist']:>2}  {s['id']}  {s['name']}")
+        if not r.get("similar"):
+            print("  (无)")
+
+    elif cmd == "auto":
+        # 自动处理链:python cli.py auto [--limit N] [--autotag]
+        limit = int(args[args.index("--limit") + 1]) if "--limit" in args else 0
+        res = auto_process_all(limit=limit, autotag="--autotag" in args)
+        for r in res.get("results", []):
+            steps = r.get("steps", {})
+            print(f"  {r['id']}  {r.get('ok', 0)}/{r.get('total', len(steps))} 步成功")
+            for name, s in steps.items():
+                if isinstance(s, dict):
+                    extra = s.get("reason") or s.get("path") or s.get("hash") or ""
+                    print(f"    {name}: {s.get('status')} {extra}")
+                else:
+                    print(f"    {name}: {s}")
+        print(f"auto done: {res.get('processed', 0)} processed")
 
     elif cmd == "embed":
         st = embed_status()

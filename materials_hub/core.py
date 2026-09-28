@@ -21,6 +21,8 @@ INGEST = os.path.join(HUB, "ingest")
 TRASH = os.path.join(HUB, "trash")
 INDEX_DIR = os.path.join(HUB, "index")
 OCR_DIR = os.path.join(INDEX_DIR, "ocr")       # 视频画面 OCR 文本 sidecar(派生,可重建)
+SHOT_DIR = os.path.join(INDEX_DIR, "shots")    # 视频镜头索引 sidecar(派生数据,可随时重建)
+PHASH_DIR = os.path.join(INDEX_DIR, "phash")   # dHash 感知哈希 sidecar(派生数据,可随时重建)
 INDEX_DB = os.path.join(INDEX_DIR, "hub.db")
 STATIC = os.path.join(HUB, "static")
 THUMBS = os.path.join(INDEX_DIR, "thumbs")  # 视频封面缓存(派生数据,可随时删)
@@ -64,7 +66,7 @@ KINDS = {
 
 def init_hub():
     """创建标准目录结构并初始化数据库。幂等。"""
-    for d in [MATERIALS, INGEST, TRASH, INDEX_DIR, OCR_DIR, STATIC]:
+    for d in [MATERIALS, INGEST, TRASH, INDEX_DIR, OCR_DIR, SHOT_DIR, PHASH_DIR, STATIC]:
         os.makedirs(d, exist_ok=True)
     for k in list(KINDS) + ["other"]:
         os.makedirs(os.path.join(MATERIALS, k), exist_ok=True)
@@ -1819,6 +1821,325 @@ def ocr_all(limit=0, force=False):
             continue
         out.append(ocr_material(m["id"], force=force))
     return out
+
+
+# ---------- 镜头索引(ffmpeg 场景检测,片段级输出,供下游剪辑 Agent 按片段调用) ----------
+def shot_index_path(mid):
+    """素材的镜头索引 sidecar 路径(index/shots/<id>.json;派生数据,可随时重建)。
+    mid 含路径分隔符/冒号/点或为空 → None(防路径拼接注入,与 ocr_sidecar_path 同构)。"""
+    mid = str(mid or "").strip()
+    if not mid or any(c in mid for c in "\\/.:"):
+        return None                              # 防路径拼接注入
+    return os.path.join(SHOT_DIR, mid + ".json")
+
+
+# 场景检测阈值阶梯:切点过多(>max_scenes)时逐级提高灵敏度门槛重试,直到切点数可接受。
+_SHOT_THRESHOLDS = (0.30, 0.40, 0.50)
+
+
+def _ffmpeg_scene_cuts(exe, src, threshold):
+    """跑一遍 ffmpeg 场景检测,返回切点列表(秒,升序去重)。
+
+    用 select='gt(scene,t)' 过滤镜头切换帧,showinfo 把被选中的帧打印到 stderr,
+    从 stderr 解析 `pts_time:([0-9.]+)` 即切点。子进程失败返回 None(调用方报 error)。"""
+    flags = 0x08000000 if os.name == "nt" else 0          # CREATE_NO_WINDOW,避免弹黑框
+    try:
+        p = subprocess.run(
+            [exe, "-v", "warning", "-i", src,
+             "-vf", f"select='gt(scene,{threshold})',showinfo",
+             "-f", "null", "-"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            timeout=300, creationflags=flags)
+    except Exception:
+        return None
+    txt = (p.stderr or b"").decode("utf-8", "ignore")
+    cuts = [float(x) for x in re.findall(r"pts_time:([0-9.]+)", txt)]
+    return sorted(set(cuts))
+
+
+def build_shot_index(mid, force=False, max_scenes=60):
+    """为视频建立镜头索引:ffmpeg 场景检测 → 切点 → 片段级 start/end 时间轴,
+    落 sidecar `index/shots/<id>.json`。幂等:已有 sidecar 且未 force → cached。
+    变更记入 history 审计。返回 dict,状态 ∈ ok|cached|skipped|error。"""
+    m = get_material(mid)
+    if not m:
+        return {"id": mid, "status": "error", "reason": "not_found"}
+    if m.get("kind") != "videos":
+        return {"id": mid, "status": "skipped", "reason": f"kind={m.get('kind')}"}
+    sc = shot_index_path(mid)
+    if not sc:
+        return {"id": mid, "status": "error", "reason": "bad_id"}
+    if os.path.isfile(sc) and not force:
+        n = 0
+        try:
+            with open(sc, "r", encoding="utf-8") as f:
+                n = len(json.load(f).get("scenes", []))
+        except Exception:
+            pass
+        return {"id": mid, "status": "cached", "scenes": n}
+    src = _abs_source(m)
+    if not src or not os.path.exists(src):
+        return {"id": mid, "status": "error", "reason": "source_missing"}
+    exe = ffmpeg_path()
+    if not exe:
+        return {"id": mid, "status": "skipped", "reason": "no_ffmpeg"}
+    dur = _probe_duration(src)
+    # 阈值阶梯:切点过多就提高阈值重跑(重新跑 ffmpeg),直到 ≤max_scenes 或阈值用尽
+    cuts, thr = [], None
+    for t in _SHOT_THRESHOLDS:
+        c = _ffmpeg_scene_cuts(exe, src, t)
+        if c is None:
+            return {"id": mid, "status": "error", "reason": "ffmpeg_failed"}
+        cuts, thr = c, t
+        if len(cuts) <= max_scenes:
+            break
+    # 切点 → 片段:首段 start=0,末段 end=duration;相邻切点间为一段。
+    # dur 探测失败(=0)时用最后切点兜底,避免末段被截成空区间。
+    last = max(dur, cuts[-1] if cuts else 0.0)
+    bounds = [0.0] + [c for c in cuts if 0.0 < c < last] + [last]
+    scenes = [{"start": round(a, 3), "end": round(b, 3)}
+              for a, b in zip(bounds, bounds[1:]) if b > a]
+    if not scenes:                       # 无切点(静态视频)→ 单段全覆盖
+        scenes = [{"start": 0.0, "end": round(last, 3)}]
+    os.makedirs(SHOT_DIR, exist_ok=True)
+    with open(sc, "w", encoding="utf-8") as f:
+        json.dump({"duration": dur, "threshold": thr, "scenes": scenes},
+                  f, ensure_ascii=False)
+    log_history("app", "shot_index", mid, f"scenes={len(scenes)}")
+    return {"id": mid, "status": "ok", "scenes": len(scenes), "duration": dur}
+
+
+def get_shots(mid):
+    """读取镜头索引 sidecar(返回 dict);不存在/不可读返回 None。只读、不写。"""
+    sc = shot_index_path(mid)
+    if not sc or not os.path.isfile(sc):
+        return None
+    try:
+        with open(sc, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def shots_all(limit=0, force=False):
+    """批量镜头索引:对全部视频素材补齐(默认跳过已有 sidecar),仿 ocr_all。"""
+    out = []
+    ms = [m for m in all_materials() if m.get("kind") == "videos"]
+    if limit:
+        ms = ms[:limit]
+    for m in ms:
+        sc = shot_index_path(m["id"])
+        if not force and sc and os.path.isfile(sc):
+            continue
+        out.append(build_shot_index(m["id"], force=force))
+    return out
+
+
+# ---------- pHash 近重复检测(dHash 差异哈希:纯 Python 可算,无需 DCT) ----------
+# 与 duplicates() 的 sha256 精确去重互补:感知哈希能检出转码/重采样/压缩后的同画面素材。
+def phash_path(mid):
+    """素材的 dHash sidecar 路径(index/phash/<id>.txt;派生数据,可随时重建)。
+    mid 含路径分隔符/冒号/点或为空 → None(防路径拼接注入,与 ocr_sidecar_path 同构)。"""
+    mid = str(mid or "").strip()
+    if not mid or any(c in mid for c in "\\/.:"):
+        return None                              # 防路径拼接注入
+    return os.path.join(PHASH_DIR, mid + ".txt")
+
+
+def _bytes_to_dhash(data):
+    """把 72 字节(9 列×8 行,每像素 1 字节)灰度原始像素转成 64 位 dHash int。
+
+    每行内相邻像素比较(左>右 → 该位为 1),8 行 × 8 比较 = 64 位,
+    第 row*8+col 位对应第 row 行第 col 对。长度不足 72 字节 → None(帧提取失败)。"""
+    if len(data) < 72:
+        return None
+    h = 0
+    for row in range(8):
+        base = row * 9
+        for col in range(8):
+            if data[base + col] > data[base + col + 1]:
+                h |= 1 << (row * 8 + col)
+    return h
+
+
+def _ffmpeg_dhash_bits(exe, src):
+    """用 ffmpeg 把首帧缩成 9x8 灰度原始像素,交给 _bytes_to_dhash 算 64 位 dHash。
+    子进程失败或像素不足 → None。视频只取首帧(近重复检测足够)。"""
+    flags = 0x08000000 if os.name == "nt" else 0          # CREATE_NO_WINDOW,避免弹黑框
+    try:
+        p = subprocess.run(
+            [exe, "-v", "error", "-i", src, "-frames:v", "1",
+             "-vf", "scale=9:8,format=gray", "-f", "rawvideo", "-"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=60, creationflags=flags)
+    except Exception:
+        return None
+    return _bytes_to_dhash(p.stdout or b"")
+
+
+def hamming(a, b):
+    """两个 int 的汉明距离(不同位的个数)。"""
+    return bin(a ^ b).count("1")
+
+
+def phash_material(mid, force=False):
+    """为图片/视频素材计算 dHash 感知哈希,落 sidecar `index/phash/<id>.txt`(16 位 hex)。
+    幂等:已有 sidecar 且未 force → cached。变更记入 history 审计。
+    返回 dict,状态 ∈ ok|cached|skipped|error(仿 ocr_material 的状态模式)。"""
+    m = get_material(mid)
+    if not m:
+        return {"id": mid, "status": "error", "reason": "not_found"}
+    if m.get("kind") not in ("images", "videos"):
+        return {"id": mid, "status": "skipped", "reason": f"kind={m.get('kind')}"}
+    sc = phash_path(mid)
+    if not sc:
+        return {"id": mid, "status": "error", "reason": "bad_id"}
+    if os.path.isfile(sc) and not force:
+        try:
+            with open(sc, "r", encoding="utf-8") as f:
+                return {"id": mid, "status": "cached", "hash": f.read().strip()}
+        except OSError:
+            pass                                  # sidecar 损坏就当没有,重算
+    src = _abs_source(m)
+    if not src or not os.path.exists(src):
+        return {"id": mid, "status": "error", "reason": "source_missing"}
+    exe = ffmpeg_path()
+    if not exe:
+        return {"id": mid, "status": "skipped", "reason": "no_ffmpeg"}
+    bits = _ffmpeg_dhash_bits(exe, src)
+    if bits is None:
+        return {"id": mid, "status": "error", "reason": "frame_extract_failed"}
+    hx = f"{bits:016x}"
+    os.makedirs(PHASH_DIR, exist_ok=True)
+    with open(sc, "w", encoding="utf-8") as f:
+        f.write(hx)
+    log_history("app", "phash", mid, f"hash={hx}")
+    return {"id": mid, "status": "ok", "hash": hx}
+
+
+def phash_all(limit=0, force=False):
+    """批量 pHash:对全部图片/视频素材补齐(默认跳过已有 sidecar),仿 ocr_all。"""
+    out = []
+    ms = [m for m in all_materials() if m.get("kind") in ("images", "videos")]
+    if limit:
+        ms = ms[:limit]
+    for m in ms:
+        sc = phash_path(m["id"])
+        if not force and sc and os.path.isfile(sc):
+            continue
+        out.append(phash_material(m["id"], force=force))
+    return out
+
+
+def similar_assets(mid, max_dist=10):
+    """画面级近重复检测:拿自身 dHash 与库内其他素材的 sidecar 逐一算汉明距离,
+    距离 ≤ max_dist 的按距离升序返回 [{"id","name","dist"}]。纯只读;
+    自身无 sidecar → {"status":"no_hash"};total = 参与比较的素材数。"""
+    sc = phash_path(mid)
+    if not sc or not os.path.isfile(sc):
+        return {"id": mid, "status": "no_hash", "similar": [], "total": 0}
+    try:
+        with open(sc, "r", encoding="utf-8") as f:
+            mine = int(f.read().strip(), 16)
+    except (OSError, ValueError):
+        return {"id": mid, "status": "no_hash", "similar": [], "total": 0}
+    hits, total = [], 0
+    if os.path.isdir(PHASH_DIR):
+        for fn in os.listdir(PHASH_DIR):
+            if not fn.endswith(".txt"):
+                continue
+            oid = fn[:-len(".txt")]
+            if oid == mid:
+                continue                        # 跳过自身
+            try:
+                with open(os.path.join(PHASH_DIR, fn), "r", encoding="utf-8") as f:
+                    other = int(f.read().strip(), 16)
+            except (OSError, ValueError):
+                continue                        # 坏 sidecar 不参与比较
+            total += 1
+            d = hamming(mine, other)
+            if d <= max_dist:
+                hits.append({"id": oid,
+                             "name": (get_material(oid) or {}).get("name", ""),
+                             "dist": d})
+    hits.sort(key=lambda x: x["dist"])
+    return {"id": mid, "status": "ok", "similar": hits, "total": total}
+
+
+# ---------- 事件驱动自动处理链(封面→OCR→镜头索引→pHash→自动打标→语义索引) ----------
+def pending_processing(mid):
+    """返回该素材还缺哪些自动处理步骤(True=缺)。
+
+    判断依据:thumb 看 thumb_path(mid) 的 jpg 是否存在且非空;
+    ocr/shots/phash 看各自 sidecar(index/ocr|shots|phash/<id>.*)是否已落盘。
+    非 videos/images 素材(docs/subs/audio/other)不需要画面类派生数据 → 全 False。"""
+    m = get_material(mid)
+    if not m or m.get("kind") not in ("videos", "images"):
+        return {"thumb": False, "ocr": False, "shots": False, "phash": False}
+    tp = thumb_path(mid)
+    op, sp, pp = ocr_sidecar_path(mid), shot_index_path(mid), phash_path(mid)
+    return {
+        "thumb": not (tp and os.path.exists(tp) and os.path.getsize(tp) > 0),
+        "ocr": not (op and os.path.isfile(op)),
+        "shots": not (sp and os.path.isfile(sp)),
+        "phash": not (pp and os.path.isfile(pp)),
+    }
+
+
+def auto_process_material(mid, ocr=True, shots=True, phash=True, autotag=False):
+    """对单条素材按需依序执行自动处理链:make_thumb → ocr_material →
+    build_shot_index → phash_material(autotag=True 再追加 auto_tag_material)。
+
+    每步独立 try/except 包裹:单项失败记 error 但不中断后续步骤;
+    各步骤自身幂等(已处理过 → cached/skip),重复跑无害。
+    返回 {"id", "steps": {步名: 结果 dict}, "ok", "total"},
+    并 log_history("app","auto_process",mid,"ok=N/M")。"""
+    steps = {}
+    total = okn = 0
+
+    def _attempt(name, fn):
+        nonlocal total, okn
+        total += 1
+        try:
+            r = fn()
+        except Exception as e:               # 单项失败不中断整链
+            r = {"status": "error", "reason": f"{type(e).__name__}: {e}"}
+        steps[name] = r
+        if isinstance(r, dict) and r.get("status") in ("ok", "cached"):
+            okn += 1
+
+    def _thumb():
+        p = make_thumb(mid)
+        # make_thumb 返回路径或 None(非视频/无 ffmpeg/失败均有 .fail 标记防重试)
+        return {"status": "ok", "path": p} if p else {"status": "skip", "reason": "no_thumb"}
+
+    _attempt("thumb", _thumb)
+    if ocr:
+        _attempt("ocr", lambda: ocr_material(mid))
+    if shots:
+        _attempt("shots", lambda: build_shot_index(mid))
+    if phash:
+        _attempt("phash", lambda: phash_material(mid))
+    if autotag:
+        m = get_material(mid)
+        if m:                                # 无 chat 模型时 auto_tag_material 自动 skipped
+            _attempt("autotag", lambda: auto_tag_material(m))
+    log_history("app", "auto_process", mid, f"ok={okn}/{total}")
+    return {"id": mid, "steps": steps, "ok": okn, "total": total}
+
+
+def auto_process_all(limit=0, autotag=False):
+    """批处理:找出所有还有缺项的 videos/images 素材,逐条跑 auto_process_material,
+    最后调一次 build_embeddings()(增量:只补新素材/文本有变化的向量)。
+    limit>0 时只处理前 limit 条。返回 {"processed", "results", "embed"}。"""
+    ms = [m for m in all_materials()
+          if m.get("kind") in ("videos", "images")
+          and any(pending_processing(m["id"]).values())]
+    if limit:
+        ms = ms[:limit]
+    results = [auto_process_material(m["id"], autotag=autotag) for m in ms]
+    emb = build_embeddings()                 # 增量语义索引;无 ollama 时自动 available=False
+    return {"processed": len(results), "results": results, "embed": emb}
 
 
 def thumbs_status():
