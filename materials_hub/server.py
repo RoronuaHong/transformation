@@ -123,7 +123,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, b"not found")
         with open(fp, "rb") as f:
             data = f.read()
-        return self._send(200, data, ctype or mimetypes.guess_type(fp)[0] or "application/octet-stream")
+        # 静态文件禁缓存协商:面板迭代频繁,避免浏览器拿旧 html/js 造成"改了没生效"假象
+        self.send_response(200)
+        self.send_header("Content-Type", ctype or mimetypes.guess_type(fp)[0] or "application/octet-stream")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(data)
 
     def _serve_file(self, fp, ctype):
         """发送文件,支持 HTTP Range(大视频可拖拽/边下边播)。"""

@@ -138,6 +138,7 @@
       <option value="size" data-i18n="sizeDesc"></option>
     </select>
     <button id="viewT" class="iconbtn" title="网格/列表">▦</button>
+    <button id="cropNav" data-i18n="cropNav"></button>
   </div>
   <div class="tools">
     <select id="langSel" title="Language / 语言">
@@ -169,6 +170,17 @@
   <!-- 标签下拉保留为隐藏元素:filters()/populateTags()/hash 同步仍以它为数据源,UI 上由左侧标签云呈现 -->
   <select id="tag" hidden><option value=""></option></select>
 </header>
+
+<div id="cropView" style="display:none;position:fixed;inset:0;z-index:70;background:var(--bg)">
+  <div style="display:flex;gap:8px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--line)">
+    <button id="cropBackBtn" data-i18n="cropBack"></button>
+    <input id="cropAddr" style="flex:1" data-i18n-ph="cropAddrPh">
+    <button id="cropLoadBtn" data-i18n="cropLoad"></button>
+    <button id="cropOpenBtn" title="open">↗</button>
+  </div>
+  <iframe id="cropFrame" style="width:100%;height:calc(100% - 49px);border:0;background:#000"></iframe>
+  <div id="cropHint" class="meta" style="padding:8px 12px;display:none"></div>
+</div>
 
 <div class="layout">
   <aside>
@@ -222,7 +234,7 @@ const api = (p,o)=>fetch(p,o).then(r=>r.json());
 const I18N = {
 zh:{appTitle:"素材中心",searchPh:"搜索名称/标签/描述… (按 / 聚焦)",modeAuto:"自动(语义+关键词)",modeLex:"精确关键词",modeSem:"纯语义",
    sortRel:"相关性排序",newest:"最新优先",oldest:"最早优先",nameAZ:"名称 A→Z",sizeDesc:"体积从大到小",tools:"工具 ▾",
-   refresh:"↻ 刷新",upload:"⬆ 上传文件",ingest:"整理 ingest/",scan:"扫描 materials/",genThumbs:"生成封面",buildIndex:"构建语义索引",autoProc:"▶ 自动处理新素材",
+   refresh:"↻ 刷新",upload:"⬆ 上传文件",ingest:"整理 ingest/",scan:"扫描 materials/",genThumbs:"生成封面",buildIndex:"构建语义索引",autoProc:"▶ 自动处理新素材",cropNav:"✂ 裁剪",cropBack:"← 返回素材中心",cropAddrPh:"裁剪工具地址,如 http://127.0.0.1:3000/zh",cropLoad:"载入",
    dupes:"重复清理",exportJson:"导出 JSON",exportCsv:"导出 CSV",typeLabel:"类型",tagsLabel:"标签",clearFilter:"✕ 清除过滤",
    all:"全部",kind_images:"图片",kind_videos:"视频",kind_docs:"文档",kind_audio:"音频",kind_subs:"字幕",kind_other:"其他",
    prevPage:"上一页",nextPage:"下一页",noMatch:"无匹配结果",pageOf:"第 {p} / {n} 页 · 共 {t} 条",
@@ -241,7 +253,7 @@ zh:{appTitle:"素材中心",searchPh:"搜索名称/标签/描述… (按 / 聚�
 ja:{appTitle:"素材ハブ",searchPh:"名前/タグ/説明を検索…(/ でフォーカス)",modeAuto:"自動(セマンティック+キーワード)",modeLex:"キーワード一致",
    modeSem:"セマンティックのみ",sortRel:"関連度順",newest:"新しい順",oldest:"古い順",nameAZ:"名前 A→Z",sizeDesc:"サイズが大きい順",
    tools:"ツール ▾",refresh:"↻ 更新",upload:"⬆ アップロード",ingest:"ingest/ を整理",scan:"materials/ をスキャン",
-   genThumbs:"カバー生成",buildIndex:"セマンティック索引構築",autoProc:"▶ 新規素材を自動処理",dupes:"重複チェック",exportJson:"JSON 出力",exportCsv:"CSV 出力",
+   genThumbs:"カバー生成",buildIndex:"セマンティック索引構築",autoProc:"▶ 新規素材を自動処理",cropNav:"✂ クリップ",cropBack:"← 素材ハブへ戻る",cropAddrPh:"クリップツールのURL 例: http://127.0.0.1:3000/ja",cropLoad:"読み込む",dupes:"重複チェック",exportJson:"JSON 出力",exportCsv:"CSV 出力",
    typeLabel:"種類",tagsLabel:"タグ",clearFilter:"✕ フィルタ解除",all:"すべて",kind_images:"画像",kind_videos:"動画",
    kind_docs:"ドキュメント",kind_audio:"音声",kind_subs:"字幕",kind_other:"その他",prevPage:"前へ",nextPage:"次へ",noMatch:"該当なし",pageOf:"{p} / {n} ページ · 全 {t} 件",statTotal:"登録",dupesW:"重複",groupsW:"組",
    extW:"外部参照",refsOk:"参照は完全",brokenW:"不通",semW:"セマンティック",healthW:"健康",renderedW:"描画済み",
@@ -259,7 +271,7 @@ ja:{appTitle:"素材ハブ",searchPh:"名前/タグ/説明を検索…(/ でフ�
 ko:{appTitle:"소재 허브",searchPh:"이름/태그/설명 검색…(/ 포커스)",modeAuto:"자동(시맨틱+키워드)",modeLex:"키워드 일치",
    modeSem:"시맨틱만",sortRel:"관련도순",newest:"최신순",oldest:"오래된순",nameAZ:"이름 A→Z",sizeDesc:"크기 큰순",
    tools:"도구 ▾",refresh:"↻ 새로고침",upload:"⬆ 파일 업로드",ingest:"ingest/ 정리",scan:"materials/ 스캔",
-   genThumbs:"커버 생성",buildIndex:"시맨틱 인덱스 구축",autoProc:"▶ 신규 소재 자동 처리",dupes:"중복 정리",exportJson:"JSON 내보내기",exportCsv:"CSV 내보내기",
+   genThumbs:"커버 생성",buildIndex:"시맨틱 인덱스 구축",autoProc:"▶ 신규 소재 자동 처리",cropNav:"✂ 자르기",cropBack:"← 소재 허브로",cropAddrPh:"자르기 도구 주소 예: http://127.0.0.1:3000/ko",cropLoad:"불러오기",dupes:"중복 정리",exportJson:"JSON 내보내기",exportCsv:"CSV 내보내기",
    typeLabel:"종류",tagsLabel:"태그",clearFilter:"✕ 필터 해제",all:"전체",kind_images:"이미지",kind_videos:"동영상",
    kind_docs:"문서",kind_audio:"오디오",kind_subs:"자막",kind_other:"기타",prevPage:"이전",nextPage:"다음",noMatch:"결과 없음",pageOf:"{p} / {n} 페이지 · 총 {t}건",statTotal:"보유",dupesW:"중복",groupsW:"조",
    extW:"외부 참조",refsOk:"참조 정상",brokenW:"끊김",semW:"시맨틱",healthW:"상태",renderedW:"렌더링",
@@ -277,7 +289,7 @@ ko:{appTitle:"소재 허브",searchPh:"이름/태그/설명 검색…(/ 포커�
 en:{appTitle:"Material Hub",searchPh:"Search name/tag/description… (press /)",modeAuto:"Auto (semantic + keyword)",
    modeLex:"Exact keyword",modeSem:"Semantic only",sortRel:"Sort: relevance",newest:"Newest first",oldest:"Oldest first",
    nameAZ:"Name A→Z",sizeDesc:"Largest first",tools:"Tools ▾",refresh:"↻ Refresh",upload:"⬆ Upload files",
-   ingest:"Tidy ingest/",scan:"Scan materials/",genThumbs:"Generate covers",buildIndex:"Build semantic index",autoProc:"▶ Auto-process new items",
+   ingest:"Tidy ingest/",scan:"Scan materials/",genThumbs:"Generate covers",buildIndex:"Build semantic index",autoProc:"▶ Auto-process new items",cropNav:"✂ Crop",cropBack:"← Back to hub",cropAddrPh:"Crop tool URL, e.g. http://127.0.0.1:3000/en",cropLoad:"Load",
    dupes:"Duplicates",exportJson:"Export JSON",exportCsv:"Export CSV",typeLabel:"TYPE",tagsLabel:"TAGS",
    clearFilter:"✕ Clear filters",all:"All",kind_images:"Images",kind_videos:"Videos",kind_docs:"Docs",kind_audio:"Audio",
    kind_subs:"Subtitles",kind_other:"Other",prevPage:"Prev",nextPage:"Next",noMatch:"No matches",
@@ -298,7 +310,7 @@ ru:{appTitle:"Хаб материалов",searchPh:"Поиск по имени/
    modeLex:"Точное совпадение",modeSem:"Только семантика",sortRel:"По релевантности",newest:"Сначала новые",
    oldest:"Сначала старые",nameAZ:"Имя А→Я",sizeDesc:"Размер: сначала большие",tools:"Инструменты ▾",
    refresh:"↻ Обновить",upload:"⬆ Загрузить файлы",ingest:"Разобрать ingest/",scan:"Сканировать materials/",
-   genThumbs:"Создать обложки",buildIndex:"Построить семантич. индекс",autoProc:"▶ Автообработка новых",dupes:"Дубликаты",exportJson:"Экспорт JSON",
+   genThumbs:"Создать обложки",buildIndex:"Построить семантич. индекс",autoProc:"▶ Автообработка новых",cropNav:"✂ Кадр",cropBack:"← К хабу материалов",cropAddrPh:"URL инструмента кадрирования, напр. http://127.0.0.1:3000/ru",cropLoad:"Загрузить",dupes:"Дубликаты",exportJson:"Экспорт JSON",
    exportCsv:"Экспорт CSV",typeLabel:"ТИП",tagsLabel:"ТЕГИ",clearFilter:"✕ Сбросить фильтры",all:"Все",
    kind_images:"Изображения",kind_videos:"Видео",kind_docs:"Документы",kind_audio:"Аудио",kind_subs:"Субтитры",
    kind_other:"Другое",prevPage:"Назад",nextPage:"Далее",noMatch:"Нет совпадений",
@@ -321,7 +333,7 @@ ru:{appTitle:"Хаб материалов",searchPh:"Поиск по имени/
 hi:{appTitle:"सामग्री हब",searchPh:"नाम/टैग/विवरण खोजें… (/ फ़ोकस)",modeAuto:"स्वतः (सिमेंटिक+कीवर्ड)",
    modeLex:"सटीक कीवर्ड",modeSem:"केवल सिमेंटिक",sortRel:"प्रासंगिकता क्रम",newest:"नवीनतम पहले",oldest:"सबसे पुराने पहले",
    nameAZ:"नाम A→Z",sizeDesc:"आकार: बड़े पहले",tools:"टूल ▾",refresh:"↻ रिफ्रेश",upload:"⬆ फ़ाइलें अपलोड करें",
-   ingest:"ingest/ व्यवस्थित करें",scan:"materials/ स्कैन करें",genThumbs:"कवर बनाएं",buildIndex:"सिमेंटिक इंडेक्स बनाएं",autoProc:"▶ नई सामग्री स्वतः प्रोसेस",
+   ingest:"ingest/ व्यवस्थित करें",scan:"materials/ स्कैन करें",genThumbs:"कवर बनाएं",buildIndex:"सिमेंटिक इंडेक्स बनाएं",autoProc:"▶ नई सामग्री स्वतः प्रोसेस",cropNav:"✂ क्रॉप",cropBack:"← हब पर वापस",cropAddrPh:"क्रॉप टूल URL, जैसे http://127.0.0.1:3000/hi",cropLoad:"लोड करें",
    dupes:"डुप्लिकेट",exportJson:"JSON निर्यात",exportCsv:"CSV निर्यात",typeLabel:"प्रकार",tagsLabel:"टैग",
    clearFilter:"✕ फ़िल्टर हटाएं",all:"सभी",kind_images:"चित्र",kind_videos:"वीडियो",kind_docs:"दस्तावेज़",kind_audio:"ऑडियो",
    kind_subs:"उपशीर्षक",kind_other:"अन्य",prevPage:"पिछला",nextPage:"अगला",noMatch:"कोई मेल नहीं",
@@ -604,6 +616,7 @@ function renderPager(pages){
 
 /* ---------- URL hash 同步 ---------- */
 function syncHash(){
+  if(location.hash.startsWith("#/crop")) return;   // 裁剪路由由 crop-route.js 管理
   const f=filters(), o={};
   if(f.q) o.q=f.q;
   if(f.kind) o.kind=f.kind;
@@ -844,6 +857,7 @@ function selectTag(tg){
 })();
 
 window.addEventListener("hashchange", ()=>{
+  if(location.hash.startsWith("#/crop")) return;   // 裁剪路由由 crop-route.js 接管
   const tg = readHash();
   selectTag(tg);
   load();
@@ -861,5 +875,6 @@ async function populateTags(){
   }catch(e){}
 }
 </script>
+<script src="/static/crop-route.js?v=3"></script>
 </body>
 </html>
