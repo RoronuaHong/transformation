@@ -851,6 +851,18 @@ async def try_upload(
     gif_ranges: str = Form("[]"),
     clips: str = Form("[]"),
     langs: str = Form(""),
+    want_translate: str = Form("true"),
+    want_notes: str = Form("true"),
+    want_clips: str = Form("false"),
+    want_dehardsub: str = Form("false"),
+    want_deblur: str = Form("false"),
+    want_enhance: str = Form("false"),
+    want_compress: str = Form("false"),
+    want_concat: str = Form("false"),
+    want_remix: str = Form("false"),
+    want_publish: str = Form("false"),
+    media_opts: str = Form("{}"),
+    stages: str = Form(""),
 ) -> dict:
     from api.try_service import job_snapshot, run_try_job, submit_upload, try_status
 
@@ -872,6 +884,24 @@ async def try_upload(
             lang_list = parsed if isinstance(parsed, list) else raw_langs
         except json.JSONDecodeError:
             lang_list = raw_langs
+    # want_* 开关解析(与 /api/try/uploads 批量端点保持同一契约,缺省即旧默认)
+    wt = str(want_translate or "true").strip().lower() not in ("0", "false", "no", "off")
+    wn = str(want_notes or "true").strip().lower() not in ("0", "false", "no", "off")
+    wcl = str(want_clips or "false").strip().lower() not in ("0", "false", "no", "off")
+    wdh = str(want_dehardsub or "false").strip().lower() not in ("0", "false", "no", "off")
+    wdb = str(want_deblur or "false").strip().lower() not in ("0", "false", "no", "off")
+    we = str(want_enhance or "false").strip().lower() not in ("0", "false", "no", "off")
+    wc = str(want_compress or "false").strip().lower() not in ("0", "false", "no", "off")
+    wcat = str(want_concat or "false").strip().lower() not in ("0", "false", "no", "off")
+    wrx = str(want_remix or "false").strip().lower() not in ("0", "false", "no", "off")
+    wp = str(want_publish or "false").strip().lower() not in ("0", "false", "no", "off")
+    try:
+        media_opts_dict = json.loads(media_opts or "{}")
+        if not isinstance(media_opts_dict, dict):
+            media_opts_dict = {}
+    except json.JSONDecodeError:
+        media_opts_dict = {}
+    stage_s = (stages or "").strip() or None
     data = await file.read()
     out = submit_upload(
         data,
@@ -882,6 +912,18 @@ async def try_upload(
         clips=clip_raw if isinstance(clip_raw, list) else [],
         gif_ranges=gif_raw if isinstance(gif_raw, list) else [],
         langs=lang_list,
+        want_translate=wt,
+        want_notes=wn,
+        want_clips=wcl,
+        stages=stage_s,
+        want_dehardsub=wdh,
+        want_deblur=wdb,
+        want_enhance=we,
+        want_compress=wc,
+        want_concat=wcat,
+        want_remix=wrx,
+        want_publish=wp,
+        media_opts=media_opts_dict,
     )
     if not out.get("ok"):
         raise HTTPException(status_code=400, detail=out.get("error") or "upload failed")
