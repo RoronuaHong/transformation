@@ -218,11 +218,15 @@
   <h2 data-i18n="agentTitle"></h2>
   <div class="meta" style="margin-bottom:6px" data-i18n="agentNote"></div>
   <textarea id="agTask" rows="3" style="width:100%;box-sizing:border-box"></textarea>
+  <div class="meta" style="font-size:12px;color:#999;margin:4px 0">能:检索/巡检/总结/打标签(勾写) · 不能:上传/转码/抽帧/建索引/删文件</div>
+  <div style="margin:6px 0 2px;font-size:12px;color:#aaa">示例任务(点一下填入):</div>
+  <div id="agEx" style="margin:4px 0;display:flex;gap:6px;flex-wrap:wrap"></div>
+  <div id="agCaps" class="meta" style="margin:2px 0 6px;font-size:12px"></div>
   <div style="margin:8px 0;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
     <label><input type="checkbox" id="agWrite"> <span data-i18n="agentWrite"></span></label>
     <label><span data-i18n="agentSteps"></span>
       <select id="agSteps"><option value="8">8</option><option value="12" selected>12</option><option value="16">16</option><option value="20">20</option></select>
-    </label>
+      </label>
   </div>
   <div id="agOut" class="meta" style="max-height:320px;overflow:auto;white-space:pre-wrap"></div>
   <div style="text-align:right;margin-top:10px"><button id="agRun" data-i18n="agentRun"></button> <button id="agClose" data-i18n="close"></button></div>
@@ -794,7 +798,21 @@ $("#dupClose").onclick=()=>$("#dupModal").classList.remove("show");
 $("#file").onchange=e=>upload(e.target.files);
 
 // ---- Deep Agent(面板入口:任务后台执行,3s 轮询 todos/summary) ----
-$("#agentBtn").onclick=()=>$("#agModal").classList.add("show");
+const AG_EXAMPLES=[["巡检健康(只读)","巡检素材库健康状态,列出重复组和失效外部引用"],
+  ["重复/失效清单","列出所有重复素材和外部引用失效的条目"],
+  ["B站视频打标签","找出所有 B站 视频,给它们打上标签 bilibili"],
+  ["主题检索总结","搜索和\"去字幕\"相关的素材,总结它们都在做什么处理"]];
+(function(){const ex=$("#agEx");AG_EXAMPLES.forEach(([label,task])=>{
+  const s=document.createElement("span");
+  s.textContent=label;s.title=task;
+  s.style.cssText="cursor:pointer;border:1px solid #777;border-radius:12px;padding:2px 8px;font-size:12px;background:#2a2a2a;color:#ddd";
+  s.onclick=()=>{$("#agTask").value=task;$("#agTask").focus();};
+  ex.appendChild(s);});})();
+async function agCaps(){try{const c=await api("/api/agent/caps");
+  if(c.model_ready){$("#agCaps").textContent="✅ 模型就绪: "+c.model+"（Agent 可用）";$("#agCaps").style.color="#7c7";}
+  else{$("#agCaps").textContent="⚠️ 未检测到本地 chat 模型 → 需先 `ollama pull qwen2.5:7b`";$("#agCaps").style.color="#e88";}
+}catch(e){$("#agCaps").textContent="⚠️ 无法检测模型状态";$("#agCaps").style.color="#e88";}}
+$("#agentBtn").onclick=()=>{$("#agModal").classList.add("show");agCaps();};
 $("#agClose").onclick=()=>$("#agModal").classList.remove("show");
 $("#agRun").onclick=async()=>{
   const task=$("#agTask").value.trim();

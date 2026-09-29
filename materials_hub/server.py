@@ -17,7 +17,7 @@ from core import (
     update_description, remove_material, duplicates, sanitize_name,
     distinct_tags, make_thumb, thumb_path, thumbs_status, purge_thumbs,
     missing_thumbnail_ids, thumb_failure_reason, health, broken_externals,
-    prune_broken_externals, external_stats, build_embeddings, embed_status,
+    prune_broken_externals, external_stats,     build_embeddings, embed_status, chat_models,
     ensure_ollama, external_path_allowed,
     auto_process_all, pending_processing,
 )
@@ -243,6 +243,12 @@ class Handler(BaseHTTPRequestHandler):
                 st["job"] = dict(_AGENT_JOB)
                 return self._json(st)
             return self._json({"running": False, "job": dict(_AGENT_JOB)})
+
+        if p == "/api/agent/caps":
+            # Agent 能力/前置检测:本机是否有可用的 chat 模型(无则 Agent 会 skipped)
+            cms = chat_models()
+            return self._json({"chat_models": cms, "model_ready": bool(cms),
+                               "model": cms[0] if cms else ""})
 
         if p == "/api/health":
             return self._json(health())
