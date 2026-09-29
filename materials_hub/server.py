@@ -365,6 +365,7 @@ class Handler(BaseHTTPRequestHandler):
             mt = mimetypes.guess_type(fp)[0]
             ctype = {
                 "images": mt or "image/*", "videos": mt or "video/*",
+                "anim": mt or "image/gif",
                 "audio": mt or "audio/*",
                 "docs": "application/octet-stream", "subs": "application/octet-stream",
                 "other": "application/octet-stream",

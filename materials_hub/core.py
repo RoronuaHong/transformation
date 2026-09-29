@@ -55,7 +55,8 @@ def external_path_allowed(p):
 
 # 按扩展名分类。audio 单独成类便于检索。
 KINDS = {
-    "images": {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".tif", ".tiff", ".ico", ".heic"},
+    "images": {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".svg", ".tif", ".tiff", ".ico", ".heic"},
+    "anim": {".gif"},
     "videos": {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".flv", ".ts"},
     "docs": {".pdf", ".md", ".txt", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx",
              ".csv", ".json", ".yaml", ".yml", ".html", ".epub", ".rtf"},
