@@ -523,7 +523,8 @@ function renderFacets(st, f){
     kf.appendChild(d);
   };
   mk("", t("all"), total);
-  for(const [k,v] of Object.entries(st.kinds||{})) mk(k, kindName(k), v);
+  // 常显全部类型(含 0 项),而非只显示库里已有的类型
+  for(const k of Object.keys(KIND_KEY)) mk(k, kindName(k), (st.kinds && st.kinds[k]) || 0);
   api("/api/tags").then(tags=>{
     const tc=$("#tagCloud"); tc.innerHTML="";
     for(const tg of tags.slice(0,24)){
