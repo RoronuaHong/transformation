@@ -2033,24 +2033,36 @@ def _prepare_upload(file_bytes: bytes, filename: str) -> tuple[Path, str]:
     ffmpeg = find_ffmpeg()
     import subprocess
 
-    subprocess.run(
-        [
-            ffmpeg,
-            "-y",
-            "-i",
-            str(src),
-            "-vn",
-            "-acodec",
-            "pcm_s16le",
-            "-ar",
-            "16000",
-            "-ac",
-            "1",
-            str(wav),
-        ],
-        check=True,
-        capture_output=True,
-    )
+    from media_ops import has_audio_stream
+
+    # Only extract audio when the source actually carries an audio track.
+    # Silent/clip videos have no audio stream, and forcing extraction makes
+    # the whole upload crash. ASR downstream tolerates a missing wav.
+    if has_audio_stream(src):
+        try:
+            subprocess.run(
+                [
+                    ffmpeg,
+                    "-y",
+                    "-i",
+                    str(src),
+                    "-vn",
+                    "-acodec",
+                    "pcm_s16le",
+                    "-ar",
+                    "16000",
+                    "-ac",
+                    "1",
+                    str(wav),
+                ],
+                check=True,
+                capture_output=True,
+            )
+        except subprocess.CalledProcessError:
+            # Audio extraction failed despite a reported stream: keep going
+            # without a wav rather than failing the whole upload.
+            if wav.exists():
+                wav.unlink(missing_ok=True)
     # Keep video for GIF when input is video
     if ext in {".mp4", ".mkv", ".webm", ".mov"} and src.name != "source.mp4":
         target = media / "source.mp4"

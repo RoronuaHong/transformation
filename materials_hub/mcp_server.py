@@ -110,8 +110,8 @@ def t_update_tags(a):
     mid = a.get("id", "")
     if not core.get_material(mid):
         raise ValueError("not found: " + mid)
-    core.update_tags(mid, a.get("tags", ""))
-    return {"ok": True, "id": mid}
+    r = core.update_tags(mid, a.get("tags", ""))
+    return r
 
 
 def t_register(a):

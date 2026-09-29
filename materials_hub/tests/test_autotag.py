@@ -83,13 +83,16 @@ def test_parse_error_status():
 
 
 def test_autotag_all_without_model():
-    orig = core.chat_models
+    # 自包含:桩掉 all_materials,不依赖真实库里恰好有 5 条素材
+    orig_cm, orig_all = core.chat_models, core.all_materials
     core.chat_models = lambda: []
+    core.all_materials = lambda: [{"id": "m%d" % i, "name": "v%d.mp4" % i}
+                                  for i in range(5)]
     try:
         res = core.auto_tag_all(limit=5)
         assert all(r["status"] == "skipped" for r in res) and len(res) == 5
     finally:
-        core.chat_models = orig
+        core.chat_models, core.all_materials = orig_cm, orig_all
 
 
 def test_rule_tag_offline_no_model():

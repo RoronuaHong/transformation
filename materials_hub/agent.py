@@ -97,9 +97,15 @@ def _observe(state, ws, obj):
 
 # ---------------------------------------------------------------- 工具表(支柱 3/4)
 def _tool_search(a):
-    return [_brief(m) for m in core.search(
-        a.get("q", ""), a.get("kind", ""), a.get("tag", ""),
+    rows = [_brief(m) for m in core.search(
+        str(a.get("q") or ""), str(a.get("kind") or ""), str(a.get("tag") or ""),
         limit=int(a.get("limit") or 10), mode=a.get("mode", "auto"))]
+    if rows:
+        return rows
+    # 空结果必须给小模型明确反馈,否则会原查询死循环(实测 qwen2.5:7b 连打 10 次空查询)
+    return {"results": [], "count": 0,
+            "hint": "0 hits。请换更短的关键词重试:素材文件名片段(如 BV 号)、"
+                    "中文主题词;或用 get_material 按 id 直取;或用 chunk_search 查全文。"}
 
 
 def _tool_chunk(a):
@@ -125,13 +131,33 @@ def _tool_preview(a):
     return {"id": m["id"], "name": m.get("name", ""), "preview": txt[:n]}
 
 
-def _tool_update_tags(a):
-    """写工具:仅 allow_write=True 时注册。"""
-    mid = a.get("id", "")
-    if not core.get_material(mid):
-        return {"error": "not found: " + mid}
-    core.update_tags(mid, a.get("tags", ""))
-    return {"ok": True, "id": mid}
+def _tool_update_tags(a, ctx=None):
+    """写工具:仅 allow_write=True 时注册。id/tags 一律强转 str(LLM 常给 int)。
+
+    清理 ai_tags(幻觉标签)由 core.update_tags 统一负责(默认 purge_ai_tags=True):
+    ai_tags 是 LLM 自动打标产物,实测 qwen2.5:7b 给烹饪视频打 subs/codeformer;
+    凡不在新 tags 里的 ai_tags token 一律清除,使「删掉幻觉标签」目标真正落地。
+
+    id 兜底:7B 模型常不复制检索结果里的真实 id(改用 BV号/XXX/12345),此时若最近一次
+    检索拿到过有效 id,就自动替用该 id(并在返回里标注 used_fallback_id),让任务能真正推进,
+    而不是卡在 not found 死循环。
+    """
+    mid = str(a.get("id") or "").strip()
+    used_fallback = None
+    if not mid or not core.get_material(mid):
+        fallback = (ctx or {}).get("last_id")
+        if fallback and core.get_material(fallback):
+            used_fallback = mid
+            mid = fallback
+        else:
+            return {"error": "not found: %s" % mid}
+    tags = a.get("tags", "")
+    if isinstance(tags, (list, tuple)):
+        tags = ",".join(str(t).strip() for t in tags if str(t).strip())
+    r = core.update_tags(mid, str(tags))
+    if used_fallback:
+        r["used_fallback_id"] = used_fallback
+    return r
 
 
 def _tool_register(a):
@@ -146,11 +172,12 @@ def _tool_register(a):
     return r
 
 
-def _build_tools(allow_write):
+def _build_tools(allow_write, ctx=None):
     tools = {
         "search_materials": (_tool_search,
                              "检索素材库;args: q(中文自然语言/关键词), kind?, tag?, limit?, mode?"),
-        "get_material": (lambda a: core.get_material(a.get("id", "")) or {"error": "not found"},
+        "get_material": (lambda a: core.get_material(str(a.get("id") or "").strip())
+                         or {"error": "not found"},
                          "按 id 取素材完整记录;args: id"),
         "list_tags": (lambda a: [{"tag": t, "count": c} for t, c in core.distinct_tags()[:int(a.get("limit") or 50)]],
                       "列出全部标签及计数;args: limit?"),
@@ -162,9 +189,16 @@ def _build_tools(allow_write):
                               "读素材描述/关联文本前 N 字符(取回被卸载的细节用);args: id, chars?"),
     }
     if allow_write:
-        tools["update_tags"] = (_tool_update_tags, "写:更新素材标签;args: id, tags")
+        tools["update_tags"] = (_tool_update_tags,
+                               "写:更新素材标签;args: id, tags")
         tools["register_asset"] = (_tool_register,
                                    "写:登记外部文件引用(不复制);args: path, tags?, description?")
+    # 给写工具注入 ctx(携带最近检索到的 last_id,用于 id 兜底)
+    if ctx is not None:
+        for name in ("update_tags",):
+            if name in tools:
+                fn, desc = tools[name]
+                tools[name] = (lambda a, _fn=fn: _fn(a, ctx), desc)
     return tools
 
 
@@ -238,6 +272,8 @@ finish 的 args 为 {"summary":"中文总结,列关键素材 id"}。
 3. 库巡检/失效引用清点用 maintain(确定性,零幻觉)。
 4. 每完成一条待办就在 mark_done 里列出其 id;全部完成后必须 finish。
 5. 写操作默认不可用;若工具表中没有写工具,不要尝试写入。
+6. 素材 id 必须从 search_materials/get_material 返回的 "id" 字段原样复制(形如 80ad93332bca 的短字母数字串)。
+   绝不可用 BV 号(BV1q1...)、文件名、或 XXX 占位符当 id——那样会命中 "not found" 并死循环。
 
 可用工具:
 """
@@ -272,7 +308,8 @@ def agent_run(task, allow_write=False, max_steps=_DEFAULT_STEPS, model=None, tas
         return {"status": "error", "task_id": task_id, "summary": state["summary"]}
 
     state["status"] = "running"
-    tools = _build_tools(allow_write)
+    ctx = {"last_id": None}                               # 最近检索到的有效素材 id(供写工具兜底)
+    tools = _build_tools(allow_write, ctx)
     tool_lines = "".join("  - %s: %s\n" % (n, d) for n, (_, d) in sorted(tools.items()))
     tool_lines += "  - retrieve: 子代理:多查询检索+LLM汇总,只回摘要;args: {goal}\n"
     tool_lines += "  - maintain: 确定性巡检(health+失效引用),零幻觉;args: 无\n"
@@ -318,6 +355,17 @@ def agent_run(task, allow_write=False, max_steps=_DEFAULT_STEPS, model=None, tas
                        "allowed": sorted(tools) + ["retrieve", "maintain", "finish"]}
         except Exception as e:                              # noqa: BLE001
             obs = {"error": "%s: %s" % (type(e).__name__, e)}
+
+        # 记录最近检索到的有效素材 id,供写工具 id 兜底(7B 常不复制真实 id,改用 BV号/XXX)
+        if action == "search_materials" and isinstance(obs, list) and obs:
+            if isinstance(obs[0], dict) and obs[0].get("id"):
+                ctx["last_id"] = obs[0]["id"]          # 首条结果 id 作兜底基准
+        elif action == "get_material" and isinstance(obs, dict) and obs.get("id"):
+            ctx["last_id"] = obs["id"]
+        elif action == "retrieve" and isinstance(obs, dict):
+            ids = obs.get("ids") or []
+            if ids and isinstance(ids[0], str):
+                ctx["last_id"] = ids[0]
 
         ptr = _observe(state, ws, obs)
         context.append("step%d[%s] %s" % (n, action, ptr[:400]))

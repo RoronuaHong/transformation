@@ -1315,13 +1315,32 @@ def duplicates():
     return [dict(r) for r in rows]
 
 
-def update_tags(mid, tags):
+def update_tags(mid, tags, purge_ai_tags=True):
+    """更新素材的权威标签列(tags)。
+
+    默认 purge_ai_tags=True:同步清理 ai_tags 中不在新 tags 里的 token。ai_tags 是
+    LLM 自动打标产物,常含幻觉(实测 qwen2.5:7b 给烹饪视频打 subs/codeformer),
+    使「删除幻觉标签」目标真正落地(agent 与 MCP 的 update_tags 共用本逻辑)。
+    返回 {"ok","id","tags","ai_tags_kept","ai_tags_removed"} 供调用方回显。
+    """
     old = (get_material(mid) or {}).get("tags", "")
     con = _con()
     con.execute("UPDATE materials SET tags=? WHERE id=?", (tags, mid))
     con.commit()
     con.close()
     log_history("app", "update_tags", mid, f"tags: {old!r} -> {tags!r}")
+    kept, removed = [], []
+    if purge_ai_tags:
+        m = get_material(mid)
+        if m:
+            ai = [t.strip() for t in (m.get("ai_tags") or "").split(",") if t.strip()]
+            want = set(t.strip() for t in tags.split(",") if t.strip())
+            for t in ai:
+                (kept if t in want else removed).append(t)
+            if removed:
+                _update_material(mid, ai_tags=",".join(kept))
+    return {"ok": True, "id": mid, "tags": tags,
+            "ai_tags_kept": kept, "ai_tags_removed": removed}
 
 
 def update_description(mid, desc):
