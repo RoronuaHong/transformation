@@ -54,6 +54,20 @@ def _safe_resolve(base, rel):
 _THUMB_JOB = {"running": False, "total": 0, "done": 0, "made": 0, "error": ""}
 # 语义索引构建任务状态(同样放后台,避免长请求把浏览器挂住)
 _EMBED_JOB = {"running": False, "total": 0, "done": 0, "embedded": 0, "error": ""}
+# Deep Agent 任务状态(7B 本地模型一次任务要跑几分钟,必须后台线程+轮询)
+_AGENT_JOB = {"running": False, "task": "", "task_id": "", "status": "", "error": ""}
+
+
+def _run_agent_job(task, allow_write, max_steps, task_id):
+    import agent                                  # 延迟导入:agent 依赖 ollama 可用性
+    try:
+        r = agent.agent_run(task, allow_write=allow_write, max_steps=max_steps,
+                            task_id=task_id)
+        _AGENT_JOB.update(running=False, status=r.get("status", "done"),
+                          task_id=r.get("task_id", task_id), error=r.get("summary", "")[:200])
+    except Exception as e:                        # noqa: BLE001
+        _AGENT_JOB.update(running=False, status="error", task_id=task_id,
+                          error="%s: %s" % (type(e).__name__, e))
 
 
 def _run_embed_job(force=False, limit=0):
@@ -217,6 +231,19 @@ class Handler(BaseHTTPRequestHandler):
                                "external": external_stats(),
                                "embed": {**embed_status(), "job": dict(_EMBED_JOB)},
                                "auto": {"pending": pending}})
+        if p == "/api/agent":
+            # Deep Agent 状态:?task_id= 取该任务 todos/summary/轨迹;无参取最近 job 快照
+            qs = urllib.parse.parse_qs(u.query)
+            tid = (qs.get("task_id") or [""])[0]
+            if _AGENT_JOB["running"] and (not tid or tid == _AGENT_JOB["task_id"]):
+                return self._json({"running": True, "job": dict(_AGENT_JOB)})
+            if tid:
+                import agent
+                st = agent.agent_status(tid)
+                st["job"] = dict(_AGENT_JOB)
+                return self._json(st)
+            return self._json({"running": False, "job": dict(_AGENT_JOB)})
+
         if p == "/api/health":
             return self._json(health())
         if p == "/api/broken":
@@ -392,6 +419,29 @@ class Handler(BaseHTTPRequestHandler):
             r = auto_process_all(limit=int(body.get("limit") or 0),
                                  autotag=bool(body.get("autotag")))
             return self._json(r)
+
+        if p == "/api/agent":
+            # Deep Agent:{"task":str,"allow_write":bool(默认 False),"max_steps":int(默认 12)}
+            # 后台线程执行,前端轮询 GET /api/agent?task_id=xxx 取 todos/summary
+            try:
+                opt = json.loads(raw or b"{}")
+            except Exception:
+                opt = {}
+            task = str(opt.get("task") or "").strip()
+            if not task:
+                return self._json({"error": "task required"})
+            if _AGENT_JOB["running"]:
+                return self._json({"running": True, "job": dict(_AGENT_JOB)})
+            import agent as _agent_mod
+            tid = _agent_mod._new_id(task)        # 预生成:前端立刻能轮询
+            _AGENT_JOB.update(running=True, task=task, task_id=tid,
+                              status="planning", error="")
+            threading.Thread(
+                target=_run_agent_job,
+                args=(task, bool(opt.get("allow_write")),
+                      max(3, min(int(opt.get("max_steps") or 12), 20)), tid),
+                daemon=True).start()
+            return self._json({"running": True, "task_id": tid, "job": dict(_AGENT_JOB)})
 
         if p == "/api/remove":
             remove_material(body.get("id"))

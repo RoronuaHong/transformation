@@ -243,12 +243,13 @@ finish 的 args 为 {"summary":"中文总结,列关键素材 id"}。
 """
 
 
-def agent_run(task, allow_write=False, max_steps=_DEFAULT_STEPS, model=None):
+def agent_run(task, allow_write=False, max_steps=_DEFAULT_STEPS, model=None, task_id=None):
     """执行一次 Deep Agent 任务。返回最终状态 dict。
 
     task        自然语言任务(中文);
     allow_write 仅当 True 才注册写工具(MCP 侧还需 confirm=true 才会传 True);
-    max_steps   主循环步数上限(防失控,默认 12)。
+    max_steps   主循环步数上限(防失控,默认 12);
+    task_id     可外部预指定(server 侧先拿到 id 供前端轮询)。
     """
     models = core.chat_models()
     if not models:
@@ -256,7 +257,7 @@ def agent_run(task, allow_write=False, max_steps=_DEFAULT_STEPS, model=None):
                 "hint": "ollama pull qwen2.5:7b 后重试"}
     model = model or models[0]
 
-    task_id = _new_id(task)
+    task_id = task_id or _new_id(task)
     ws = _ws(task_id)
     os.makedirs(os.path.join(ws, "notes"), exist_ok=True)
     state = {"task": task, "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -281,9 +282,12 @@ def agent_run(task, allow_write=False, max_steps=_DEFAULT_STEPS, model=None):
     context = []                                            # 紧凑观察轨迹(指针化)
     finished = False
     for n in range(1, max_steps + 1):
-        user = ("任务:%s\n待办:%s\n最近观察:\n%s"
+        budget_hint = ""
+        if max_steps - n <= 2:      # 步数将尽,催促收尾(7B 小模型常把 todo 做完却忘了 finish)
+            budget_hint = "\n(注意:剩余步数很少,若待办已基本完成,请立即 finish 并在 summary 里给出汇总)"
+        user = ("任务:%s\n待办:%s\n最近观察:\n%s%s"
                 % (task, json.dumps(state["todos"], ensure_ascii=False),
-                   "\n".join(context[-_CONTEXT_TAIL:]) or "(无)"))
+                   "\n".join(context[-_CONTEXT_TAIL:]) or "(无)", budget_hint))
         act = _chat([{"role": "system", "content": sys_prompt},
                      {"role": "user", "content": user}], model)
         action = act.get("action", "")
@@ -323,7 +327,12 @@ def agent_run(task, allow_write=False, max_steps=_DEFAULT_STEPS, model=None):
 
     if not finished:
         state["status"] = "max_steps_reached"
-        state["summary"] = "步数上限(%d)已达,未 finish;已存轨迹可 agent_status 查阅" % max_steps
+        # 截断时 summary 带上最近几步的实质进展(而非干巴巴一句),agent_status 一眼可见
+        tail = " | ".join(
+            (s.get("thought") or s.get("action") or "") for s in state["steps"][-3:]
+            if isinstance(s, dict))
+        state["summary"] = ("步数上限(%d)已达,未 finish;最近进展: %s"
+                            % (max_steps, tail))[:2000]
     else:
         state["status"] = "done"
     _save(state, ws)

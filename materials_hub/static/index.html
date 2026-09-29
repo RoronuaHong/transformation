@@ -160,6 +160,7 @@
       <button id="thumbs" data-i18n="genThumbs"></button>
       <button id="embed" data-i18n="buildIndex"></button>
       <button id="autoProc" data-i18n="autoProc"></button>
+      <button id="agentBtn" data-i18n="agentBtn"></button>
       <div class="sep"></div>
       <button id="dupes" data-i18n="dupes"></button>
       <button id="exportJson" data-i18n="exportJson"></button>
@@ -213,6 +214,20 @@
   <div id="dupBody"></div>
   <div style="text-align:right;margin-top:12px"><button id="dupClose" data-i18n="close"></button></div>
 </div></div>
+<div id="agModal" class="modal"><div class="box">
+  <h2 data-i18n="agentTitle"></h2>
+  <div class="meta" style="margin-bottom:6px" data-i18n="agentNote"></div>
+  <textarea id="agTask" rows="3" style="width:100%;box-sizing:border-box"></textarea>
+  <div style="margin:8px 0;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+    <label><input type="checkbox" id="agWrite"> <span data-i18n="agentWrite"></span></label>
+    <label><span data-i18n="agentSteps"></span>
+      <select id="agSteps"><option value="8">8</option><option value="12" selected>12</option><option value="16">16</option><option value="20">20</option></select>
+    </label>
+  </div>
+  <div id="agOut" class="meta" style="max-height:320px;overflow:auto;white-space:pre-wrap"></div>
+  <div style="text-align:right;margin-top:10px"><button id="agRun" data-i18n="agentRun"></button> <button id="agClose" data-i18n="close"></button></div>
+</div></div>
+
 <div id="brokenModal" class="modal"><div class="box">
   <h2 data-i18n="brokenTitle"></h2>
   <div class="meta" style="margin-bottom:8px" data-i18n="brokenNote"></div>
@@ -249,7 +264,9 @@ zh:{appTitle:"素材中心",searchPh:"搜索名称/标签/描述… (按 / 聚�
    copyFailT:"复制失败",uploadedT:"已上传 {n} 个文件",ingestT:"ingest/ 整理完成",scanT:"materials/ 扫描完成",
    idxT:"语义索引构建已启动",thumbT:"封面生成已启动",autoDoneT:"自动处理完成",noEmbed:"未发现本地 embedding 模型",noFFmpeg:"本机未安装 ffmpeg,已回退浏览器截帧",
    thumbServer:"服务端抽帧(缓存 {n})",thumbClient:"浏览器截帧(本机无 ffmpeg)",thumbGen:"生成中 {d}/{t}",
-   unavailW:"不可用",buildingW:"构建中 {d}/{t}",notEnabled:"未启用(无本地 embedding 模型)",warn:"告警(失效 {n})",dropHint:"松手即可上传",tagSys:"标签体系:sp=来自 subtitle_pipeline;type:xx=产物类别;job:xx=所属任务;lang:xx=语言;其余为处理类型或自定义标签。悬停任意标签可见解释,点击可筛选。",tag_sp:"来自 subtitle_pipeline 处理流水线的素材",tag_type:"产物类别(type: 后缀:render=渲染产物 media=原始媒体 notes=笔记 benchmark=基准测试 subs=字幕 test=测试)",tag_job:"所属任务:冒号后是任务 ID,点击标签可筛出该任务全部产物",tag_lang:"语言标记(lang: 后为语种代码)",tag_bili:"来源平台:B 站下载",tag_proc:"处理类型标签:标记素材经历过的处理(去字幕/去模糊/切片/对比图等)",tag_custom:"自定义/历史标签:由规则或人工添加,用于检索过滤"},
+   unavailW:"不可用",buildingW:"构建中 {d}/{t}",notEnabled:"未启用(无本地 embedding 模型)",warn:"告警(失效 {n})",dropHint:"松手即可上传",tagSys:"标签体系:sp=来自 subtitle_pipeline;type:xx=产物类别;job:xx=所属任务;lang:xx=语言;其余为处理类型或自定义标签。悬停任意标签可见解释,点击可筛选。",tag_sp:"来自 subtitle_pipeline 处理流水线的素材",tag_type:"产物类别(type: 后缀:render=渲染产物 media=原始媒体 notes=笔记 benchmark=基准测试 subs=字幕 test=测试)",tag_job:"所属任务:冒号后是任务 ID,点击标签可筛出该任务全部产物",tag_lang:"语言标记(lang: 后为语种代码)",tag_bili:"来源平台:B 站下载",tag_proc:"处理类型标签:标记素材经历过的处理(去字幕/去模糊/切片/对比图等)",tag_custom:"自定义/历史标签:由规则或人工添加,用于检索过滤",
+   agentBtn:"🤖 Agent",agentTitle:"Deep Agent 任务",agentNote:"用本机 ollama chat 模型(qwen2.5)驱动的素材库代理:自动规划待办→调用检索/巡检工具→汇总。任务在后台执行,几分钟不等,可关闭窗口稍后回来看结果。",
+   agentWrite:"允许写操作(更新标签/登记引用,仍走双重护栏)",agentSteps:"步数上限",agentRun:"▶ 执行",agentRunT:"Agent 任务已启动",agentDoneT:"Agent 任务完成",agentNoTask:"请先输入任务描述"},
 ja:{appTitle:"素材ハブ",searchPh:"名前/タグ/説明を検索…(/ でフォーカス)",modeAuto:"自動(セマンティック+キーワード)",modeLex:"キーワード一致",
    modeSem:"セマンティックのみ",sortRel:"関連度順",newest:"新しい順",oldest:"古い順",nameAZ:"名前 A→Z",sizeDesc:"サイズが大きい順",
    tools:"ツール ▾",refresh:"↻ 更新",upload:"⬆ アップロード",ingest:"ingest/ を整理",scan:"materials/ をスキャン",
@@ -775,6 +792,43 @@ $("#thumbs").onclick=async()=>{
 };
 $("#dupClose").onclick=()=>$("#dupModal").classList.remove("show");
 $("#file").onchange=e=>upload(e.target.files);
+
+// ---- Deep Agent(面板入口:任务后台执行,3s 轮询 todos/summary) ----
+$("#agentBtn").onclick=()=>$("#agModal").classList.add("show");
+$("#agClose").onclick=()=>$("#agModal").classList.remove("show");
+$("#agRun").onclick=async()=>{
+  const task=$("#agTask").value.trim();
+  if(!task){toast(t("agentNoTask"));return;}
+  const btn=$("#agRun"); btn.disabled=true;
+  const out=$("#agOut");
+  try{
+    const r=await api("/api/agent",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({task,allow_write:$("#agWrite").checked,max_steps:+$("#agSteps").value})});
+    if(r.error){out.textContent=r.error;btn.disabled=false;return;}
+    toast(t("agentRunT"));
+    const tid=r.task_id||"";
+    const render=st=>{
+      out.innerHTML="<b>"+(st.status||"?")+"</b><br>"+
+        (st.todos||[]).map(x=>(x.status==="done"?"✅ ":"⬜ ")+x.text).join("<br>")+
+        "<hr>"+(st.summary||"…");
+    };
+    const poll=async()=>{
+      const s=await api("/api/agent"+(tid?("?task_id="+tid):""));
+      const j=s.job||{};
+      const cur=tid||s.task_id||j.task_id||"";
+      if(s.running||j.running){                              // 后台执行中:显示进度
+        out.innerHTML="⏳ "+(j.status||"running")+" — "+(j.task||s.task||"");
+        setTimeout(poll,3000);return;
+      }
+      const st=cur?await api("/api/agent?task_id="+cur):s;
+      if(st.error){out.innerHTML="⏳ …";setTimeout(poll,3000);return;}
+      render(st);
+      if(st.status==="planning"||st.status==="running"){setTimeout(poll,3000);return;}
+      toast(t("agentDoneT")); btn.disabled=false;
+    };
+    poll();
+  }catch(e){out.textContent=String(e);btn.disabled=false;}
+};
 
 async function upload(files){
   for(const f of files){
