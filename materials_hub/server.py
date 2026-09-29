@@ -57,6 +57,36 @@ _EMBED_JOB = {"running": False, "total": 0, "done": 0, "embedded": 0, "error": "
 # Deep Agent 任务状态(7B 本地模型一次任务要跑几分钟,必须后台线程+轮询)
 _AGENT_JOB = {"running": False, "task": "", "task_id": "", "status": "", "error": ""}
 
+# 上传/入库/扫描后自动处理队列(事件驱动,免去手动点按钮)
+_AUTOPROC_JOB = {"running": False, "processed": 0, "error": "", "kicked_by": ""}
+
+
+def _run_autoproc_job(autotag=False, kicked_by=""):
+    try:
+        r = auto_process_all(limit=0, autotag=autotag)
+        _AUTOPROC_JOB["processed"] = r.get("processed", 0)
+        _AUTOPROC_JOB["kicked_by"] = kicked_by
+    except Exception as e:  # noqa: BLE001  # 后台线程异常不能让进程挂掉
+        _AUTOPROC_JOB["error"] = str(e)
+    finally:
+        _AUTOPROC_JOB["running"] = False
+
+
+def enqueue_autoproc(autotag=False, kicked_by=""):
+    """入库(上传/整理/扫描)后调用:有素材待处理则后台跑一遍自动处理链。
+    已在跑则跳过——单次全量 pass 会覆盖新入库素材(幂等);无待处理项则直接返回。"""
+    if _AUTOPROC_JOB["running"]:
+        return
+    if not any(pending_processing(m["id"]).values()
+               for m in all_materials()
+               if m.get("kind") in ("videos", "images")):
+        return
+    _AUTOPROC_JOB["running"] = True
+    _AUTOPROC_JOB["error"] = ""
+    _AUTOPROC_JOB["kicked_by"] = kicked_by
+    threading.Thread(target=_run_autoproc_job, args=(autotag, kicked_by),
+                     daemon=True).start()
+
 
 def _run_agent_job(task, allow_write, max_steps, task_id):
     import agent                                  # 延迟导入:agent 依赖 ollama 可用性
@@ -250,6 +280,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"chat_models": cms, "model_ready": bool(cms),
                                "model": cms[0] if cms else ""})
 
+        if p == "/api/auto/status":
+            # 后台自动处理任务状态(上传/入库事件驱动触发,可轮询)
+            return self._json(dict(_AUTOPROC_JOB))
+
         if p == "/api/health":
             return self._json(health())
         if p == "/api/broken":
@@ -354,6 +388,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, b"no boundary")
             files = parse_multipart(raw, bm.group(1).strip().encode())
             res = None
+            added = False
             for _, (filename, content) in files.items():
                 if not filename:
                     continue
@@ -361,14 +396,23 @@ class Handler(BaseHTTPRequestHandler):
                 tmp = os.path.join(HUB, "ingest", sanitize_name(filename))
                 with open(tmp, "wb") as o:
                     o.write(content)
-                res = ingest_file(tmp, move=True)
+                r = ingest_file(tmp, move=True)
+                if r and r.get("status") == "added":
+                    added = True
+                res = r or res
+            if added:
+                enqueue_autoproc(kicked_by="upload")
             return self._json(res or {"status": "empty"})
 
         if p == "/api/ingest":
             r = ingest_dir(os.path.join(HUB, "ingest"))
+            if r:
+                enqueue_autoproc(kicked_by="ingest")
             return self._json({"ingested": len(r)})
         if p == "/api/scan":
             r = scan_materials()
+            if r:
+                enqueue_autoproc(kicked_by="scan")
             return self._json({"new": len(r)})
 
         if p == "/api/thumbs":
@@ -420,8 +464,9 @@ class Handler(BaseHTTPRequestHandler):
                                "model": info["model"]})
 
         if p == "/api/auto":
-            # 事件驱动自动处理链:{"autotag":bool(默认 False),"limit":int(默认 0)}
-            # 对全部待处理素材依序跑 封面→OCR→镜头索引→pHash→(可选)打标→语义索引
+            # 手动触发全量自动处理链;与上传/入库的后台任务共用 _AUTOPROC_JOB 锁,避免并发
+            if _AUTOPROC_JOB["running"]:
+                return self._json({"running": True, "job": dict(_AUTOPROC_JOB)})
             r = auto_process_all(limit=int(body.get("limit") or 0),
                                  autotag=bool(body.get("autotag")))
             return self._json(r)

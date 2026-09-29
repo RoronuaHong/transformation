@@ -266,7 +266,7 @@ zh:{appTitle:"素材中心",searchPh:"搜索名称/标签/描述… (按 / 聚�
    brokenNote:"这些条目指向的原文件已被上游删除或移动。清理只删索引记录,不会删除任何磁盘文件;原文件恢复后再跑一次 bridge 即可重新登记。",
    refsIntact:"引用完整,没有失效项",confirmDel:"删除 {name} ?",savedT:"已保存",deletedT:"已删除",copiedT:"路径已复制",
    copyFailT:"复制失败",uploadedT:"已上传 {n} 个文件",ingestT:"ingest/ 整理完成",scanT:"materials/ 扫描完成",
-   idxT:"语义索引构建已启动",thumbT:"封面生成已启动",autoDoneT:"自动处理完成",noEmbed:"未发现本地 embedding 模型",noFFmpeg:"本机未安装 ffmpeg,已回退浏览器截帧",
+   idxT:"语义索引构建已启动",thumbT:"封面生成已启动",autoDoneT:"自动处理完成",autoKickedT:"已加入自动处理队列",noEmbed:"未发现本地 embedding 模型",noFFmpeg:"本机未安装 ffmpeg,已回退浏览器截帧",
    thumbServer:"服务端抽帧(缓存 {n})",thumbClient:"浏览器截帧(本机无 ffmpeg)",thumbGen:"生成中 {d}/{t}",
    unavailW:"不可用",buildingW:"构建中 {d}/{t}",notEnabled:"未启用(无本地 embedding 模型)",warn:"告警(失效 {n})",dropHint:"松手即可上传",tagSys:"标签体系:sp=来自 subtitle_pipeline;type:xx=产物类别;job:xx=所属任务;lang:xx=语言;其余为处理类型或自定义标签。悬停任意标签可见解释,点击可筛选。",tag_sp:"来自 subtitle_pipeline 处理流水线的素材",tag_type:"产物类别(type: 后缀:render=渲染产物 media=原始媒体 notes=笔记 benchmark=基准测试 subs=字幕 test=测试)",tag_job:"所属任务:冒号后是任务 ID,点击标签可筛出该任务全部产物",tag_lang:"语言标记(lang: 后为语种代码)",tag_bili:"来源平台:B 站下载",tag_proc:"处理类型标签:标记素材经历过的处理(去字幕/去模糊/切片/对比图等)",tag_custom:"自定义/历史标签:由规则或人工添加,用于检索过滤",
    agentBtn:"🤖 Agent",agentTitle:"Deep Agent 任务",agentNote:"用本机 ollama chat 模型(qwen2.5)驱动的素材库代理:自动规划待办→调用检索/巡检工具→汇总。任务在后台执行,几分钟不等,可关闭窗口稍后回来看结果。",
@@ -286,7 +286,7 @@ ja:{appTitle:"素材ハブ",searchPh:"名前/タグ/説明を検索…(/ でフ�
    brokenNote:"これらの参照先ファイルは上流で削除/移動されました。整理はインデックス削除のみでディスクファイルは変更しません。復元後 bridge を再実行すると再登録されます。",
    refsIntact:"参照は完全です",confirmDel:"{name} を削除しますか?",savedT:"保存しました",deletedT:"削除しました",
    copiedT:"パスをコピーしました",copyFailT:"コピー失敗",uploadedT:"{n} 件アップロードしました",ingestT:"ingest/ 整理完了",
-   scanT:"materials/ スキャン完了",idxT:"セマンティック索引の構築を開始",thumbT:"カバー生成を開始",autoDoneT:"自動処理完了",
+   scanT:"materials/ スキャン完了",idxT:"セマンティック索引の構築を開始",thumbT:"カバー生成を開始",autoDoneT:"自動処理完了",autoKickedT:"自動処理キューに追加",
    noEmbed:"ローカル embedding モデルが見つかりません",noFFmpeg:"ffmpeg がないためブラウザ截帧にフォールバック",
    thumbServer:"サーバー抽帧(キャッシュ {n})",thumbClient:"ブラウザ抽帧(ffmpeg なし)",thumbGen:"生成中 {d}/{t}",unavailW:"不可",buildingW:"構築中 {d}/{t}",notEnabled:"無効(ローカル embedding モデルなし)",warn:"警告(不通 {n})",dropHint:"放すとアップロード",tagSys:"タグ体系:sp=subtitle_pipeline 由来;type:xx=成果物種別;job:xx=所属タスク;lang:xx=言語;その他は処理種別やカスタム。ホバーで説明、クリックで絞り込み。",tag_sp:"subtitle_pipeline ワークフロー由来の素材",tag_type:"成果物種別(render=生成物 media=元メディア notes=ノート benchmark=ベンチマーク subs=字幕 test=テスト)",tag_job:"所属タスク:コロン以降はタスク ID。クリックで全成果物に絞り込み",tag_lang:"言語タグ(lang: の後ろは言語コード)",tag_bili:"ソース:ビリビリからダウンロード",tag_proc:"処理タグ:素材への処理内容(字幕除去/ブレ除去/セグメント/比較など)",tag_custom:"カスタム/履歴タグ:ルールまたは手動で追加、検索フィルタ用"},
 ko:{appTitle:"소재 허브",searchPh:"이름/태그/설명 검색…(/ 포커스)",modeAuto:"자동(시맨틱+키워드)",modeLex:"키워드 일치",
@@ -304,7 +304,7 @@ ko:{appTitle:"소재 허브",searchPh:"이름/태그/설명 검색…(/ 포커�
    brokenNote:"이 항목들의 원본 파일은 업스트림에서 삭제/이동되었습니다. 정리는 인덱스만 삭제하며 디스크 파일은 변경하지 않습니다. 복원 후 bridge를 다시 실행하면 재등록됩니다.",
    refsIntact:"참조가 정상입니다",confirmDel:"{name} 을(를) 삭제할까요?",savedT:"저장됨",deletedT:"삭제됨",
    copiedT:"경로 복사됨",copyFailT:"복사 실패",uploadedT:"{n}개 업로드됨",ingestT:"ingest/ 정리 완료",
-   scanT:"materials/ 스캔 완료",idxT:"시맨틱 인덱스 구축 시작",thumbT:"커버 생성 시작",autoDoneT:"자동 처리 완료",
+   scanT:"materials/ 스캔 완료",idxT:"시맨틱 인덱스 구축 시작",thumbT:"커버 생성 시작",autoDoneT:"자동 처리 완료",autoKickedT:"자동 처리 큐에 추가됨",
    noEmbed:"로컬 embedding 모델이 없습니다",noFFmpeg:"ffmpeg 이 없어 브라우저 썸네일로 대체",
    thumbServer:"서버 썸네일(캐시 {n})",thumbClient:"브라우저 썸네일(ffmpeg 없음)",thumbGen:"생성 중 {d}/{t}",unavailW:"불가",buildingW:"구축 중 {d}/{t}",notEnabled:"비활성(로컬 embedding 모델 없음)",warn:"경고(끊김 {n})",dropHint:"놓으면 업로드됩니다",tagSys:"태그 체계:sp=subtitle_pipeline 산출;type:xx=결과물 종류;job:xx=소속 작업;lang:xx=언어;나머지는 처리 유형 또는 사용자 태그. 호버하면 설명, 클릭하면 필터링.",tag_sp:"subtitle_pipeline 워크플로에서 온 소재",tag_type:"결과물 종류(render=렌더링 결과 media=원본 미디어 notes=노트 benchmark=벤치마크 subs=자막 test=테스트)",tag_job:"소속 작업:콜론 뒤는 작업 ID. 클릭하면 해당 작업 전체로 필터링",tag_lang:"언어 태그(lang: 뒤는 언어 코드)",tag_bili:"출처:빌리빌리 다운로드",tag_proc:"처리 태그:적용된 처리(자막 제거/블러 제거/세그먼트/비교 등)",tag_custom:"사용자/기록 태그:규칙 또는 수동 추가, 검색 필터용"},
 en:{appTitle:"Material Hub",searchPh:"Search name/tag/description… (press /)",modeAuto:"Auto (semantic + keyword)",
@@ -324,7 +324,7 @@ en:{appTitle:"Material Hub",searchPh:"Search name/tag/description… (press /)",
    brokenNote:"These entries point to files deleted or moved upstream. Pruning removes index records only and never touches disk files; re-run bridge after the source is restored.",
    refsIntact:"References intact, nothing broken",confirmDel:"Delete {name} ?",savedT:"Saved",deletedT:"Deleted",
    copiedT:"Path copied",copyFailT:"Copy failed",uploadedT:"Uploaded {n} file(s)",ingestT:"ingest/ tidy done",
-   scanT:"materials/ scan done",idxT:"Semantic index build started",thumbT:"Cover generation started",autoDoneT:"Auto-process done",
+   scanT:"materials/ scan done",idxT:"Semantic index build started",thumbT:"Cover generation started",autoDoneT:"Auto-process done",autoKickedT:"Auto-processing queued",
    noEmbed:"No local embedding model found",noFFmpeg:"ffmpeg not found, falling back to browser thumbnails",
    thumbServer:"server thumbs (cached {n})",thumbClient:"browser thumbnails (no ffmpeg)",thumbGen:"generating {d}/{t}",buildingW:"building {d}/{t}",notEnabled:"not enabled (no local embedding model)",warn:"alert ({n} broken)",dropHint:"Drop to upload",tagSys:"Tag system: sp = from subtitle_pipeline; type:x = product kind; job:x = owning task; lang:x = language; others are processing or custom tags. Hover for details, click to filter.",tag_sp:"From the subtitle_pipeline workflow",tag_type:"Product kind (render=rendered output, media=raw media, notes=notes, benchmark=benchmark, subs=subtitles, test=test)",tag_job:"Owning task: id after the colon; click to filter all its products",tag_lang:"Language tag (code after lang:)",tag_bili:"Source: downloaded from Bilibili",tag_proc:"Processing tag: what was done to the asset (dehardsub/deblur/segments/comparison…)",tag_custom:"Custom or legacy tag added by rules or manually, used for filtering"},
 ru:{appTitle:"Хаб материалов",searchPh:"Поиск по имени/тегам/описанию… (/ — фокус)",modeAuto:"Авто (семантика+ключ. слова)",
@@ -347,7 +347,7 @@ ru:{appTitle:"Хаб материалов",searchPh:"Поиск по имени/
    refsIntact:"Ссылки целы, битых нет",confirmDel:"Удалить {name} ?",savedT:"Сохранено",deletedT:"Удалено",
    copiedT:"Путь скопирован",copyFailT:"Не удалось скопировать",uploadedT:"Загружено файлов: {n}",
    ingestT:"Разбор ingest/ завершён",scanT:"Сканирование materials/ завершено",idxT:"Построение семантического индекса запущено",
-   thumbT:"Создание обложек запущено",autoDoneT:"Автообработка завершена",noEmbed:"Локальная embedding-модель не найдена",
+   thumbT:"Создание обложек запущено",autoDoneT:"Автообработка завершена",autoKickedT:"Автообработка в очереди",noEmbed:"Локальная embedding-модель не найдена",
    noFFmpeg:"ffmpeg не найден, используется захват кадров в браузере",thumbServer:"обложки на сервере (кэш {n})",
    thumbClient:"обложки в браузере (нет ffmpeg)",thumbGen:"создание {d}/{t}",unavailW:"недоступно",
    buildingW:"построение {d}/{t}",notEnabled:"отключено (нет локальной embedding-модели)",warn:"внимание ({n} битых)",dropHint:"Отпустите для загрузки",tagSys:"Система тегов:sp=из subtitle_pipeline;type:xx=вид результата;job:xx=задача;lang:xx=язык;остальные — тип обработки или пользовательские. Наведите для пояснения, клик — фильтр.",tag_sp:"Материал из конвейера subtitle_pipeline",tag_type:"Вид результата (render=результат, media=исходное медиа, notes=заметки, benchmark=бенчмарк, subs=субтитры, test=тест)",tag_job:"Задача-владелец: после двоеточия id; клик фильтрует все её результаты",tag_lang:"Языковая метка (код после lang:)",tag_bili:"Источник: скачано с Bilibili",tag_proc:"Тег обработки: что сделано с материалом (удаление субтитров/деблюр/сегменты/сравнение…)",tag_custom:"Пользовательский или исторический тег, для фильтрации"},
@@ -368,7 +368,7 @@ hi:{appTitle:"सामग्री हब",searchPh:"नाम/टैग/वि
    brokenNote:"ये प्रविष्टियाँ ऐसी फ़ाइलों की ओर इशारा करती हैं जो अपस्ट्रीम में हटा दी गईं या हिल गईं। सफ़ाई केवल इंडेक्स हटाती है, डिस्क फ़ाइलें कभी नहीं छूती; स्रोत बहाल होने पर bridge दोबारा चलाएं।",
    refsIntact:"संदर्भ पूर्ण, कुछ टूटा नहीं",confirmDel:"{name} हटाएं?",savedT:"सहेजा गया",deletedT:"हटाया गया",
    copiedT:"पाथ कॉपी हुआ",copyFailT:"कॉपी विफल",uploadedT:"{n} फ़ाइलें अपलोड हुईं",ingestT:"ingest/ व्यवस्था पूर्ण",
-   scanT:"materials/ स्कैन पूर्ण",idxT:"सिमेंटिक इंडेक्स निर्माण शुरू",thumbT:"कवर निर्माण शुरू",autoDoneT:"स्वतः प्रोसेसिंग पूर्ण",
+   scanT:"materials/ स्कैन पूर्ण",idxT:"सिमेंटिक इंडेक्स निर्माण शुरू",thumbT:"कवर निर्माण शुरू",autoDoneT:"स्वतः प्रोसेसिंग पूर्ण",autoKickedT:"स्वतः प्रोसेसिंग कतार में",
    noEmbed:"कोई स्थानीय embedding मॉडल नहीं मिला",noFFmpeg:"ffmpeg नहीं मिला, ब्राउज़र थंबनेल पर जा रहे हैं",
    thumbServer:"सर्वर थंबनेल (कैश {n})",thumbClient:"ब्राउज़र थंबनेल (ffmpeg नहीं)",thumbGen:"बन रहे हैं {d}/{t}",unavailW:"अनुपलब्ध",buildingW:"निर्माण {d}/{t}",notEnabled:"अक्षम (कोई स्थानीय embedding मॉडल नहीं)",warn:"चेतावनी ({n} टूटे)",dropHint:"छोड़ें और अपलोड होगा",tagSys:"टैग प्रणाली:sp=subtitle_pipeline से;type:xx=उत्पाद प्रकार;job:xx=संबद्ध कार्य;lang:xx=भाषा;शेष प्रक्रिया या कस्टम टैग। होवर = विवरण, क्लिक = फ़िल्टर।",tag_sp:"subtitle_pipeline वर्कफ़्लो से आई सामग्री",tag_type:"उत्पाद प्रकार (render=रेंडर आउटपुट media=मूल मीडिया notes=नोट्स benchmark=बेंचमार्क subs=उपशीर्षक test=टेस्ट)",tag_job:"संबद्ध कार्य:कोलन के बाद कार्य ID; क्लिक से उसकी सभी निर्मितियाँ फ़िल्टर",tag_lang:"भाषा टैग (lang: के बाद भाषा कोड)",tag_bili:"स्रोत:Bilibili से डाउनलोड",tag_proc:"प्रक्रिया टैग:सामग्री पर क्या हुआ (सबटाइटल हटाना/डिब्लर/सेगमेंट/तुलना…)",tag_custom:"कस्टम/इतिहास टैग:नियमों या मैन्युअल रूप से जोड़ा गया, खोज फ़िल्टर हेतु"}
 };
@@ -853,7 +853,7 @@ async function upload(files){
     const fd=new FormData(); fd.append("file",f);
     await fetch("/api/upload",{method:"POST",body:fd});
   }
-  toast(tfmt("uploadedT",{n:files.length}));
+  toast(tfmt("uploadedT",{n:files.length}) + " · " + t("autoKickedT"));
   reload();
 }
 
