@@ -158,6 +158,36 @@ def test_maintain_includes_missing_covers():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_mcp_resource_agent():
+    tmp = _setup_tmp()
+    try:
+        import agent as _agent
+        captured = {}
+
+        def fake_status(tid):
+            captured["tid"] = tid
+            return {"task_id": tid, "status": "running"}
+
+        _orig = _agent.agent_status
+        _agent.agent_status = fake_status
+        try:
+            uris = {r["uri"] for r in mcp_server._resources_list()}
+            assert "hub://agent" in uris, uris
+            st = mcp_server._resource_read("hub://agent/task123")
+            assert st == {"task_id": "task123", "status": "running"}, st
+            assert captured["tid"] == "task123"
+            try:
+                mcp_server._resource_read("hub://agent/")
+                raise AssertionError("should have raised")
+            except ValueError:
+                pass
+        finally:
+            _agent.agent_status = _orig
+        print("PASS test_mcp_resource_agent")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     # 保存可能被 monkeypatch 的函数
     _orig_split = core.split_video_to_silent_and_audio

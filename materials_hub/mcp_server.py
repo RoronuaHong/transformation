@@ -81,6 +81,9 @@ def _resources_list():
         {"uri": "hub://shots", "name": "视频镜头索引(片段时间轴)",
          "description": "hub://shots/{id} 返回 ffmpeg scenecut 镜头表[{start,end},...];未建索引则 {status:missing}",
          "mimeType": "application/json"},
+        {"uri": "hub://agent", "name": "Agent 任务实时状态",
+         "description": "hub://agent/{task_id} 返回某 Deep Agent 任务的实时状态(待办/步骤/总结/citations/critic/context_digest);等价于 agent_status 工具,供宿主订阅式读取,省反复调工具",
+         "mimeType": "application/json"},
     ]
 
 
@@ -103,6 +106,12 @@ def _resource_read(uri):
             raise ValueError("hub://shots/{id} requires material id")
         d = core.get_shots(mid)
         return d if d is not None else {"id": mid, "status": "missing"}
+    if p[0] == "agent":
+        tid = p[1] if len(p) > 1 else ""
+        if not tid:
+            raise ValueError("hub://agent/{task_id} requires task id")
+        import agent
+        return agent.agent_status(tid)
     raise ValueError("unknown resource: " + uri)
 
 

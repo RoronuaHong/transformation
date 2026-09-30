@@ -431,7 +431,8 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 `update_tags(id,tags,confirm)` 与 `register_asset(path,...,confirm)` **写工具(强制 `confirm=true`,缺省即拒绝,防 Agent 误改)**。
 
 Resources(订阅式只读,比 tool 更省 token):`hub://recent/{n}` 最新素材、`hub://job/{jobid}` 某 subtitle_pipeline job 全套、
-`hub://history/{n}` **写操作审计日志**、`hub://shots/{id}` **镜头索引**(未建则 `{status:missing}`);
+`hub://history/{n}` **写操作审计日志**、`hub://shots/{id}` **镜头索引**(未建则 `{status:missing}`)、
+`hub://agent/{task_id}` **Agent 任务实时状态**(待办/步骤/总结/citations/critic/context_digest,等价于 `agent_status` 工具);
 Prompts:`fill_missing_thumbs`、`job_checkup`（`prompts/list` / `prompts/get`）；
 只读技能工具:`list_missing_covers`、`job_checkup`。
 `initialize` 按运行环境动态声明能力(`serverInfo.hub` 透出 semantic/reranker/token_required/count 实时标志)。
