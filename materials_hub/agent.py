@@ -217,6 +217,57 @@ def agent_cancel(task_id):
             "hint": "已请求取消,主循环将在下一步边界终止,进度保留"}
 
 
+_TERMINAL_STATUSES = ("done", "cancelled", "max_steps_reached", "error")
+
+
+def agent_list(limit=20):
+    """列出全部 agent 任务(按创建时间倒序),供发现/清理前盘点。
+
+    任务发现即状态:直接扫 index/agent_workspace/*/state.json,无额外登记表。
+    """
+    rows = []
+    if not os.path.isdir(WORKSPACE):
+        return rows
+    for tid in os.listdir(WORKSPACE):
+        p = os.path.join(_ws(tid), "state.json")
+        if not os.path.isfile(p):
+            continue                                 # 跳过 agent_memory.json 等非任务目录
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                s = json.load(f)
+        except (OSError, ValueError):
+            continue
+        rows.append({"task_id": tid, "task": (s.get("task") or "")[:80],
+                     "status": s.get("status"), "created_at": s.get("created_at", ""),
+                     "steps": len(s.get("steps") or [])})
+    rows.sort(key=lambda x: x["created_at"], reverse=True)
+    return rows[:max(1, int(limit))]
+
+
+def agent_cleanup(max_age_hours=72):
+    """清理已终态且超过 max_age_hours 的任务工作区(防 agent_workspace 无限增长)。
+
+    只删终态任务(done/cancelled/max_steps_reached/error);running/planning
+    永不动——即使刚创建 1 秒也不会被误删。返回 removed/kept 供审计。
+    """
+    import shutil
+    hours = max(0.0, float(max_age_hours))       # 0 = 立即清理全部终态任务(测试/强制回收)
+    cutoff = time.time() - hours * 3600
+    removed, kept = [], []
+    for row in agent_list(limit=10000):
+        tid = row["task_id"]
+        try:
+            mtime = os.path.getmtime(os.path.join(_ws(tid), "state.json"))
+        except OSError:
+            continue
+        if row["status"] in _TERMINAL_STATUSES and mtime < cutoff:
+            shutil.rmtree(_ws(tid), ignore_errors=True)
+            removed.append(tid)
+        else:
+            kept.append(tid)
+    return {"removed": removed, "kept": len(kept), "max_age_hours": int(max_age_hours)}
+
+
 # ---------------------------------------------------------------- 上下文卸载
 def _observe(state, ws, obj):
     """把观察结果压缩进上下文:过长的落盘,只回指针 + 摘要。"""

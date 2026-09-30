@@ -25,10 +25,18 @@
   python cli.py phash <id> [--force]        dHash 感知哈希(ffmpeg 首帧 9x8 灰度)→ index/phash/<id>.txt
   python cli.py phash --all [--limit N]     批量补齐全部图片/视频的感知哈希
   python cli.py similar <id> [--max-dist N] 画面级近重复检测(汉明距离≤N,按距离升序)
+  python cli.py near-dupes [--max-dist N] [--limit N]  全库近重复报告(对+簇,一实体多引用)
+  python cli.py imgsearch <id|path> [--max-dist N] [--limit N] [--mode phash|clip|auto]
+  python cli.py imgsearch --text "厨房"   以文搜图(需 CLIP 索引)
+  python cli.py imgembed [--force] [--limit N] [--status]  建/查 CLIP 图像向量索引
   python cli.py auto [--limit N] [--autotag]  一条命令跑完自动处理链:封面→OCR→镜头索引→pHash→(可选)打标→语义索引(幂等)
+  python cli.py facets [--limit N] [--link-clips|--link-parents]  补 DAM 面标签 + 回填 parent:
   python cli.py agent --task "..."      Deep Agent 多步任务(LLM 拆待办→逐步执行,见 agent.py)
   python cli.py agent --task "..." --write  允许 agent 写(标签/登记;默认只读)
   python cli.py agent --status <id>     查看某次 agent 任务的状态与轨迹
+  python cli.py agent --cancel <id>     协作式取消进行中的任务(步边界终止,进度保留)
+  python cli.py agent --list [--limit N]  盘点历史任务(状态/步数/创建时间)
+  python cli.py agent --cleanup [--max-age 72]  清理超龄的终态任务工作区(running 永不删)
   python cli.py agent --file task.txt   中文任务用 UTF-8 文件传(规避终端 GBK)
 """
 import sys
@@ -42,8 +50,11 @@ from core import (
     autotag_undo, AUTOTAG_BACKUP,
     ocr_material, ocr_all, _ocr_python,
     build_shot_index, shots_all, shot_index_path,
-    phash_material, phash_all, similar_assets, phash_path,
+    phash_material, phash_all, similar_assets, phash_path, near_duplicate_report,
+    search_by_image, search_by_text_image, clip_probe,
+    build_image_embeddings, image_embed_status,
     auto_process_all, pending_processing,
+    apply_media_facet_tags, link_relation_parents,
 )
 
 
@@ -212,6 +223,80 @@ def main():
         if not r.get("similar"):
             print("  (无)")
 
+    elif cmd in ("near-dupes", "neardupes", "near_dupes"):
+        # 全库近重复报告:python cli.py near-dupes [--max-dist N] [--limit N]
+        md = int(args[args.index("--max-dist") + 1]) if "--max-dist" in args else 10
+        lim = int(args[args.index("--limit") + 1]) if "--limit" in args else 50
+        r = near_duplicate_report(max_dist=md, limit_pairs=lim)
+        print(f"near-dupes: hashed={r['hashed']} pairs={r['pair_count']} "
+              f"clusters={r['cluster_count']} (max_dist≤{md})")
+        for c in r.get("clusters") or []:
+            print(f"  cluster size={c['size']}: {', '.join(c['ids'])}")
+            for nm in c.get("names") or []:
+                if nm:
+                    print(f"           · {nm}")
+        if not r.get("clusters"):
+            print("  (无近重复簇)")
+        shown = r.get("pairs") or []
+        if shown and r["pair_count"] > len(shown):
+            print(f"  (pairs 仅展示前 {len(shown)}/{r['pair_count']})")
+
+    elif cmd in ("imgsearch", "img-search", "search-image"):
+        # 以图/以文搜图
+        lim = int(args[args.index("--limit") + 1]) if "--limit" in args else 20
+        if "--text" in args:
+            i = args.index("--text")
+            text = args[i + 1] if i + 1 < len(args) else ""
+            if not text or text.startswith("-"):
+                # 允许多词:取 --text 后到下一 -- 前
+                parts = []
+                for a in args[i + 1:]:
+                    if a.startswith("-") and a not in ("--"):
+                        break
+                    parts.append(a)
+                text = " ".join(parts).strip()
+            if not text:
+                print("usage: python cli.py imgsearch --text \"厨房场景\"")
+                return
+            r = search_by_text_image(text, limit=lim)
+            print(f"imgsearch-text status={r.get('status')} mode={r.get('mode')} "
+                  f"model={r.get('model', '')}")
+            if r.get("hint"):
+                print(" ", r["hint"])
+            for s in r.get("matches") or []:
+                print(f"  score={s.get('score')}  {s['id']}  {s.get('kind','')}  {s.get('name','')}")
+            return
+        positional = [a for a in args[1:] if not a.startswith("-")]
+        q = positional[0] if positional else ""
+        if not q:
+            print("usage: python cli.py imgsearch <id|path> [--mode phash|clip|auto]")
+            print("       python cli.py imgsearch --text \"query\"")
+            return
+        md = int(args[args.index("--max-dist") + 1]) if "--max-dist" in args else 10
+        mode = args[args.index("--mode") + 1] if "--mode" in args else "auto"
+        r = search_by_image(q, max_dist=md, limit=lim, mode=mode)
+        print(f"imgsearch mode={r.get('mode')} status={r.get('status')} "
+              f"total={r.get('total', 0)} clip={clip_probe().get('ok')}")
+        if r.get("hint"):
+            print(" ", r["hint"])
+        for s in r.get("matches") or []:
+            if "dist" in s:
+                print(f"  dist={s['dist']:>2}  {s['id']}  {s.get('kind','')}  {s.get('name','')}")
+            else:
+                print(f"  score={s.get('score')}  {s['id']}  {s.get('kind','')}  {s.get('name','')}")
+        if r.get("status") == "ok" and not r.get("matches"):
+            print("  (无匹配;可先 python cli.py phash --all 或 imgembed)")
+
+    elif cmd in ("imgembed", "clip-embed", "image-embed"):
+        if "--status" in args:
+            print("imgembed status:", image_embed_status())
+            print("clip probe:", clip_probe(refresh=True))
+            return
+        limit = int(args[args.index("--limit") + 1]) if "--limit" in args else 0
+        r = build_image_embeddings(force="--force" in args, limit=limit)
+        print("imgembed done:", r)
+        print("imgembed status:", image_embed_status())
+
     elif cmd == "auto":
         # 自动处理链:python cli.py auto [--limit N] [--autotag]
         limit = int(args[args.index("--limit") + 1]) if "--limit" in args else 0
@@ -226,6 +311,15 @@ def main():
                 else:
                     print(f"    {name}: {s}")
         print(f"auto done: {res.get('processed', 0)} processed")
+
+    elif cmd == "facets":
+        limit = int(args[args.index("--limit") + 1]) if "--limit" in args else 0
+        r = apply_media_facet_tags(limit=limit)
+        print(f"facets: scanned={r.get('scanned')} patched={r.get('patched')}")
+        if "--link-clips" in args or "--link-parents" in args:
+            link = link_relation_parents(limit=limit)
+            print(f"link-parents: linked={link.get('linked')} "
+                  f"clips={link.get('clips')} components={link.get('components')}")
 
     elif cmd == "embed":
         st = embed_status()
@@ -291,6 +385,21 @@ def main():
         if "--status" in args:
             tid = args[args.index("--status") + 1] if len(args) > args.index("--status") + 1 else ""
             print(_json.dumps(agent.agent_status(tid), ensure_ascii=False, indent=2))
+            return
+        if "--cancel" in args:
+            tid = args[args.index("--cancel") + 1] if len(args) > args.index("--cancel") + 1 else ""
+            print(_json.dumps(agent.agent_cancel(tid), ensure_ascii=False, indent=2))
+            return
+        if "--list" in args:
+            limit = int(args[args.index("--limit") + 1]) if "--limit" in args else 20
+            for row in agent.agent_list(limit):
+                print("%s  %-18s %2d步  %s  %s"
+                      % (row["task_id"], row["status"], row["steps"],
+                         row["created_at"], row["task"]))
+            return
+        if "--cleanup" in args:
+            hours = int(args[args.index("--max-age") + 1]) if "--max-age" in args else 72
+            print(_json.dumps(agent.agent_cleanup(hours), ensure_ascii=False, indent=2))
             return
         a = args[1:]
         if a and a[0] == "--stdin":           # 中文任务同 search:规避终端 GBK

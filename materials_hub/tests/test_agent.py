@@ -367,6 +367,31 @@ def test_agent_cancel_cooperative():
     assert cr2["cancelled"] is False, cr2
 
 
+def test_agent_list_and_cleanup():
+    _reset(chat_models=lambda: ["fake"], search=_fake_search([]),
+           health=lambda: {"ok": True, "total": 0, "kinds": {}, "duplicates": 0},
+           broken_externals=lambda: [])
+    agent._chat = Script([
+        '{"todos":[{"id":1,"text":"t"}]}',
+        '{"action":"finish","args":{"summary":"ok"},"mark_done":[1]}',
+    ])
+    r = agent.agent_run("lctest", task_id="aglctest")
+    assert r["status"] == "done", r
+    me = [x for x in agent.agent_list() if x["task_id"] == "aglctest"]
+    assert me and me[0]["status"] == "done" and me[0]["steps"] == 1, me
+    # max_age=0 → 终态任务全删
+    cr = agent.agent_cleanup(max_age_hours=0)
+    assert "aglctest" in cr["removed"], cr
+    assert not os.path.isdir(agent._ws("aglctest")), "终态工作区应被清理"
+    # running 任务永不清删,即使超龄
+    ws = agent._ws("agprotect")
+    os.makedirs(ws, exist_ok=True)
+    agent._save({"task": "x", "status": "running", "steps": [], "created_at": "2000-01-01"}, ws)
+    cr2 = agent.agent_cleanup(max_age_hours=0)
+    assert "agprotect" not in cr2["removed"], cr2
+    assert os.path.isdir(ws), "running 工作区不得被清理"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:
