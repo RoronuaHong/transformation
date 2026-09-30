@@ -363,10 +363,17 @@ def _observe(state, ws, obj):
 
 
 # ---------------------------------------------------------------- 工具表(支柱 3/4)
+_VALID_KINDS = {"images", "videos", "silent", "docs", "audio", "subs", "anim", "other"}
+
+
 def _tool_search(a):
     q = str(a.get("q") or "").strip()
-    kind, tag = str(a.get("kind") or ""), str(a.get("tag") or "")
+    kind, tag = str(a.get("kind") or "").strip(), str(a.get("tag") or "").strip()
     limit, mode = int(a.get("limit") or 10), a.get("mode", "auto")
+    # 无效 kind 会连浏览兜底一起拖成 0 命中(实测 qwen2.5:7b 会传 document/video)——校验丢弃
+    bad_kind = ""
+    if kind and kind not in _VALID_KINDS:
+        bad_kind, kind = kind, ""
 
     def _s(query):
         return [_brief(m) for m in core.search(query, kind, tag, limit=limit, mode=mode)]
@@ -378,14 +385,18 @@ def _tool_search(a):
         rows = _s("")
         if rows:
             # 空结果必须给小模型明确反馈,否则会原查询死循环(实测 qwen2.5:7b 连打 10 次空查询)
+            note = ("(已丢弃无效 kind:%s)" % bad_kind) if bad_kind else ""
             return {"results": rows, "count": len(rows), "fallback": "browse",
-                    "hint": "原查询 0 命中,已自动放宽为浏览模式(kind=%s tag=%s);"
-                            "以下为按时间序素材,请自行筛选相关条目" % (kind or "-", tag or "-")}
+                    "hint": "原查询 0 命中,已自动放宽为浏览模式(kind=%s tag=%s)%s;"
+                            "以下为按时间序素材,请自行筛选相关条目"
+                            % (kind or "-", tag or "-", note)}
     if rows:
         return rows
+    extra = (";注意 kind=%s 不是合法值(合法:images/videos/silent/docs/audio/subs/anim/other)"
+             % bad_kind) if bad_kind else ""
     return {"results": [], "count": 0,
             "hint": "0 hits。请换更短的关键词重试:素材文件名片段(如 BV 号)、"
-                    "中文主题词;或用 get_material 按 id 直取;或用 chunk_search 查全文。"}
+                    "中文主题词;或用 get_material 按 id 直取;或用 chunk_search 查全文。" + extra}
 
 
 def _tool_chunk(a):

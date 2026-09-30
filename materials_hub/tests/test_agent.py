@@ -434,6 +434,13 @@ def test_search_recall_fallback():
     assert agent._collect_ids(r2) == ["m9"], "兜底结果 id 必须可进 seen_ids 白名单"
     r3 = agent._tool_search({"q": "x", "tag": "nope"})    # 全路径 0 命中 → 原 0-hit hint
     assert isinstance(r3, dict) and r3["count"] == 0 and "hint" in r3, r3
+    # 无效 kind(document/video)会被校验丢弃,不拖累浏览兜底(实测 7B 会传错)
+    def kind_stub(q, kind="", tag="", limit=None, offset=0, mode="auto"):
+        return [] if q else [_mat("m8", desc="any")]   # 仅浏览模式(q="")命中
+    _reset(chat_models=lambda: ["fake"], search=kind_stub)
+    r4 = agent._tool_search({"q": "随便什么", "kind": "document"})
+    assert isinstance(r4, dict) and r4.get("fallback") == "browse", r4
+    assert "document" in r4["hint"], r4                   # hint 注明丢弃的无效 kind
 
 
 if __name__ == "__main__":
