@@ -394,6 +394,23 @@ def t_agent_list(a):
     return agent.agent_list(int(a.get("limit") or 20))
 
 
+def t_agent_resume(a):
+    """续跑 max_steps_reached 的任务:后台线程执行,立即返回 task_id 供轮询。"""
+    import agent
+    import threading
+    tid = str(a.get("task_id") or "")
+
+    def _run():
+        try:
+            agent.agent_resume(tid, extra_steps=int(a.get("extra_steps") or 6))
+        except Exception:                                   # 后台线程异常不冒泡,状态已落盘
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"status": "running", "task_id": tid,
+            "hint": "续跑已在后台启动,用 agent_status 查询进度与结果"}
+
+
 def t_auto(a):
     """写(派生数据+可能的 AI 打标):对新素材跑全链路自动处理
     (封面/OCR/镜头索引/pHash/语义索引,可选 LLM 打标)。
@@ -414,6 +431,7 @@ HANDLERS = {"search_materials": t_search, "get_material": t_get,
             "build_image_embeddings": t_imgembed,
             "agent_run": t_agent_run, "agent_status": t_agent_status,
             "agent_cancel": t_agent_cancel, "agent_list": t_agent_list,
+            "agent_resume": t_agent_resume,
             "auto_process": t_auto}
 # __PART2__
 _SCHEMA_OBJ = {"type": "object", "properties": {
@@ -505,6 +523,9 @@ TOOLS = [
     {"name": "agent_list", "description": "盘点历史 Deep Agent 任务(按创建时间倒序,含状态/步数);清理过期任务用 CLI --cleanup",
      "inputSchema": {"type": "object", "properties": {
          "limit": {"type": "integer"}}}},
+    {"name": "agent_resume", "description": "续跑一个 max_steps_reached 的 Deep Agent 任务(复用待办/历史步骤/滚动摘要,接续步号;后台执行)",
+     "inputSchema": {"type": "object", "properties": {
+         "task_id": {"type": "string"}, "extra_steps": {"type": "integer"}}, "required": ["task_id"]}},
 ]
 # __PART3__
 def _dispatch(req):

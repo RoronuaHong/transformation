@@ -268,6 +268,64 @@ def agent_cleanup(max_age_hours=72):
     return {"removed": removed, "kept": len(kept), "max_age_hours": int(max_age_hours)}
 
 
+def agent_resume(task_id, extra_steps=6, model=None):
+    """续跑一个 max_steps_reached 的任务:复用 todos/历史步骤/滚动摘要,接续步号再跑。
+
+    本地 7B 长任务常步数耗尽未 finish(真实库历史任务约半数如此);
+    续跑不重做已完成步骤——紧凑上下文取 state.steps 尾窗口、滚动摘要原样带回,
+    seen_ids(含被卸载的 notes 全文)同步恢复,finish 核验/Critic 白名单依然生效。
+    仅 max_steps_reached 可续跑;done/cancelled 拒绝。
+    """
+    ws = _ws(task_id)
+    p = os.path.join(ws, "state.json")
+    if not os.path.isfile(p):
+        return {"error": "no such task", "task_id": task_id}
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        return {"error": "state unreadable", "task_id": task_id}
+    if state.get("status") != "max_steps_reached":
+        return {"error": "only max_steps_reached tasks can be resumed",
+                "task_id": task_id, "status": state.get("status")}
+    models = core.chat_models()
+    if not models:
+        return {"status": "skipped", "reason": "no_chat_model",
+                "hint": "ollama pull qwen2.5:7b 后重试"}
+    model = model or state.get("model") or models[0]
+    state["model"] = model
+    state["status"] = "running"
+    state["resume_count"] = int(state.get("resume_count") or 0) + 1
+    _save(state, ws)          # 续跑即刻落盘,agent_status 马上可见
+
+    ctx = {"last_id": None, "seen_ids": set()}
+    context = []
+    for st in state.get("steps") or []:
+        obs = st.get("obs") or ""
+        obj = None
+        if obs.startswith("[已卸载→"):                    # 卸载观察:读回 notes 全文再收 id
+            fname = obs.split("→", 1)[1].split(" ", 1)[0]
+            try:
+                with open(os.path.join(ws, fname), encoding="utf-8") as f:
+                    obj = json.load(f)
+            except (OSError, ValueError):
+                obj = None
+        else:
+            try:
+                obj = json.loads(obs)
+            except ValueError:
+                obj = None
+        if obj is not None:
+            for _i in _collect_ids(obj):
+                ctx["seen_ids"].add(_i)
+        context.append("step%s[%s] %s" % (st.get("n"), st.get("action"), str(obs)[:400]))
+    context = context[-_CONTEXT_TAIL:]                    # 与内存语义一致:只带尾窗口
+    digest = state.get("context_digest") or ""
+    tools = _build_tools(bool(state.get("allow_write")), ctx)
+    return _loop(state, ws, task_id, tools, model, max(1, int(extra_steps)),
+                 len(state.get("steps") or []) + 1, context, digest, ctx)
+
+
 # ---------------------------------------------------------------- 上下文卸载
 def _observe(state, ws, obj):
     """把观察结果压缩进上下文:过长的落盘,只回指针 + 摘要。"""
@@ -587,7 +645,18 @@ def agent_run(task, allow_write=False, max_steps=_DEFAULT_STEPS, model=None, tas
     state["status"] = "running"
     _save(state, ws)          # 计划完成即落盘:任务从创建起就可被 agent_status 轮询/agent_cancel 取消
     ctx = {"last_id": None, "seen_ids": set()}            # 最近检索到的有效素材 id(供写工具兜底) + 全程见过 id(供 finish 核验)
-    tools = _build_tools(allow_write, ctx)
+    tools = _build_tools(bool(allow_write), ctx)
+    return _loop(state, ws, task_id, tools, model, int(max_steps), 1, [], "", ctx)
+
+
+def _loop(state, ws, task_id, tools, model, budget, start_step, context, digest, ctx):
+    """Deep Agent 主循环(agent_run 全新任务 / agent_resume 续跑共用)。
+
+    budget:本次调用可执行的步数;start_step:步号起点(续跑接续历史步号);
+    context/digest/ctx 由调用方传入(全新任务为空,续跑从 state/notes 重建)。
+    每步落盘、步边界协作取消、finish 核验/Critic/滚动摘要/记忆沉淀全部不变。
+    """
+    task = state["task"]
     tool_lines = "".join("  - %s: %s\n" % (n, d) for n, (_, d) in sorted(tools.items()))
     tool_lines += "  - retrieve: 子代理:多查询检索+LLM汇总,只回摘要;args: {goal}\n"
     tool_lines += "  - maintain: 确定性巡检(health+失效引用),零幻觉;args: 无\n"
@@ -597,10 +666,9 @@ def agent_run(task, allow_write=False, max_steps=_DEFAULT_STEPS, model=None, tas
     if mem_hint:
         sys_prompt += mem_hint
 
-    context = []                                            # 紧凑观察轨迹(指针化)
-    digest = ""                                             # 滚动摘要:被尾窗口逐出的早期步骤压缩归档(缺口6)
     finished = False
-    for n in range(1, max_steps + 1):
+    for i in range(budget):
+        n = start_step + i
         # 协作式取消(缺口1 补全):每步边界检查 cancel.flag,命中即终止;
         # 已执行步骤/观察全部保留,不会半途丢弃,状态标 cancelled 落盘
         if os.path.exists(os.path.join(ws, "cancel.flag")):
@@ -613,7 +681,7 @@ def agent_run(task, allow_write=False, max_steps=_DEFAULT_STEPS, model=None, tas
                     "summary": state["summary"], "todos": state["todos"],
                     "steps": len(state["steps"])}
         budget_hint = ""
-        if max_steps - n <= 2:      # 步数将尽,催促收尾(7B 小模型常把 todo 做完却忘了 finish)
+        if budget - i <= 2:      # 步数将尽,催促收尾(7B 小模型常把 todo 做完却忘了 finish)
             budget_hint = "\n(注意:剩余步数很少,若待办已基本完成,请立即 finish 并在 summary 里给出汇总)"
         recent = "\n".join(context[-_CONTEXT_TAIL:]) or "(无)"
         digest_note = ("\n(前情压缩摘要,早期步骤已归档,无需重做)\n%s" % digest) if digest else ""
@@ -722,8 +790,8 @@ def agent_run(task, allow_write=False, max_steps=_DEFAULT_STEPS, model=None, tas
         tail = " | ".join(
             (s.get("thought") or s.get("action") or "") for s in state["steps"][-3:]
             if isinstance(s, dict))
-        state["summary"] = ("步数上限(%d)已达,未 finish;最近进展: %s"
-                            % (max_steps, tail))[:2000]
+        state["summary"] = ("步数预算(至第 %d 步)已用尽,未 finish;最近进展: %s;可 agent_resume 续跑"
+                            % (start_step + budget - 1, tail))[:2000]
     else:
         state["status"] = "done"
     _record_memory(state, ctx)                            # 成功任务沉淀跨任务规律

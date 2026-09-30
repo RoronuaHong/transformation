@@ -195,7 +195,7 @@ def test_max_steps_guard():
     ])
     r = agent.agent_run("永远不finish", max_steps=2)
     assert r["status"] == "max_steps_reached", r
-    assert r["steps"] == 2 and "步数上限" in r["summary"]
+    assert r["steps"] == 2 and "已用尽" in r["summary"] and "agent_resume" in r["summary"]
 
 
 def test_tool_error_does_not_crash_loop():
@@ -390,6 +390,30 @@ def test_agent_list_and_cleanup():
     cr2 = agent.agent_cleanup(max_age_hours=0)
     assert "agprotect" not in cr2["removed"], cr2
     assert os.path.isdir(ws), "running 工作区不得被清理"
+
+
+def test_agent_resume_after_max_steps():
+    _reset(chat_models=lambda: ["fake"], search=_fake_search([]),
+           health=lambda: {"ok": True, "total": 0, "kinds": {}, "duplicates": 0},
+           broken_externals=lambda: [])
+    # 第一次:max_steps=1 只够规划+maintain,来不及 finish → max_steps_reached
+    agent._chat = Script([
+        '{"todos":[{"id":1,"text":"巡检"}]}',
+        '{"action":"maintain","args":{}}',
+    ])
+    r = agent.agent_run("巡检", task_id="agresumetest", max_steps=1)
+    assert r["status"] == "max_steps_reached", r
+    # 续跑:接续步号 finish → done,不重新规划
+    agent._chat = Script([
+        '{"action":"finish","args":{"summary":"续跑完成","ids":[]},"mark_done":[1]}',
+    ])
+    r2 = agent.agent_resume("agresumetest", extra_steps=3)
+    assert r2["status"] == "done", r2
+    st = agent.agent_status("agresumetest")
+    assert st["status"] == "done" and st["steps"] == 2, st          # 1 原始 + 1 续跑,步号接续
+    # done 任务不可再续跑
+    r3 = agent.agent_resume("agresumetest")
+    assert "error" in r3, r3
 
 
 if __name__ == "__main__":

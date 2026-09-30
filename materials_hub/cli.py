@@ -35,6 +35,7 @@
   python cli.py agent --task "..." --write  允许 agent 写(标签/登记;默认只读)
   python cli.py agent --status <id>     查看某次 agent 任务的状态与轨迹
   python cli.py agent --cancel <id>     协作式取消进行中的任务(步边界终止,进度保留)
+  python cli.py agent --resume <id> [--extra-steps 6]  续跑步数耗尽(max_steps_reached)的任务
   python cli.py agent --list [--limit N]  盘点历史任务(状态/步数/创建时间)
   python cli.py agent --cleanup [--max-age 72]  清理超龄的终态任务工作区(running 永不删)
   python cli.py agent --file task.txt   中文任务用 UTF-8 文件传(规避终端 GBK)
@@ -389,6 +390,11 @@ def main():
         if "--cancel" in args:
             tid = args[args.index("--cancel") + 1] if len(args) > args.index("--cancel") + 1 else ""
             print(_json.dumps(agent.agent_cancel(tid), ensure_ascii=False, indent=2))
+            return
+        if "--resume" in args:
+            tid = args[args.index("--resume") + 1] if len(args) > args.index("--resume") + 1 else ""
+            extra = int(args[args.index("--extra-steps") + 1]) if "--extra-steps" in args else 6
+            print(_json.dumps(agent.agent_resume(tid, extra_steps=extra), ensure_ascii=False, indent=2))
             return
         if "--list" in args:
             limit = int(args[args.index("--limit") + 1]) if "--limit" in args else 20
