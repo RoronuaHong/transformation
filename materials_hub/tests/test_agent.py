@@ -416,6 +416,26 @@ def test_agent_resume_after_max_steps():
     assert "error" in r3, r3
 
 
+def test_search_recall_fallback():
+    # 挑剔检索:只有空 q(浏览模式)或含扩展词(mosaic)才命中;tag=nope 时全路径 0 命中
+    def picky(q, kind="", tag="", limit=None, offset=0, mode="auto"):
+        if tag == "nope":
+            return []
+        if not q or "mosaic" in q:
+            return [_mat("m9", desc="mosaic doc")]
+        return []
+
+    _reset(chat_models=lambda: ["fake"], search=picky)
+    r = agent._tool_search({"q": "马赛克处理"})           # 0 命中 → 同义词扩展加 mosaic → 命中
+    assert isinstance(r, list) and r[0]["id"] == "m9", r
+    r2 = agent._tool_search({"q": "find documents now"})  # 纯英文无同义词 → 浏览兜底 dict
+    assert isinstance(r2, dict) and r2.get("fallback") == "browse", r2
+    assert [x["id"] for x in r2["results"]] == ["m9"], r2
+    assert agent._collect_ids(r2) == ["m9"], "兜底结果 id 必须可进 seen_ids 白名单"
+    r3 = agent._tool_search({"q": "x", "tag": "nope"})    # 全路径 0 命中 → 原 0-hit hint
+    assert isinstance(r3, dict) and r3["count"] == 0 and "hint" in r3, r3
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

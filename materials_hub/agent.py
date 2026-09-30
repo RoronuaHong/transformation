@@ -76,6 +76,10 @@ def _collect_ids(obs):
             for i in obs["ids"]:
                 if i and isinstance(i, str):
                     ids.append(str(i))
+        elif isinstance(obs.get("results"), list):   # 检索兜底 dict(results 键)
+            for item in obs["results"]:
+                if isinstance(item, dict) and item.get("id"):
+                    ids.append(str(item["id"]))
     return ids
 
 
@@ -360,12 +364,25 @@ def _observe(state, ws, obj):
 
 # ---------------------------------------------------------------- 工具表(支柱 3/4)
 def _tool_search(a):
-    rows = [_brief(m) for m in core.search(
-        str(a.get("q") or ""), str(a.get("kind") or ""), str(a.get("tag") or ""),
-        limit=int(a.get("limit") or 10), mode=a.get("mode", "auto"))]
+    q = str(a.get("q") or "").strip()
+    kind, tag = str(a.get("kind") or ""), str(a.get("tag") or "")
+    limit, mode = int(a.get("limit") or 10), a.get("mode", "auto")
+
+    def _s(query):
+        return [_brief(m) for m in core.search(query, kind, tag, limit=limit, mode=mode)]
+
+    rows = _s(q)
+    if not rows and q:
+        rows = _s(core.expand_query(q))      # 召回兜底1:中文→英文同义词加词(确定性,零 LLM)
+    if not rows and q:                       # 召回兜底2:放宽为浏览模式(保留 kind/tag 过滤)
+        rows = _s("")
+        if rows:
+            # 空结果必须给小模型明确反馈,否则会原查询死循环(实测 qwen2.5:7b 连打 10 次空查询)
+            return {"results": rows, "count": len(rows), "fallback": "browse",
+                    "hint": "原查询 0 命中,已自动放宽为浏览模式(kind=%s tag=%s);"
+                            "以下为按时间序素材,请自行筛选相关条目" % (kind or "-", tag or "-")}
     if rows:
         return rows
-    # 空结果必须给小模型明确反馈,否则会原查询死循环(实测 qwen2.5:7b 连打 10 次空查询)
     return {"results": [], "count": 0,
             "hint": "0 hits。请换更短的关键词重试:素材文件名片段(如 BV 号)、"
                     "中文主题词;或用 get_material 按 id 直取;或用 chunk_search 查全文。"}
@@ -616,6 +633,7 @@ finish 的 args 为 {"summary":"中文总结","ids":["本任务检索结果中�
 规则:
 1. 观察结果过长会被卸载为文件指针;需要细节时用 read_text_preview/get_material 精准取回,不要要求重发全文。
 2. 优先用 kind/tag 过滤缩小检索面;需要跨多查询综合时用 retrieve 子代理(只回摘要,省上下文)。
+   search_materials 0 命中时会自动做同义词扩展、再放宽为浏览模式(fallback:"browse");拿到浏览结果请自行筛选相关条目,不要当作精确匹配,也不要反复用同一长句重试。
 3. 库巡检/失效引用/无封面盘点用 maintain(确定性,零幻觉);补封面细节用 list_missing_covers;job 资产用 job_checkup。
 4. 找片段先 get_shots(母版逻辑切片);仅用户要导出文件时才搜 role:clip。silent/audio 是声画组件不是剪辑切片。
 5. 每完成一条待办就在 mark_done 里列出其 id;全部完成后必须 finish。
@@ -790,9 +808,11 @@ def _loop(state, ws, task_id, tools, model, budget, start_step, context, digest,
             obs = {"error": "%s: %s" % (type(e).__name__, e)}
 
         # 记录最近检索到的有效素材 id,供写工具 id 兜底(7B 常不复制真实 id,改用 BV号/XXX)
-        if action == "search_materials" and isinstance(obs, list) and obs:
-            if isinstance(obs[0], dict) and obs[0].get("id"):
-                ctx["last_id"] = obs[0]["id"]          # 首条结果 id 作兜底基准
+        if action == "search_materials":
+            items = obs if isinstance(obs, list) else (
+                obs.get("results") or [] if isinstance(obs, dict) else [])
+            if items and isinstance(items[0], dict) and items[0].get("id"):
+                ctx["last_id"] = items[0]["id"]        # 首条结果 id 作兜底基准
         elif action == "get_material" and isinstance(obs, dict) and obs.get("id"):
             ctx["last_id"] = obs["id"]
         elif action == "retrieve" and isinstance(obs, dict):
