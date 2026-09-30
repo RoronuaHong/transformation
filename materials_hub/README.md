@@ -461,7 +461,7 @@ LLM 先把任务拆成待办,再逐步调用素材工具完成,长观察落盘�
 - **MCP 工具**(共 10 个):`agent_run(task, confirm?, max_steps?)` 默认只读,写任务需 `confirm=true`;`agent_status(task_id)` 查待办/步骤/总结。长任务(本地 LLM 多轮)可能耗时 1–3 分钟。
 - **CLI**:`python cli.py agent --task "..." [--write] [--max-steps 12]` / `--status <id>` / `--file task.txt`(中文规避终端 GBK)。
 - **为什么是"路线 C"**:官方 `deepagents` 库依赖 langchain/langgraph,与零依赖哲学冲突;故编排自实现、协议走既有 MCP——未来可无缝切官方库或接入 CodeBuddy/Claude 等宿主。
-- **离线测试**:`tests/test_agent.py`(15 例,mock LLM 脚本回放,不连 ollama);`tests/test_agent_skills.py`(5 例,MCP 工具/技能冒烟)。
+- **离线测试**:`tests/test_agent.py`(15 例,单元/mock LLM 脚本回放,不连 ollama);`tests/test_agent_skills.py`(6 例,MCP 工具/资源/技能冒烟);`tests/test_agent_eval.py`(3 例真实任务模板回归,断言无编造 id/引用合法/记忆沉淀/长任务压缩)。
 
 ### 入口与调用链(2026-09-30 补)
 
