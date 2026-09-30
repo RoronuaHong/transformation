@@ -193,6 +193,30 @@ def agent_status(task_id):
             "context_digest": s.get("context_digest", "")}
 
 
+def agent_cancel(task_id):
+    """协作式取消一个进行中的 Deep Agent 任务(缺口1:轮询之外的可取消性)。
+
+    在任务工作区写 cancel.flag;agent_run 主循环每步开头检查,命中即在步边界
+    终止(已执行步骤/观察全部保留落盘)。不杀线程——避免半写的 state/notes 损坏。
+    """
+    ws = _ws(task_id)
+    p = os.path.join(ws, "state.json")
+    if not os.path.isfile(p):
+        return {"error": "no such task", "task_id": task_id}
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            s = json.load(f)
+    except (OSError, ValueError):
+        return {"error": "state unreadable", "task_id": task_id}
+    if s.get("status") not in ("planning", "running"):
+        return {"task_id": task_id, "status": s.get("status"), "cancelled": False,
+                "reason": "task already %s" % s.get("status")}
+    with open(os.path.join(ws, "cancel.flag"), "w", encoding="utf-8") as f:
+        f.write(time.strftime("%Y-%m-%d %H:%M:%S"))
+    return {"task_id": task_id, "status": s.get("status"), "cancelled": True,
+            "hint": "已请求取消,主循环将在下一步边界终止,进度保留"}
+
+
 # ---------------------------------------------------------------- 上下文卸载
 def _observe(state, ws, obj):
     """把观察结果压缩进上下文:过长的落盘,只回指针 + 摘要。"""
@@ -510,6 +534,7 @@ def agent_run(task, allow_write=False, max_steps=_DEFAULT_STEPS, model=None, tas
         return {"status": "error", "task_id": task_id, "summary": state["summary"]}
 
     state["status"] = "running"
+    _save(state, ws)          # 计划完成即落盘:任务从创建起就可被 agent_status 轮询/agent_cancel 取消
     ctx = {"last_id": None, "seen_ids": set()}            # 最近检索到的有效素材 id(供写工具兜底) + 全程见过 id(供 finish 核验)
     tools = _build_tools(allow_write, ctx)
     tool_lines = "".join("  - %s: %s\n" % (n, d) for n, (_, d) in sorted(tools.items()))
@@ -525,6 +550,17 @@ def agent_run(task, allow_write=False, max_steps=_DEFAULT_STEPS, model=None, tas
     digest = ""                                             # 滚动摘要:被尾窗口逐出的早期步骤压缩归档(缺口6)
     finished = False
     for n in range(1, max_steps + 1):
+        # 协作式取消(缺口1 补全):每步边界检查 cancel.flag,命中即终止;
+        # 已执行步骤/观察全部保留,不会半途丢弃,状态标 cancelled 落盘
+        if os.path.exists(os.path.join(ws, "cancel.flag")):
+            os.remove(os.path.join(ws, "cancel.flag"))
+            state["status"] = "cancelled"
+            state["summary"] = ("[取消] 用户于第 %d 步边界请求取消;已执行 %d 步,进度已保留"
+                                % (n, len(state["steps"])))[:2000]
+            _save(state, ws)
+            return {"status": "cancelled", "task_id": task_id, "workspace": ws,
+                    "summary": state["summary"], "todos": state["todos"],
+                    "steps": len(state["steps"])}
         budget_hint = ""
         if max_steps - n <= 2:      # 步数将尽,催促收尾(7B 小模型常把 todo 做完却忘了 finish)
             budget_hint = "\n(注意:剩余步数很少,若待办已基本完成,请立即 finish 并在 summary 里给出汇总)"

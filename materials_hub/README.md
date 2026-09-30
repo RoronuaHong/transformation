@@ -459,7 +459,7 @@ LLM 先把任务拆成待办,再逐步调用素材工具完成,长观察落盘�
 | **详细系统提示** | 角色+工具表+规则齐备;**写工具默认不存在**,仅 `allow_write=True` 才注册(MCP 侧再叠 `confirm=true` 人工复核,双重护栏) |
 
 - **LLM 后端**:本机 ollama chat 模型(与 auto_tag 同一发现逻辑);无 chat 模型 → `skipped` 优雅降级。
-- **MCP 工具**(共 10 个):`agent_run(task, confirm?, max_steps?)` 默认只读,写任务需 `confirm=true`;`agent_status(task_id)` 查待办/步骤/总结。长任务(本地 LLM 多轮)可能耗时 1–3 分钟。
+- **MCP 工具**(共 11 个):`agent_run(task, confirm?, max_steps?)` 默认只读,写任务需 `confirm=true`;`agent_status(task_id)` 查待办/步骤/总结;`agent_cancel(task_id)` **协作式取消**——写 `cancel.flag`,主循环下一步边界终止,已执行进度保留落盘(长任务 1–3 分钟不必干等)。
 - **CLI**:`python cli.py agent --task "..." [--write] [--max-steps 12]` / `--status <id>` / `--file task.txt`(中文规避终端 GBK)。
 - **为什么是"路线 C"**:官方 `deepagents` 库依赖 langchain/langgraph,与零依赖哲学冲突;故编排自实现、协议走既有 MCP——未来可无缝切官方库或接入 CodeBuddy/Claude 等宿主。
 - **离线测试**:`tests/test_agent.py`(15 例,单元/mock LLM 脚本回放,不连 ollama);`tests/test_agent_skills.py`(6 例,MCP 工具/资源/技能冒烟);`tests/test_agent_eval.py`(3 例真实任务模板回归,断言无编造 id/引用合法/记忆沉淀/长任务压缩)。
@@ -471,7 +471,7 @@ LLM 先把任务拆成待办,再逐步调用素材工具完成,长观察落盘�
 1. **进程入口(服务)**:`mcp_server.py` 的 `main()`(`mcp_server.py:517`)——MCP **stdio JSON-RPC** 服务器:`sys.stdout/in` 重定向 UTF-8 → `core.init_hub()` → `while True: readline()` 行循环 → `_dispatch(req)` 分发。由宿主(CodeBuddy / Claude Desktop)按 `mcpServers` 配置以 `python mcp_server.py --token <TOKEN>` 拉起(见上方「MCP 接入」段)。
 2. **逻辑入口(agent 本体)**:`agent.py` 的 `agent_run(task, allow_write, max_steps, model, task_id)`(`agent.py:478`)——Deep Agent 主循环,返回最终状态 dict;轮询用 `agent_status(task_id)` 读取 `index/agent_workspace/<task_id>/state.json`。底层 LLM=本机 ollama,无模型时 `skipped` 降级(零网络依赖)。
 
-**调用链**:宿主调 MCP 工具 `agent_run` → `t_agent_run`(`mcp_server.py`)丢**后台线程**跑 `agent.agent_run()`,立即返回 `task_id` → 宿主轮询 `agent_status` 看进度/结果(长任务 1–3 分钟不阻塞 MCP 调用)。
+**调用链**:宿主调 MCP 工具 `agent_run` → `t_agent_run`(`mcp_server.py`)丢**后台线程**跑 `agent.agent_run()`,立即返回 `task_id` → 宿主轮询 `agent_status` 看进度/结果(长任务 1–3 分钟不阻塞 MCP 调用);中途可 `agent_cancel(task_id)` 协作式取消(步边界终止、进度保留)。
 
 ### 2026-09-30 对照优化(六大缺口已全部闭环)
 

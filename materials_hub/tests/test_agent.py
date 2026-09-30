@@ -337,6 +337,36 @@ def test_context_compression_rolling_digest():
     assert len(dig.splitlines()) >= 2, dig  # step1、step2 先后被逐出并压缩
 
 
+def test_agent_cancel_cooperative():
+    _reset(chat_models=lambda: ["fake"], search=_fake_search([]),
+           health=lambda: {"ok": True, "total": 0, "kinds": {}, "duplicates": 0},
+           broken_externals=lambda: [])
+    base = Script([
+        '{"todos":[{"id":1,"text":"巡检"}]}',
+        '{"action":"maintain","args":{}}',
+        '{"action":"finish","args":{"summary":"done"},"mark_done":[1]}',
+    ])
+    calls = {"n": 0}
+
+    def chat(messages, model, timeout=180):
+        calls["n"] += 1
+        if calls["n"] == 2:                      # 第 1 步执行期间请求取消
+            cr = agent.agent_cancel("agcanceltest")
+            assert cr["cancelled"] is True, cr
+        return base(messages, model, timeout)
+
+    agent._chat = chat
+    r = agent.agent_run("巡检", task_id="agcanceltest")
+    assert r["status"] == "cancelled", r
+    assert r["steps"] == 1, r                    # 第 2 步边界即终止,后续步骤未执行
+    assert "取消" in r["summary"], r
+    st = agent.agent_status("agcanceltest")
+    assert st["status"] == "cancelled", st
+    assert not os.path.exists(os.path.join(agent._ws("agcanceltest"), "cancel.flag"))
+    cr2 = agent.agent_cancel("agcanceltest")     # 已终止的任务再取消 → 拒绝
+    assert cr2["cancelled"] is False, cr2
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

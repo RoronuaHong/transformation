@@ -382,6 +382,12 @@ def t_agent_status(a):
     return agent.agent_status(a.get("task_id", ""))
 
 
+def t_agent_cancel(a):
+    """协作式取消:写 cancel.flag,agent 主循环下一步边界终止(进度保留)。"""
+    import agent
+    return agent.agent_cancel(str(a.get("task_id") or ""))
+
+
 def t_auto(a):
     """写(派生数据+可能的 AI 打标):对新素材跑全链路自动处理
     (封面/OCR/镜头索引/pHash/语义索引,可选 LLM 打标)。
@@ -401,6 +407,7 @@ HANDLERS = {"search_materials": t_search, "get_material": t_get,
             "related": t_related,
             "build_image_embeddings": t_imgembed,
             "agent_run": t_agent_run, "agent_status": t_agent_status,
+            "agent_cancel": t_agent_cancel,
             "auto_process": t_auto}
 # __PART2__
 _SCHEMA_OBJ = {"type": "object", "properties": {
@@ -484,6 +491,9 @@ TOOLS = [
          "confirm": {"type": "boolean", "description": "仅写类任务设 true(启用 agent 内写工具)"},
          "max_steps": {"type": "integer"}}, "required": ["task"]}},
     {"name": "agent_status", "description": "查询 Deep Agent 任务的待办/步骤轨迹/总结",
+     "inputSchema": {"type": "object", "properties": {
+         "task_id": {"type": "string"}}, "required": ["task_id"]}},
+    {"name": "agent_cancel", "description": "协作式取消一个进行中的 Deep Agent 任务(在下一步边界终止,已执行进度保留)",
      "inputSchema": {"type": "object", "properties": {
          "task_id": {"type": "string"}}, "required": ["task_id"]}},
 ]
