@@ -188,6 +188,39 @@ def test_mcp_resource_agent():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_mcp_resource_related():
+    tmp = _setup_tmp()
+    try:
+        import agent as _agent
+        captured = {}
+
+        def fake_related(a):
+            captured.update(a)
+            return {"id": a["id"], "rel": a["rel"], "count": 1,
+                    "related": [{"id": "child0123456", "kind": "videos"}]}
+
+        _orig = _agent._tool_related
+        _agent._tool_related = fake_related
+        try:
+            uris = {r["uri"] for r in mcp_server._resources_list()}
+            assert "hub://related" in uris, uris
+            r = mcp_server._resource_read("hub://related/m1aaaaaaaaaa/children")
+            assert r["count"] == 1 and r["related"][0]["id"] == "child0123456", r
+            assert captured == {"id": "m1aaaaaaaaaa", "rel": "children"}, captured
+            mcp_server._resource_read("hub://related/m1aaaaaaaaaa")
+            assert captured["rel"] == "all", captured  # 缺省 rel=all
+            try:
+                mcp_server._resource_read("hub://related/")
+                raise AssertionError("should have raised")
+            except ValueError:
+                pass
+        finally:
+            _agent._tool_related = _orig
+        print("PASS test_mcp_resource_related")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     # 保存可能被 monkeypatch 的函数
     _orig_split = core.split_video_to_silent_and_audio

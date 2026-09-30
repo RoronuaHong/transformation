@@ -18,8 +18,11 @@ import agent  # noqa: E402
 from test_agent import Script, _reset, _fake_search, _mat  # noqa: E402
 
 
-def _run(script, search_items, task="任务"):
-    """跑一个场景（chat_models=fake + 桩检索/运维），返回 (r, st)。"""
+def _run(script, search_items, task="任务", **extra):
+    """跑一个场景（chat_models=fake + 桩检索/运维），返回 (r, st)。
+
+    extra: 额外 core 桩覆盖(如自定义 search/get_material),供特定场景注入。
+    """
     over = {
         "chat_models": lambda: ["fake"],
         "search": _fake_search(search_items),
@@ -27,6 +30,7 @@ def _run(script, search_items, task="任务"):
         "health": lambda: {"ok": True, "total": 0, "kinds": {}, "duplicates": 0},
         "broken_externals": lambda: [],
     }
+    over.update(extra)
     _reset(**over)
     agent._chat = Script(script)
     r = agent.agent_run(task)
@@ -46,7 +50,10 @@ def eval_retrieval_with_citations():
         '{"action":"finish","args":{"summary":"找到去马赛克成片 m1","ids":["m1"],'
         '"citations":[{"claim":"去马赛克成片","id":"m1"}]},"mark_done":[1,2]}',
     ]
-    r, _ = _run(script, [m1])
+    if os.path.exists(agent._MEMORY_PATH):      # 场景自足:不依赖上次运行的残留记忆
+        os.remove(agent._MEMORY_PATH)
+    r, _ = _run(script, [m1],
+                get_material=lambda mid: m1 if mid == "m1" else None)  # facet 沉淀依赖 get_material
     assert r["status"] == "done", r
     assert r["result_ids"] == ["m1"], r["result_ids"]          # 缺口2:无编造 id
     assert r["dropped_ids"] == [], r["dropped_ids"]
@@ -95,8 +102,64 @@ def eval_honesty_zero_hits():
             or "没有" in r["summary"]), r["summary"]
 
 
+def eval_related_traversal():
+    """关系反查整合：related 沿 parent: 面标签一跳遍历，衍生 id 合法入引用。"""
+    m1 = _mat("m1"); m1["tags"] = "sp,role:master"
+    m2 = _mat("m2"); m2["tags"] = "sp,parent:m1"
+
+    def tag_search(q, kind="", tag="", limit=None, offset=0, mode="auto"):
+        rows = [m for m in (m1, m2)
+                if not tag or tag in [t.strip() for t in (m["tags"] or "").split(",")]]
+        return rows[:limit or len(rows)]
+
+    script = [
+        '{"todos":[{"id":1,"text":"检索母版"},{"id":2,"text":"找衍生"},{"id":3,"text":"总结"}]}',
+        '{"action":"search_materials","args":{"q":"母版"}}',
+        '{"action":"related","args":{"id":"m1","rel":"children"}}',
+        '{"action":"finish","args":{"summary":"母版 m1 及其衍生 m2","ids":["m1","m2"],'
+        '"citations":[{"claim":"母版","id":"m1"},{"claim":"衍生","id":"m2"}]},'
+        '"mark_done":[1,2,3]}',
+    ]
+    orig = agent._tool_related
+    calls = []
+    agent._tool_related = lambda a: (calls.append(dict(a)), orig(a))[1]
+    try:
+        r, _ = _run(script, [m1, m2], search=tag_search,
+                    get_material=lambda mid: {"m1": m1, "m2": m2}.get(mid))
+    finally:
+        agent._tool_related = orig
+    assert calls and calls[0] == {"id": "m1", "rel": "children"}, calls  # 缺口5:related 被真实调用
+    assert r["status"] == "done", r
+    assert r["result_ids"] == ["m1", "m2"], r["result_ids"]
+    assert r["dropped_ids"] == [], r["dropped_ids"]
+    assert all(c["valid"] for c in r["citations"]), r["citations"]
+
+
+def eval_memory_reuse():
+    """跨任务记忆复用：同查询二次执行，playbook 计数累加且 facet 沉淀成 hint。"""
+    m1 = _mat("m1", desc="去马赛克成片"); m1["tags"] = "sp,type:deblur"
+    script = [
+        '{"todos":[{"id":1,"text":"检索"}]}',
+        '{"action":"search_materials","args":{"q":"去马赛克"}}',
+        '{"action":"finish","args":{"summary":"找到成片","ids":["m1"],'
+        '"citations":[{"claim":"成片","id":"m1"}]},"mark_done":[1]}',
+    ]
+    if os.path.exists(agent._MEMORY_PATH):
+        os.remove(agent._MEMORY_PATH)
+    _run(script, [m1], task="第一次检索",
+         get_material=lambda mid: m1 if mid == "m1" else None)  # facet 沉淀依赖 get_material
+    e1 = next((e for e in agent._load_playbook() if e["q"] == "去马赛克"), None)
+    assert e1 and e1["n"] == 1, e1
+    _run(script, [m1], task="第二次检索",
+         get_material=lambda mid: m1 if mid == "m1" else None)
+    e2 = next((e for e in agent._load_playbook() if e["q"] == "去马赛克"), None)
+    assert e2 and e2["n"] == 2, e2                        # 缺口3:计数累加
+    assert "deblur" in (e2.get("hint") or ""), e2         # 有效 facet 沉淀
+
+
 if __name__ == "__main__":
-    cases = [eval_retrieval_with_citations, eval_long_task_compression, eval_honesty_zero_hits]
+    cases = [eval_retrieval_with_citations, eval_long_task_compression, eval_honesty_zero_hits,
+             eval_related_traversal, eval_memory_reuse]
     fails = 0
     for fn in cases:
         try:

@@ -1,0 +1,29 @@
+name: agent-tests
+
+on:
+  push:
+    paths:
+      - "materials_hub/**"
+      - ".github/workflows/agent-tests.yml"
+  pull_request:
+    paths:
+      - "materials_hub/**"
+      - ".github/workflows/agent-tests.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run agent unit + MCP resource + eval suites
+        working-directory: materials_hub
+        run: |
+          python tests/test_agent.py
+          python tests/test_agent_skills.py
+          python tests/test_agent_eval.py

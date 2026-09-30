@@ -84,6 +84,9 @@ def _resources_list():
         {"uri": "hub://agent", "name": "Agent 任务实时状态",
          "description": "hub://agent/{task_id} 返回某 Deep Agent 任务的实时状态(待办/步骤/总结/citations/critic/context_digest);等价于 agent_status 工具,供宿主订阅式读取,省反复调工具",
          "mimeType": "application/json"},
+        {"uri": "hub://related", "name": "素材关系反查",
+         "description": "hub://related/{id}/{rel} 沿 parent:/role:/job: 等面标签一跳遍历;rel 取 all(默认)/parent/children/job/role/kind",
+         "mimeType": "application/json"},
     ]
 
 
@@ -112,6 +115,13 @@ def _resource_read(uri):
             raise ValueError("hub://agent/{task_id} requires task id")
         import agent
         return agent.agent_status(tid)
+    if p[0] == "related":
+        mid = p[1] if len(p) > 1 else ""
+        rel = p[2] if len(p) > 2 and p[2] else "all"
+        if not mid:
+            raise ValueError("hub://related/{id}/{rel} requires material id")
+        import agent
+        return agent._tool_related({"id": mid, "rel": rel})
     raise ValueError("unknown resource: " + uri)
 
 
