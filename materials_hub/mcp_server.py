@@ -369,8 +369,8 @@ def t_agent_run(a):
                             allow_write=(a.get("confirm") is True),
                             max_steps=int(a.get("max_steps") or 12),
                             task_id=task_id)
-        except Exception:                                   # 后台线程异常不冒泡,状态已落盘
-            pass
+        except Exception:                                   # 后台线程异常不冒泡,但必须留痕
+            agent._mark_error(task_id, "[error] 后台线程异常终止,任务未能完成")
 
     threading.Thread(target=_run, daemon=True).start()
     return {"status": "running", "task_id": task_id,
@@ -403,8 +403,8 @@ def t_agent_resume(a):
     def _run():
         try:
             agent.agent_resume(tid, extra_steps=int(a.get("extra_steps") or 6))
-        except Exception:                                   # 后台线程异常不冒泡,状态已落盘
-            pass
+        except Exception:                                   # 后台线程异常不冒泡,但必须留痕
+            agent._mark_error(tid, "[error] 续跑后台线程异常终止")
 
     threading.Thread(target=_run, daemon=True).start()
     return {"status": "running", "task_id": tid,

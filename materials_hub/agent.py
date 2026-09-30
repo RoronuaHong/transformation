@@ -42,11 +42,11 @@ _SUB_QUERIES = 3             # retrieve 子代理最多并发查询数
 
 # ---------------------------------------------------------------- LLM 后端
 def _chat(messages, model, timeout=180):
-    """调 ollama /api/chat,强制 JSON 输出;返回解析后的 dict(失败给空 dict)。"""
+    """调 ollama /api/chat,强制 JSON 输出;失败/空响应一律返回 {}(绝不泄漏 None)。"""
     r = core._http_json(core._embed_url() + "/api/chat", timeout=timeout,
                         payload={"model": model, "messages": messages,
-                                 "format": "json", "stream": False})
-    return core._safe_json(((r.get("message") or {}).get("content") or "").strip())
+                                 "format": "json", "stream": False}) or {}
+    return core._safe_json(((r.get("message") or {}).get("content") or "").strip()) or {}
 
 
 def _brief(m):
@@ -266,6 +266,22 @@ def agent_cleanup(max_age_hours=72):
         else:
             kept.append(tid)
     return {"removed": removed, "kept": len(kept), "max_age_hours": int(max_age_hours)}
+
+
+def _mark_error(task_id, summary):
+    """把卡在 planning/running 的僵尸任务标为 error(后台线程异常终止时调用)。"""
+    p = os.path.join(_ws(task_id), "state.json")
+    if not os.path.isfile(p):
+        return
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            s = json.load(f)
+        if s.get("status") in ("planning", "running"):
+            s["status"] = "error"
+            s["summary"] = str(summary)[:2000]
+            _save(s, _ws(task_id))
+    except (OSError, ValueError):
+        pass
 
 
 def agent_resume(task_id, extra_steps=6, model=None):
@@ -667,6 +683,7 @@ def _loop(state, ws, task_id, tools, model, budget, start_step, context, digest,
         sys_prompt += mem_hint
 
     finished = False
+    fails = 0                                             # 连续无效 LLM 响应计数
     for i in range(budget):
         n = start_step + i
         # 协作式取消(缺口1 补全):每步边界检查 cancel.flag,命中即终止;
@@ -690,6 +707,24 @@ def _loop(state, ws, task_id, tools, model, budget, start_step, context, digest,
                    recent, digest_note, budget_hint))
         act = _chat([{"role": "system", "content": sys_prompt},
                      {"role": "user", "content": user}], model)
+        if not isinstance(act, dict):                       # E2E 实测:LLM 失败曾泄漏 None 直接崩线程
+            act = {}
+        if not (act.get("action") or act.get("thought")):   # 无效响应:重试一次,再失败诚实中止
+            fails += 1
+            if fails >= 2:
+                state["status"] = "error"
+                state["summary"] = ("[中止] LLM(%s)连续 %d 次未返回有效 JSON,第 %d 步中止;"
+                                    "可稍后重跑同任务" % (model, fails, n))[:2000]
+                _save(state, ws)
+                return {"status": "error", "task_id": task_id, "workspace": ws,
+                        "summary": state["summary"], "steps": len(state["steps"])}
+            obs = {"error": "empty llm response, retrying"}
+            ptr = _observe(state, ws, obs)
+            context.append("step%d[%s] %s" % (n, "llm_retry", ptr[:400]))
+            state["steps"].append({"n": n, "action": "llm_retry", "ok": False, "obs": ptr})
+            _save(state, ws)
+            continue
+        fails = 0
         action = act.get("action", "")
         args = act.get("args") or {}
         for tid in act.get("mark_done") or []:
