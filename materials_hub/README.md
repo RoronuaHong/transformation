@@ -52,19 +52,23 @@
 
 联动 subtitle_pipeline 时自动生成的标签(受控词汇):
 ```
-sp | <platform> | job:<id> | type:<media|subs|notes|benchmark|render|test> | lang:<xx>
+sp | <platform> | job:<id> | type:<media|clip|subs|notes|benchmark|render|test>
+  | role:<master|clip|silent-picture|audio-stem|picture> | parent:<id> | t_start: | t_end: | lang:<xx>
 ```
 - `sp` —— 来源标记(固定值,表示来自 subtitle_pipeline)
 - `<platform>` —— bilibili / youtube 等(受控:只填已知平台)
 - `job:<id>` —— 对应某次采集任务(同一任务的全套素材可一键筛出)
-- `type:<...>` —— 业务类型(受控枚举,见上)
+- `type:<...>` —— 业务类型；`clip`=物理交付切片(非新 kind)
+- `role:master` / `role:clip` —— 母版 vs 物理切片；逻辑镜头只在 `shots` sidecar
+- `parent:<id>` / `from:<id>` —— 子件连回母版(demux / clip)
 - `lang:<xx>` —— 从文件名识别的语言(zh/en/ja…)
 
 **扩展规则(保持一致,便于检索)**:
-1. 维度用 `key:value` 形式(`job:`、`type:`、`lang:`),便于分面过滤;自由文本放进 `description`,别塞进 tags。
+1. 维度用 `key:value` 形式(`job:`、`type:`、`lang:`、`role:`、`parent:`),便于分面过滤;自由文本放进 `description`,别塞进 tags。
 2. 新增类型只扩 `type:` 的受控枚举,不要发明新前缀;新平台加到 `<platform>` 白名单。
 3. 标签统一小写;多个标签用逗号分隔,顺序无关(检索按集合匹配)。
 4. 手动上传的素材同样建议套用 `type:` / `lang:` 维度,保持全库一致。
+5. 找片段默认 `role:master` + `get_shots`;不要把每个镜头拆成独立入库视频。
 
 ### 分类(kind)与扩展名
 `images` · `videos` · `docs` · `audio` · **`subs`(srt/ass/vtt/ssa/sub/sbv)** · `other`。
@@ -418,12 +422,27 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 `chunk_search_materials(q,limit?)` 长文档父子分块检索(覆盖 .md/.txt/.srt 关联文本全文)/
 `read_text_preview(id,limit?)` 只读预览描述与关联文本前 N 字符(省 token)/
 `run_ocr(id,confirm)` 视频画面 OCR 离线识别(rapidocr,文本入检索)/
+`get_shots(id)` 只读镜头时间轴[{start,end},...] /
+`auto_process(confirm,limit?,autotag?)` 对新素材跑封面/OCR/镜头/pHash(写,需 confirm) /
+`find_similar(id)` 画面近重复(dHash) /
+`near_duplicate_report(max_dist?,limit?)` 全库近重复对+簇 /
+`search_by_image(query|id|path)` 以图搜图(dHash;CLIP 待权重) /
+`list_missing_covers` / `job_checkup` 运维只读技能 /
 `update_tags(id,tags,confirm)` 与 `register_asset(path,...,confirm)` **写工具(强制 `confirm=true`,缺省即拒绝,防 Agent 误改)**。
 
 Resources(订阅式只读,比 tool 更省 token):`hub://recent/{n}` 最新素材、`hub://job/{jobid}` 某 subtitle_pipeline job 全套、
-`hub://history/{n}` **写操作审计日志**(标签/描述/删除/打标/OCR 变更,谁在何时改了什么);
+`hub://history/{n}` **写操作审计日志**、`hub://shots/{id}` **镜头索引**(未建则 `{status:missing}`);
+Prompts:`fill_missing_thumbs`、`job_checkup`（`prompts/list` / `prompts/get`）；
+只读技能工具:`list_missing_covers`、`job_checkup`。
 `initialize` 按运行环境动态声明能力(`serverInfo.hub` 透出 semantic/reranker/token_required/count 实时标志)。
 启动时会顺手自动拉起 ollama(失败不影响词法检索)。日志走 stderr,协议走 stdout。
+
+### 事件驱动(面板/API)
+
+上传、整理 ingest、扫描、`POST /api/split-silent` 成功后会后台 `enqueue_autoproc`
+(thumb→OCR→shots→pHash);进度看 `GET /api/auto/status`,也可 `POST /api/auto` 手动跑。
+流水线 `hub_push` → `run_job_dir`：登记后默认拆 silent+track 再 auto。
+详解与路线图见 `素材中心最佳实践与优化分析.md` §18–§19；Cursor skill：`materials-hub-agent`。
 
 ## Deep Agent(路线 C:stdlib 编排 + MCP 暴露)
 
@@ -441,4 +460,28 @@ LLM 先把任务拆成待办,再逐步调用素材工具完成,长观察落盘�
 - **MCP 工具**(共 10 个):`agent_run(task, confirm?, max_steps?)` 默认只读,写任务需 `confirm=true`;`agent_status(task_id)` 查待办/步骤/总结。长任务(本地 LLM 多轮)可能耗时 1–3 分钟。
 - **CLI**:`python cli.py agent --task "..." [--write] [--max-steps 12]` / `--status <id>` / `--file task.txt`(中文规避终端 GBK)。
 - **为什么是"路线 C"**:官方 `deepagents` 库依赖 langchain/langgraph,与零依赖哲学冲突;故编排自实现、协议走既有 MCP——未来可无缝切官方库或接入 CodeBuddy/Claude 等宿主。
-- **离线测试**:`tests/test_agent.py`(9 例,mock LLM 脚本回放,不连 ollama)。
+- **离线测试**:`tests/test_agent.py`(15 例,mock LLM 脚本回放,不连 ollama);`tests/test_agent_skills.py`(5 例,MCP 工具/技能冒烟)。
+
+### 入口与调用链(2026-09-30 补)
+
+分两层,宿主只跟 MCP 层打交道:
+
+1. **进程入口(服务)**:`mcp_server.py` 的 `main()`(`mcp_server.py:517`)——MCP **stdio JSON-RPC** 服务器:`sys.stdout/in` 重定向 UTF-8 → `core.init_hub()` → `while True: readline()` 行循环 → `_dispatch(req)` 分发。由宿主(CodeBuddy / Claude Desktop)按 `mcpServers` 配置以 `python mcp_server.py --token <TOKEN>` 拉起(见上方「MCP 接入」段)。
+2. **逻辑入口(agent 本体)**:`agent.py` 的 `agent_run(task, allow_write, max_steps, model, task_id)`(`agent.py:478`)——Deep Agent 主循环,返回最终状态 dict;轮询用 `agent_status(task_id)` 读取 `index/agent_workspace/<task_id>/state.json`。底层 LLM=本机 ollama,无模型时 `skipped` 降级(零网络依赖)。
+
+**调用链**:宿主调 MCP 工具 `agent_run` → `t_agent_run`(`mcp_server.py`)丢**后台线程**跑 `agent.agent_run()`,立即返回 `task_id` → 宿主轮询 `agent_status` 看进度/结果(长任务 1–3 分钟不阻塞 MCP 调用)。
+
+### 2026-09-30 对照优化(六大缺口已全部闭环)
+
+参照 2026 Agentic RAG / Deep Agent / Agent Memory 在线实践,`素材中心最佳实践与优化分析.md` §20 记录完整对照,`agent.py`/`mcp_server.py` 已落地六项(均模型无关、本地 7B 友好,不依赖更强模型):
+
+| 缺口 | 落地要点 |
+|---|---|
+| 1 后台异步执行 | `t_agent_run` 后台线程 + 主循环每步 `_save` 落盘,支持实时进度轮询/可取消 |
+| 2 finish 核验 + 诚实弃权 | `seen_ids` 全程白名单,finish 声明 id 越界即剔除并标 `[核验]`;补第 8 条诚实规则 |
+| 3 跨任务 playbook 记忆 | `index/agent_workspace/agent_memory.json` 沉淀「查询词→有效 facet」规律,下次注入提示 |
+| 4 确定性 Critic + 引用溯源 | `citations:[{claim,id}]` 逐条校验 + 正文正则 `[0-9a-f]{12}` 扫描标 `[Critic]` 剔除幻觉 id |
+| 5 关系反查工具 | `related(id, rel)` 沿 `parent:/role:/job:` 面标签一跳遍历(确定性) |
+| 6 动态上下文压缩 | 尾窗口外步骤压入滚动摘要 `context_digest` 回灌 prompt,防本地 7B 长任务遗忘/context-rot |
+
+测试:`tests/test_agent.py` **15/15 绿**、`tests/test_agent_skills.py` **5/5 绿**(均为 mock LLM 回放,不连 ollama)。

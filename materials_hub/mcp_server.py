@@ -78,6 +78,9 @@ def _resources_list():
         {"uri": "hub://history", "name": "写操作审计日志",
          "description": "按时间倒序的标签/描述/删除/打标/OCR 变更记录;hub://history/{n} 指定条数",
          "mimeType": "application/json"},
+        {"uri": "hub://shots", "name": "视频镜头索引(片段时间轴)",
+         "description": "hub://shots/{id} 返回 ffmpeg scenecut 镜头表[{start,end},...];未建索引则 {status:missing}",
+         "mimeType": "application/json"},
     ]
 
 
@@ -94,6 +97,12 @@ def _resource_read(uri):
     if p[0] == "history":
         n = int(p[1]) if len(p) > 1 and p[1].isdigit() else 50
         return core.get_history(limit=n)
+    if p[0] == "shots":
+        mid = p[1] if len(p) > 1 else ""
+        if not mid:
+            raise ValueError("hub://shots/{id} requires material id")
+        d = core.get_shots(mid)
+        return d if d is not None else {"id": mid, "status": "missing"}
     raise ValueError("unknown resource: " + uri)
 
 
@@ -178,14 +187,175 @@ def t_similar(a):
     return core.similar_assets(a.get("id", ""), int(a.get("max_dist") or 10))
 
 
+def t_related(a):
+    """只读:按关系反查关联素材(父/子/job同伙/同role/同kind)。"""
+    import agent
+    return agent._tool_related(a)
+
+
+def t_missing_covers(a):
+    """只读:列出无封面的 videos/silent(可滤 kind)。Agent「补封面」技能第一步。"""
+    return core.list_missing_covers(
+        kind=str(a.get("kind") or ""),
+        skip_failed=a.get("skip_failed", True) is not False,
+        limit=int(a.get("limit") or 50),
+    )
+
+
+def t_job_checkup(a):
+    """只读:某 job 资产体检(kinds/封面/镜头/asr/失效引用)。"""
+    return core.job_checkup(a.get("job_id") or a.get("job") or "")
+
+
+def t_near_dupes(a):
+    """只读:全库画面近重复报告(对+簇)。"""
+    return core.near_duplicate_report(
+        max_dist=int(a.get("max_dist") or 10),
+        limit_pairs=int(a.get("limit") or 50),
+    )
+
+
+def t_imgsearch(a):
+    """只读:以图搜图或以文搜图。"""
+    text = (a.get("text") or "").strip()
+    if text:
+        return core.search_by_text_image(
+            text, limit=int(a.get("limit") or 20),
+            min_score=float(a.get("min_score") or 0.15),
+        )
+    q = a.get("query") or a.get("id") or a.get("path") or ""
+    return core.search_by_image(
+        q,
+        max_dist=int(a.get("max_dist") or 10),
+        limit=int(a.get("limit") or 20),
+        mode=str(a.get("mode") or "auto"),
+    )
+
+
+def t_imgembed(a):
+    """写(派生):建 CLIP 图像向量索引;需 confirm=true。"""
+    _require_confirm(a)
+    if a.get("status_only"):
+        return core.image_embed_status()
+    return core.build_image_embeddings(
+        force=bool(a.get("force")),
+        limit=int(a.get("limit") or 0),
+    )
+
+
+# ---------- MCP Prompts(可复用技能模板,2026 最佳实践 §15.1) ----------
+_PROMPTS = [
+    {
+        "name": "fill_missing_thumbs",
+        "description": "找出无封面的 silent/videos 并规划批量补封面(只读盘点→写需 confirm)",
+        "arguments": [
+            {"name": "kind", "description": "silent | videos | 空=两者", "required": False},
+        ],
+    },
+    {
+        "name": "job_checkup",
+        "description": "某 subtitle_pipeline job 全套体检(资产种类/封面/镜头/asr/失效)",
+        "arguments": [
+            {"name": "job_id", "description": "job 目录名或 job: 标签值", "required": True},
+        ],
+    },
+    {
+        "name": "segment_first",
+        "description": "找画面片段:先母版 shots 逻辑切片,仅导出文件时才搜 role:clip",
+        "arguments": [
+            {"name": "query", "description": "自然语言/标签查询(可选)", "required": False},
+            {"name": "job_id", "description": "限定 job(可选)", "required": False},
+        ],
+    },
+]
+
+
+def _prompts_list():
+    return [{"name": p["name"], "description": p["description"],
+             "arguments": p.get("arguments") or []} for p in _PROMPTS]
+
+
+def _prompt_get(name, arguments=None):
+    arguments = arguments or {}
+    if name == "fill_missing_thumbs":
+        kind = (arguments.get("kind") or "").strip()
+        kind_hint = kind or "silent 优先,再 videos"
+        text = (
+            "你是素材中心运维 Agent。任务:补齐缺失封面。\n"
+            "1. 只读调用 list_missing_covers(kind=%r) 列出无封面条目。\n"
+            "2. 汇报 id/kind/name;若只需盘点则 finish。\n"
+            "3. 若用户已授权写入:对缺封面条目调用 auto_process(confirm=true) "
+            "或面板 POST /api/thumbs;不要删原片。\n"
+            "范围提示: %s\n"
+            "禁止编造素材 id。"
+        ) % (kind, kind_hint)
+        return {"description": "无封面补封面技能",
+                "messages": [{"role": "user",
+                              "content": {"type": "text", "text": text}}]}
+    if name == "job_checkup":
+        jid = (arguments.get("job_id") or arguments.get("job") or "").strip()
+        if not jid:
+            raise ValueError("job_checkup requires argument job_id")
+        text = (
+            "你是素材中心运维 Agent。任务:体检 job=%s。\n"
+            "1. 调用 job_checkup(job_id=%r)(确定性,勿臆造)。\n"
+            "2. 也可读 Resource hub://job/%s 对照材料清单。\n"
+            "3. 总结:kinds 是否含 videos/silent/audio/subs/notes;"
+            "master_ids / clip_ids / component_ids;"
+            "missing_thumbs / missing_shots(仅母版) / clips_missing_parent / "
+            "broken_ids / asr_ids。\n"
+            "4. 只读汇报;写修复需用户 confirm。"
+        ) % (jid, jid, jid)
+        return {"description": "job 全套体检技能",
+                "messages": [{"role": "user",
+                              "content": {"type": "text", "text": text}}]}
+    if name == "segment_first":
+        q = (arguments.get("query") or "").strip()
+        jid = (arguments.get("job_id") or arguments.get("job") or "").strip()
+        scope = ("job_id=%r" % jid) if jid else "全库"
+        text = (
+            "你是素材中心检索 Agent。任务:按 DAM 方案 A 找「片段」。\n"
+            "范围: %s。查询提示: %r\n"
+            "规则(必须遵守):\n"
+            "1. 默认搜母版: search_materials 用 tag role:master 或 type:media"
+            "(不要默认搜 role:clip)。\n"
+            "2. 拿到母版 id 后读 get_shots / Resource hub://shots/{id},"
+            "用镜头 start/end 作为逻辑切片(一份实体,不落盘)。\n"
+            "3. 仅当用户明确要「导出文件 / 已有 range_*.mp4」时,"
+            "再 search tag=role:clip(或 type:clip),并汇报 parent:/t_start:/t_end:。\n"
+            "4. silent/audio 是声画组件(role:silent-picture / role:audio-stem),"
+            "不是剪辑切片;用 parent: 连回母版。\n"
+            "5. 只读汇报;禁止编造 id。"
+        ) % (scope, q or "(无)")
+        return {"description": "片段优先 shots 技能",
+                "messages": [{"role": "user",
+                              "content": {"type": "text", "text": text}}]}
+    raise ValueError("unknown prompt: " + name)
+
+
 # ---------- Deep Agent(路线 C:编排层在 agent.py,经 MCP 暴露给宿主) ----------
 def t_agent_run(a):
     import agent
+    import threading
     # 写权限双重护栏:MCP confirm=true(人工复核)→ 才向 agent 传 allow_write,
     # agent 内部写工具此时才注册;缺省一律只读,与既有写护栏同构。
-    return agent.agent_run(a.get("task", ""),
-                           allow_write=(a.get("confirm") is True),
-                           max_steps=int(a.get("max_steps") or 12))
+    # 后台执行:本地 LLM 多步推理耗时 1-3 分钟,同步会卡死 MCP 调用;
+    # 立即返回 task_id,调用方用 agent_status 轮询进度(agent 每步落盘 state.json)。
+    task = a.get("task", "")
+    task_id = a.get("task_id") or agent._new_id(task)
+
+    def _run():
+        try:
+            agent.agent_run(task,
+                            allow_write=(a.get("confirm") is True),
+                            max_steps=int(a.get("max_steps") or 12),
+                            task_id=task_id)
+        except Exception:                                   # 后台线程异常不冒泡,状态已落盘
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"status": "running", "task_id": task_id,
+            "hint": "长任务已在后台启动(约 1-3 分钟),用 agent_status 查询进度与结果"}
 
 
 def t_agent_status(a):
@@ -207,12 +377,16 @@ HANDLERS = {"search_materials": t_search, "get_material": t_get,
             "update_tags": t_update_tags, "register_asset": t_register,
             "read_text_preview": t_text_preview, "chunk_search_materials": t_chunk_search,
             "run_ocr": t_run_ocr, "get_shots": t_shots, "find_similar": t_similar,
+            "list_missing_covers": t_missing_covers, "job_checkup": t_job_checkup,
+            "near_duplicate_report": t_near_dupes, "search_by_image": t_imgsearch,
+            "related": t_related,
+            "build_image_embeddings": t_imgembed,
             "agent_run": t_agent_run, "agent_status": t_agent_status,
             "auto_process": t_auto}
 # __PART2__
 _SCHEMA_OBJ = {"type": "object", "properties": {
     "q": {"type": "string", "description": "关键词或中文自然语言问句"},
-    "kind": {"type": "string", "enum": ["images", "videos", "docs", "audio", "subs", "other"]},
+    "kind": {"type": "string", "enum": ["images", "videos", "silent", "docs", "audio", "subs", "anim", "other"]},
     "tag": {"type": "string"},
     "mode": {"type": "string", "enum": ["auto", "lexical", "semantic"]},
     "limit": {"type": "integer"}}}
@@ -259,7 +433,33 @@ TOOLS = [
     {"name": "find_similar", "description": "只读:画面级近重复检测(dHash 感知哈希,汉明距离≤max_dist;与 sha256 精确去重互补)",
      "inputSchema": {"type": "object", "properties": {
          "id": {"type": "string"}, "max_dist": {"type": "integer"}}, "required": ["id"]}},
-    {"name": "agent_run", "description": "Deep Agent 编排:LLM 先拆待办再逐步调用素材工具完成多步任务(检索综合/巡检/整理)。默认只读;写任务需 confirm=true(人工复核)。长任务:本地 LLM 多轮,可能耗时 1-3 分钟。状态可事后用 agent_status 查询。",
+    {"name": "list_missing_covers", "description": "只读:列出无封面的 videos/silent(可滤 kind=silent|videos);补封面技能第一步",
+     "inputSchema": {"type": "object", "properties": {
+         "kind": {"type": "string"}, "limit": {"type": "integer"},
+         "skip_failed": {"type": "boolean"}}}},
+    {"name": "job_checkup", "description": "只读:某 subtitle_pipeline job 资产体检(kinds/封面/镜头/asr/失效引用)",
+     "inputSchema": {"type": "object", "properties": {
+         "job_id": {"type": "string"}}, "required": ["job_id"]}},
+    {"name": "near_duplicate_report", "description": "只读:全库画面近重复报告(dHash 汉明距离≤max_dist 的对+并查集簇,一实体多引用)",
+     "inputSchema": {"type": "object", "properties": {
+         "max_dist": {"type": "integer"}, "limit": {"type": "integer"}}}},
+    {"name": "search_by_image", "description": "只读:以图搜图(query=id/路径)或以文搜图(text=)。mode=auto|phash|clip;CLIP 需 imgembed 索引",
+     "inputSchema": {"type": "object", "properties": {
+        "query": {"type": "string"}, "id": {"type": "string"}, "path": {"type": "string"},
+        "text": {"type": "string", "description": "自然语言以文搜图"},
+        "max_dist": {"type": "integer"}, "limit": {"type": "integer"},
+        "mode": {"type": "string", "enum": ["auto", "phash", "clip"]}}}},
+    {"name": "related", "description": "只读:按关系反查关联素材(Graph-RAG 轻量版)。利用 parent:/role:/job: 面标签与 kind 沿一跳遍历:父(rel=parent)/子(rel=children)/同 job 产物(rel=job)/同 role(rel=role)/同 kind(rel=kind)/全部并集(rel=all)",
+     "inputSchema": {"type": "object", "properties": {
+        "id": {"type": "string", "description": "素材 id"},
+        "rel": {"type": "string", "enum": ["all", "parent", "children", "job", "role", "kind"]},
+        "limit": {"type": "integer"}}, "required": ["id"]}},
+    {"name": "build_image_embeddings", "description": "写(派生):为视觉素材建 CLIP 图像向量索引(需 SP venv open_clip+权重);confirm=true",
+     "inputSchema": {"type": "object", "properties": {
+         "force": {"type": "boolean"}, "limit": {"type": "integer"},
+         "status_only": {"type": "boolean"},
+         "confirm": {"type": "boolean"}}, "required": ["confirm"]}},
+    {"name": "agent_run", "description": "Deep Agent 编排:LLM 先拆待办再逐步调用素材工具完成多步任务(检索综合/巡检/整理)。默认只读;写任务需 confirm=true(人工复核)。后台异步执行(本地 LLM 多轮,约 1-3 分钟),调用立即返回 task_id,用 agent_status 轮询进度与结果;finish 声明的 id 会经 seen_ids 核验剔除编造项。",
      "inputSchema": {"type": "object", "properties": {
          "task": {"type": "string", "description": "自然语言任务(中文)"},
          "confirm": {"type": "boolean", "description": "仅写类任务设 true(启用 agent 内写工具)"},
@@ -280,7 +480,7 @@ def _dispatch(req):
         #  - 有 embedding 模型 → 语义检索可用;否则 Agent 应走纯词法
         #  - 设了 VITUAL_RERANK_MODEL → 开启 stage-2 重排
         #  - 设了 VITUAL_HUB_TOKEN → 已鉴权
-        cap = {"tools": {}, "resources": {}}
+        cap = {"tools": {}, "resources": {}, "prompts": {}}
         return {"protocolVersion": v, "capabilities": cap,
                 "serverInfo": {"name": "materials-hub", "version": "1.0", "hub": {
                     "semantic": core.embed_probe()["ok"],
@@ -294,6 +494,11 @@ def _dispatch(req):
         uri = (req.get("params", {}) or {}).get("uri", "")
         return {"contents": [{"uri": uri, "mimeType": "application/json",
                               "text": json.dumps(_resource_read(uri), ensure_ascii=False)}]}
+    if m == "prompts/list":
+        return {"prompts": _prompts_list()}
+    if m == "prompts/get":
+        params = req.get("params", {}) or {}
+        return _prompt_get(params.get("name", ""), params.get("arguments") or {})
     if m == "tools/list":
         return {"tools": TOOLS}
     if m == "tools/call":

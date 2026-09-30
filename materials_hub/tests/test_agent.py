@@ -215,6 +215,128 @@ def test_tool_error_does_not_crash_loop():
     assert st["steps"][0]["ok"] is False
 
 
+def test_finish_drops_unseen_ids():
+    written = [_mat("m1"), _mat("m2")]
+    _reset(chat_models=lambda: ["fake"], search=_fake_search(written))
+    agent._chat = Script([
+        '{"todos":[{"id":1,"text":"检索"}]}',
+        '{"action":"search_materials","args":{"q":"bilibili"}}',
+        '{"action":"finish","args":{"summary":"找到两条","ids":["m1","fake999"]},"mark_done":[1]}',
+    ])
+    r = agent.agent_run("找出B站视频")
+    assert r["status"] == "done"
+    assert r["result_ids"] == ["m1"], r["result_ids"]
+    assert r["dropped_ids"] == ["fake999"], r["dropped_ids"]
+    assert "[核验]" in r["summary"] and "fake999" in r["summary"]
+    st = agent.agent_status(r["task_id"])
+    assert st["dropped_ids"] == ["fake999"], st["dropped_ids"]
+
+
+def test_related_tool():
+    m1 = _mat("m1"); m1["tags"] = "sp,job:J1,role:master"
+    m2 = _mat("m2"); m2["tags"] = "parent:m1"
+    m3 = _mat("m3"); m3["tags"] = "job:J1"
+    m4 = _mat("m4"); m4["tags"] = "role:master"
+    pool = [m1, m2, m3, m4]
+
+    def fake_get(mid):
+        return {"m1": m1, "m2": m2, "m3": m3, "m4": m4}.get(mid)
+
+    def fake_search(q="", kind="", tag="", limit=None, offset=0, mode="auto"):
+        if tag:
+            return [x for x in pool if tag in (x.get("tags") or "")]
+        if kind:
+            return [x for x in pool if x.get("kind") == kind]
+        return list(pool)
+
+    _reset(chat_models=lambda: ["fake"], get_material=fake_get, search=fake_search)
+    r = agent._tool_related({"id": "m1", "rel": "all"})
+    assert r["count"] == 3, r
+    assert {x["id"] for x in r["related"]} == {"m2", "m3", "m4"}, r
+    r2 = agent._tool_related({"id": "m1", "rel": "children"})
+    assert [x["id"] for x in r2["related"]] == ["m2"], r2
+    r3 = agent._tool_related({"id": "nope"})
+    assert "error" in r3, r3
+
+
+def test_record_memory_playbook():
+    import os as _os
+    m = _mat("m1", desc="去马赛克成片"); m["tags"] = "sp,type:deblur"
+    _reset(chat_models=lambda: ["fake"],
+           get_material=lambda mid: m if mid == "m1" else None,
+           search=_fake_search([m]))
+    if _os.path.exists(agent._MEMORY_PATH):
+        _os.remove(agent._MEMORY_PATH)
+    agent._chat = Script([
+        '{"todos":[{"id":1,"text":"检索"}]}',
+        '{"action":"search_materials","args":{"q":"去马赛克"}}',
+        '{"action":"finish","args":{"summary":"找到","ids":["m1"]},"mark_done":[1]}',
+    ])
+    r = agent.agent_run("找去马赛克成片")
+    assert r["status"] == "done"
+    assert _os.path.exists(agent._MEMORY_PATH), "成功任务应沉淀记忆"
+    pb = agent._load_playbook()
+    assert any(e["q"] == "去马赛克" for e in pb), pb
+    # 第二次同查询 → n 累加,且 hint 含有效 facet
+    agent._chat = Script([
+        '{"todos":[{"id":1,"text":"检索"}]}',
+        '{"action":"search_materials","args":{"q":"去马赛克"}}',
+        '{"action":"finish","args":{"summary":"找到","ids":["m1"]},"mark_done":[1]}',
+    ])
+    agent.agent_run("再找去马赛克成片")
+    pb2 = agent._load_playbook()
+    e = next(x for x in pb2 if x["q"] == "去马赛克")
+    assert e["n"] == 2, e
+    assert "type:deblur" in e["hint"], e
+
+
+def test_finish_citations_verified():
+    written = [_mat("m1")]
+    _reset(chat_models=lambda: ["fake"], search=_fake_search(written))
+    agent._chat = Script([
+        '{"todos":[{"id":1,"text":"检索"}]}',
+        '{"action":"search_materials","args":{"q":"x"}}',
+        '{"action":"finish","args":{"summary":"ok",'
+        '"citations":[{"claim":"成片","id":"m1"},{"claim":"不存在","id":"deadbeef0000"}]},'
+        '"mark_done":[1]}',
+    ])
+    r = agent.agent_run("检索")
+    assert r["status"] == "done"
+    cits = {c["id"]: c["valid"] for c in r["citations"]}
+    assert cits == {"m1": True, "deadbeef0000": False}, cits
+
+
+def test_finish_critic_flags_unverified_ids():
+    written = [_mat("m1")]
+    _reset(chat_models=lambda: ["fake"], search=_fake_search(written))
+    agent._chat = Script([
+        '{"todos":[{"id":1,"text":"检索"}]}',
+        '{"action":"search_materials","args":{"q":"x"}}',
+        '{"action":"finish","args":{"summary":"已处理 80ad93332bca 与 999999999999"},"mark_done":[1]}',
+    ])
+    r = agent.agent_run("检索")
+    assert r["status"] == "done"
+    assert set(r["critic"]["unverified_ids"]) == {"80ad93332bca", "999999999999"}, r["critic"]
+    assert "[Critic]" in r["summary"]
+    st = agent.agent_status(r["task_id"])
+    assert st["critic"]["unverified_ids"] == r["critic"]["unverified_ids"]
+
+
+def test_context_compression_rolling_digest():
+    _reset(chat_models=lambda: ["fake"])  # maintain 确定性,无需检索后端
+    script = ['{"todos":[{"id":1,"text":"巡检"}]}']
+    script += ['{"action":"maintain"}'] * 8
+    script += ['{"action":"finish","args":{"summary":"done"},"mark_done":[1]}']
+    agent._chat = Script(script)
+    r = agent.agent_run("巡检")
+    assert r["status"] == "done"
+    dig = r["context_digest"]
+    assert dig, "长任务应产生滚动摘要"
+    assert "step1[" in dig, dig          # 最早被逐出的步骤应进入摘要
+    assert "step8[" not in dig, dig      # 最近尾窗口(6)内步骤不进摘要
+    assert len(dig.splitlines()) >= 2, dig  # step1、step2 先后被逐出并压缩
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

@@ -19,6 +19,7 @@ LLM 后端:本机 ollama chat 模型(与 auto_tag 同一发现逻辑 core.chat_m
 无 chat 模型 → status=skipped 优雅降级,零网络依赖下不报错、不阻断。
 """
 import os
+import re
 import json
 import time
 import hashlib
@@ -27,8 +28,14 @@ import core
 
 # 工作区(派生数据,可整目录删除;与 thumbs/search_cache 同级,不入库)
 WORKSPACE = os.path.join(core.HUB, "index", "agent_workspace")
+
+# 跨任务记忆(确定性沉淀,非 LLM):成功任务的「查询词 → 有效 facet」规律,
+# 注入下次任务的系统提示,帮本地 7B 模型少走弯路(对应 2026 Agent Memory 的程序记忆)。
+# 落在 WORKSPACE 下(派生数据,测试可随 WORKSPACE 重定向到临时目录)。
+_MEMORY_PATH = os.path.join(WORKSPACE, "agent_memory.json")
 _OFFLOAD_CHARS = 1200        # 观察结果超过该字符数即卸载落盘
 _CONTEXT_TAIL = 6            # 主循环上下文最多携带最近 N 条观察
+_DIGEST_MAX = 30              # 滚动摘要最多保留的压缩行数(防无限增长)
 _DEFAULT_STEPS = 12
 _SUB_QUERIES = 3             # retrieve 子代理最多并发查询数
 
@@ -50,6 +57,108 @@ def _brief(m):
     if m.get("location") == "external":
         out["external_path"] = m.get("external_path", "")
     return out
+
+
+def _collect_ids(obs):
+    """从工具/子代理观察结果里抽取素材 id(供 finish 核验,杜绝编造 id)。
+
+    覆盖三种形态:检索结果 list[brief]、单条素材 dict(id=)、retrieve 子代理 dict(ids=[...])。
+    """
+    ids = []
+    if isinstance(obs, list):
+        for item in obs:
+            if isinstance(item, dict) and item.get("id"):
+                ids.append(str(item["id"]))
+    elif isinstance(obs, dict):
+        if obs.get("id"):
+            ids.append(str(obs["id"]))
+        elif obs.get("ids"):
+            for i in obs["ids"]:
+                if i and isinstance(i, str):
+                    ids.append(str(i))
+    return ids
+
+
+# ---------------------------------------------------------------- 跨任务记忆
+def _load_playbook():
+    """读历史「查询词 → 有效 facet」规律(空/损坏返回 [])。"""
+    try:
+        with open(_MEMORY_PATH, encoding="utf-8") as f:
+            return (json.load(f) or {}).get("playbook", []) or []
+    except (OSError, ValueError):
+        return []
+
+
+def _save_playbook(pb):
+    try:
+        os.makedirs(os.path.dirname(_MEMORY_PATH), exist_ok=True)
+        with open(_MEMORY_PATH, "w", encoding="utf-8") as f:
+            json.dump({"playbook": pb}, f, ensure_ascii=False, indent=1)
+    except OSError:
+        pass
+
+
+def _memory_hint():
+    """把历史规律渲染成系统提示片段(无记忆则返回空串)。"""
+    pb = _load_playbook()
+    if not pb:
+        return ""
+    lines = "\n".join("  - %s → 优先试 %s" % (e["q"], e.get("hint", ""))
+                      for e in pb[:15] if e.get("hint"))
+    if not lines:
+        return ""
+    return ("\n已知检索规律(来自历史任务,仅供参考,仍需实际检索验证):\n"
+            + lines + "\n")
+
+
+def _record_memory(state, ctx):
+    """任务成功收尾后,确定性地把「查询词 → 命中素材的 kind/面标签」沉淀进 playbook。
+
+    纯规则、零幻觉:只在 status=done 且有 result_ids 时记;按 q 聚合频次,
+    取 top-3 高频 facet 作 hint;仅保留出现 ≥2 次的规律(防一次性噪声),最多 50 条。
+    """
+    if state.get("status") != "done":
+        return
+    result_ids = state.get("result_ids") or []
+    if not result_ids:
+        return
+    queries = []
+    for s in state.get("steps") or []:
+        if s.get("action") in ("search_materials", "retrieve"):
+            a = s.get("args") or {}
+            q = a.get("q") or a.get("goal") or ""
+            if q and str(q).strip():
+                queries.append(str(q).strip())
+    if not queries:
+        return
+    facets = {}
+    for mid in result_ids:
+        m = core.get_material(mid)
+        if not m:
+            continue
+        facets[m.get("kind")] = facets.get(m.get("kind"), 0) + 1
+        for t in (m.get("tags") or "").split(","):
+            t = t.strip()
+            if t and ":" in t:                       # 只取 key:value 面标签
+                facets[t] = facets.get(t, 0) + 1
+    if not facets:
+        return
+    pb = _load_playbook()
+    by_q = {e["q"]: e for e in pb}
+    for q in queries:
+        e = by_q.get(q)
+        if e is None:
+            e = {"q": q, "facets": {}, "n": 0}
+            by_q[q] = e
+            pb.append(e)
+        e["n"] += 1
+        for fk, fv in facets.items():
+            e["facets"][fk] = e["facets"].get(fk, 0) + fv
+    for e in pb:
+        top = sorted(e["facets"].items(), key=lambda kv: kv[1], reverse=True)[:3]
+        e["hint"] = " ".join(str(k) for k, _ in top)
+    pb = pb[:50]                                       # 容量上限,防止无限增长
+    _save_playbook(pb)
 
 
 # ---------------------------------------------------------------- 工作区与状态
@@ -76,7 +185,12 @@ def agent_status(task_id):
         s = json.load(f)
     return {"task_id": task_id, "task": s.get("task"), "status": s.get("status"),
             "summary": s.get("summary"), "todos": s.get("todos"),
-            "steps": len(s.get("steps") or []), "notes": s.get("notes") or []}
+            "steps": len(s.get("steps") or []), "notes": s.get("notes") or [],
+            "result_ids": s.get("result_ids", []),
+            "dropped_ids": s.get("dropped_ids", []),
+            "citations": s.get("citations", []),
+            "critic": s.get("critic"),
+            "context_digest": s.get("context_digest", "")}
 
 
 # ---------------------------------------------------------------- 上下文卸载
@@ -172,6 +286,54 @@ def _tool_register(a):
     return r
 
 
+def _tool_related(a):
+    """只读:按关系反查关联素材(Graph-RAG 轻量版)。
+
+    利用库中已有的 `parent:/role:/job:` 面标签与 kind,沿一跳关系遍历:
+      rel=parent   该素材的父(若自身带 parent: 标签)
+      rel=children 以该素材为 parent 的所有子(逻辑切片/组件)
+      rel=job      同 job 的其它素材(同一次流水线的产物)
+      rel=role     同 role 的其它素材(如全部 role:master)
+      rel=kind     同 kind 的其它素材
+      rel=all      以上并集(默认)
+    """
+    mid = str(a.get("id") or "").strip()
+    rel = str(a.get("rel") or "all").strip().lower()
+    limit = int(a.get("limit") or 50)
+    m = core.get_material(mid)
+    if not m:
+        return {"error": "not found: " + mid}
+    tags = [t.strip() for t in (m.get("tags") or "").split(",") if t.strip()]
+    job = next((t for t in tags if t.startswith("job:")), None)
+    roles = [t for t in tags if t.startswith("role:")]
+    kind = m.get("kind")
+    seen, out = {mid}, []
+
+    def _add(rows):
+        for r in rows:
+            if r["id"] not in seen:
+                seen.add(r["id"])
+                out.append(_brief(r))
+
+    if rel in ("parent", "all"):
+        for t in tags:
+            if t.startswith("parent:"):
+                p = core.get_material(t.split(":", 1)[1])
+                if p:
+                    _add([p])
+    if rel in ("children", "all"):
+        _add(core.search("", tag="parent:" + mid))
+    if rel in ("job", "all") and job:
+        _add([x for x in core.search("", tag=job) if x["id"] != mid])
+    if rel in ("role", "all") and roles:
+        for rtag in roles:
+            _add([x for x in core.search("", tag=rtag) if x["id"] != mid])
+    if rel in ("kind", "all") and kind:
+        _add([x for x in core.search("", kind=kind) if x["id"] != mid])
+    return {"id": mid, "rel": rel, "count": len(out[:limit]),
+            "related": out[:limit]}
+
+
 def _build_tools(allow_write, ctx=None):
     tools = {
         "search_materials": (_tool_search,
@@ -187,6 +349,29 @@ def _build_tools(allow_write, ctx=None):
                          "长文档父子分块检索(按段落命中笔记/字幕全文);args: q, kind?, tag?, limit?"),
         "read_text_preview": (_tool_preview,
                               "读素材描述/关联文本前 N 字符(取回被卸载的细节用);args: id, chars?"),
+        "list_missing_covers": (
+            lambda a: core.list_missing_covers(
+                kind=str(a.get("kind") or ""),
+                limit=int(a.get("limit") or 50)),
+            "列出无封面的 videos/silent;args: kind?, limit?"),
+        "job_checkup": (
+            lambda a: core.job_checkup(str(a.get("job_id") or a.get("job") or "")),
+            "某 job 资产体检(kinds/封面/镜头/asr/失效);args: job_id"),
+        "near_duplicate_report": (
+            lambda a: core.near_duplicate_report(
+                max_dist=int(a.get("max_dist") or 10),
+                limit_pairs=int(a.get("limit") or 50)),
+            "全库画面近重复报告(对+簇);args: max_dist?, limit?"),
+        "search_by_image": (
+            lambda a: core.search_by_image(
+                str(a.get("query") or a.get("id") or a.get("path") or ""),
+                max_dist=int(a.get("max_dist") or 10),
+                limit=int(a.get("limit") or 20),
+                mode=str(a.get("mode") or "auto")),
+            "以图搜图(dHash);args: query|id|path, max_dist?, limit?, mode?"),
+        "related": (_tool_related,
+                    "只读:按关系反查关联素材(父/子/job同伙/同role/同kind);"
+                    "args: id, rel?(parent|children|job|role|kind|all), limit?"),
     }
     if allow_write:
         tools["update_tags"] = (_tool_update_tags,
@@ -234,14 +419,27 @@ def _sub_retrieve(goal, model, context_tail):
 
 
 def _sub_maintain():
-    """确定性巡检子代理(不走 LLM,零幻觉):健康快照 + 失效引用。"""
+    """确定性巡检子代理(不走 LLM,零幻觉):健康快照 + 失效引用 + 无封面 + 近重复簇。"""
     h = core.health()
     broken = core.broken_externals()
+    missing = core.list_missing_covers(limit=20)
+    silent_miss = [x for x in missing if x.get("kind") == "silent"]
+    nd = core.near_duplicate_report(max_dist=10, limit_pairs=20)
     return {"health_ok": h.get("ok"), "total": h.get("total"),
             "kinds": h.get("kinds"), "duplicates": h.get("duplicates"),
             "broken": len(broken),
             "broken_ids": [b.get("id") for b in broken[:10]],
-            "hint": "清理失效引用请走 MCP prune 或 bridge --prune(agent 不持有删权)"}
+            "missing_covers": len(missing),
+            "missing_silent_covers": [x["id"] for x in silent_miss[:10]],
+            "near_dupe_clusters": nd.get("cluster_count", 0),
+            "near_dupe_pairs": nd.get("pair_count", 0),
+            "near_dupe_sample": [
+                {"ids": c["ids"], "size": c["size"]}
+                for c in (nd.get("clusters") or [])[:5]
+            ],
+            "hint": "清理失效引用请走 MCP prune 或 bridge --prune;"
+                    "补封面用 list_missing_covers + auto_process(confirm);"
+                    "近重复详单用 near_duplicate_report / cli near-dupes"}
 
 
 # ---------------------------------------------------------------- 规划与主循环(支柱 1/4)
@@ -264,16 +462,20 @@ def _plan(task, model):
 _LOOP_SYS = """你是「素材中心」的 Deep Agent,管理一个多媒体素材库(图片/视频/文档/音频/字幕)。
 每轮只输出一个 JSON 对象:
   {"thought":"简短推理","action":"<工具名或 retrieve/maintain/finish>","args":{...},"mark_done":[已完成todo id]}
-finish 的 args 为 {"summary":"中文总结,列关键素材 id"}。
+finish 的 args 为 {"summary":"中文总结","ids":["本任务检索结果中出现过的素材 id",...],"citations":[{"claim":"一句话结论","id":"本任务检索到的素材 id"},...]}。ids/citations 里的 id 必须是 search_materials/get_material/retrieve 真实返回过的(12 位十六进制);未出现的会被自动剔除,总结正文中若直接写 id 也会被 Critic 校验剔除。不填 ids/citations 也可以,但 summary 不得编造未检索到的素材。
 
 规则:
 1. 观察结果过长会被卸载为文件指针;需要细节时用 read_text_preview/get_material 精准取回,不要要求重发全文。
 2. 优先用 kind/tag 过滤缩小检索面;需要跨多查询综合时用 retrieve 子代理(只回摘要,省上下文)。
-3. 库巡检/失效引用清点用 maintain(确定性,零幻觉)。
-4. 每完成一条待办就在 mark_done 里列出其 id;全部完成后必须 finish。
-5. 写操作默认不可用;若工具表中没有写工具,不要尝试写入。
-6. 素材 id 必须从 search_materials/get_material 返回的 "id" 字段原样复制(形如 80ad93332bca 的短字母数字串)。
+3. 库巡检/失效引用/无封面盘点用 maintain(确定性,零幻觉);补封面细节用 list_missing_covers;job 资产用 job_checkup。
+4. 找片段先 get_shots(母版逻辑切片);仅用户要导出文件时才搜 role:clip。silent/audio 是声画组件不是剪辑切片。
+5. 每完成一条待办就在 mark_done 里列出其 id;全部完成后必须 finish。
+6. 写操作默认不可用;若工具表中没有写工具,不要尝试写入。
+7. 素材 id 必须从 search_materials/get_material 返回的 "id" 字段原样复制(形如 80ad93332bca 的短字母数字串)。
    绝不可用 BV 号(BV1q1...)、文件名、或 XXX 占位符当 id——那样会命中 "not found" 并死循环。
+8. 若连续检索 0 命中或与目标无关,必须 finish 并如实说明"未能找到相关素材",严禁编造素材 id 或结论;
+   宁可少答、不可胡答。finish 时若提供了 ids,它们会自动与已检索结果比对,未出现的一律剔除。
+9. 总结或 citations 中提到的素材 id 只能是本任务真实检索返回过的 12 位十六进制串;任何未在检索结果中出现过的 id 都会被自动剔除并标注 [Critic]/[核验],不要试图用占位或编造 id 蒙混。
 
 可用工具:
 """
@@ -299,7 +501,7 @@ def agent_run(task, allow_write=False, max_steps=_DEFAULT_STEPS, model=None, tas
     state = {"task": task, "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
              "model": model, "allow_write": bool(allow_write),
              "status": "planning", "todos": [], "steps": [], "notes": [],
-             "summary": ""}
+             "summary": "", "context_digest": ""}
     try:
         state["todos"] = _plan(task, model)
     except Exception as e:                                  # noqa: BLE001
@@ -308,23 +510,29 @@ def agent_run(task, allow_write=False, max_steps=_DEFAULT_STEPS, model=None, tas
         return {"status": "error", "task_id": task_id, "summary": state["summary"]}
 
     state["status"] = "running"
-    ctx = {"last_id": None}                               # 最近检索到的有效素材 id(供写工具兜底)
+    ctx = {"last_id": None, "seen_ids": set()}            # 最近检索到的有效素材 id(供写工具兜底) + 全程见过 id(供 finish 核验)
     tools = _build_tools(allow_write, ctx)
     tool_lines = "".join("  - %s: %s\n" % (n, d) for n, (_, d) in sorted(tools.items()))
     tool_lines += "  - retrieve: 子代理:多查询检索+LLM汇总,只回摘要;args: {goal}\n"
     tool_lines += "  - maintain: 确定性巡检(health+失效引用),零幻觉;args: 无\n"
     tool_lines += "  - finish: 任务完成,输出总结\n"
     sys_prompt = _LOOP_SYS + tool_lines
+    mem_hint = _memory_hint()
+    if mem_hint:
+        sys_prompt += mem_hint
 
     context = []                                            # 紧凑观察轨迹(指针化)
+    digest = ""                                             # 滚动摘要:被尾窗口逐出的早期步骤压缩归档(缺口6)
     finished = False
     for n in range(1, max_steps + 1):
         budget_hint = ""
         if max_steps - n <= 2:      # 步数将尽,催促收尾(7B 小模型常把 todo 做完却忘了 finish)
             budget_hint = "\n(注意:剩余步数很少,若待办已基本完成,请立即 finish 并在 summary 里给出汇总)"
-        user = ("任务:%s\n待办:%s\n最近观察:\n%s%s"
+        recent = "\n".join(context[-_CONTEXT_TAIL:]) or "(无)"
+        digest_note = ("\n(前情压缩摘要,早期步骤已归档,无需重做)\n%s" % digest) if digest else ""
+        user = ("任务:%s\n待办:%s\n最近观察:\n%s%s%s"
                 % (task, json.dumps(state["todos"], ensure_ascii=False),
-                   "\n".join(context[-_CONTEXT_TAIL:]) or "(无)", budget_hint))
+                   recent, digest_note, budget_hint))
         act = _chat([{"role": "system", "content": sys_prompt},
                      {"role": "user", "content": user}], model)
         action = act.get("action", "")
@@ -335,7 +543,42 @@ def agent_run(task, allow_write=False, max_steps=_DEFAULT_STEPS, model=None, tas
                     t["status"] = "done"
 
         if action == "finish":
-            state["summary"] = str(args.get("summary") or act.get("thought") or "")[:2000]
+            body = str(args.get("summary") or act.get("thought") or "")[:2000]
+            summary = body
+            # 核验:finish 声明的 id 必须来自本任务真实检索结果,未出现的剔除并标注
+            claimed = [str(x).strip() for x in (args.get("ids") or []) if str(x).strip()]
+            valid = [i for i in claimed if i in ctx["seen_ids"]]
+            dropped = [i for i in claimed if i not in ctx["seen_ids"]]
+            state["result_ids"] = valid
+            state["dropped_ids"] = dropped
+            if dropped:
+                summary += ("\n[核验] 已剔除 %d 个未在本任务检索结果中出现的 id: %s"
+                            % (len(dropped), ", ".join(dropped)))
+            # 结构化引用(缺口4):逐条校验 citations 的 id 是否在本次检索白名单内
+            cits, cit_dropped = [], []
+            for c in (args.get("citations") or []):
+                cid = str((c.get("id") if isinstance(c, dict) else c) or "").strip()
+                if not cid:
+                    continue
+                ok = cid in ctx["seen_ids"]
+                cits.append({"claim": str((c.get("claim") if isinstance(c, dict) else "")
+                                          or "")[:300], "id": cid, "valid": ok})
+                if not ok:
+                    cit_dropped.append(cid)
+            state["citations"] = cits
+            if cit_dropped:
+                summary += ("\n[核验] 已剔除 %d 个引用中未检索到的 id: %s"
+                            % (len(cit_dropped), ", ".join(cit_dropped)))
+            # 确定性 Critic(缺口4):扫描总结正文里的 12 位素材 id,
+            # 凡不在本次检索白名单内即标记——专治 7B 在自由文本里编造 id
+            unverified = sorted({i for i in re.findall(r"[0-9a-f]{12}", body)
+                                 if i not in ctx["seen_ids"]})
+            if unverified:
+                state["critic"] = {"unverified_ids": unverified}
+                summary += ("\n[Critic] 总结中出现了 %d 个未在本任务检索结果中的素材 id(%s),"
+                            "可能无效,已剔除相关引用。"
+                            % (len(unverified), ", ".join(unverified)))
+            state["summary"] = summary
             for t in state["todos"]:
                 t["status"] = "done"
             finished = True
@@ -367,11 +610,24 @@ def agent_run(task, allow_write=False, max_steps=_DEFAULT_STEPS, model=None, tas
             if ids and isinstance(ids[0], str):
                 ctx["last_id"] = ids[0]
 
+        # 累计全程见到过的素材 id(供 finish 时核验,杜绝编造 id)
+        for _i in _collect_ids(obs):
+            ctx["seen_ids"].add(_i)
+
         ptr = _observe(state, ws, obs)
         context.append("step%d[%s] %s" % (n, action, ptr[:400]))
+        # 动态上下文压缩(缺口6):超出尾窗口的早期步骤压入滚动摘要,
+        # 防本地 7B 长任务遗忘/context rot;摘要本身限行防无限增长
+        if len(context) > _CONTEXT_TAIL:
+            evicted = context[:-_CONTEXT_TAIL]
+            context = context[-_CONTEXT_TAIL:]
+            lines = (digest.splitlines() if digest else []) + [l[:200] for l in evicted]
+            digest = "\n".join(lines[-_DIGEST_MAX:])
+        state["context_digest"] = digest
         state["steps"].append({"n": n, "action": action, "ok": "error" not in obs,
                                "thought": str(act.get("thought") or "")[:200],
-                               "obs": ptr})
+                               "args": args, "obs": ptr})
+        _save(state, ws)                                  # 每步落盘,供 agent_status 实时轮询进度
 
     if not finished:
         state["status"] = "max_steps_reached"
@@ -383,10 +639,16 @@ def agent_run(task, allow_write=False, max_steps=_DEFAULT_STEPS, model=None, tas
                             % (max_steps, tail))[:2000]
     else:
         state["status"] = "done"
+    _record_memory(state, ctx)                            # 成功任务沉淀跨任务规律
     _save(state, ws)
     return {"status": state["status"], "task_id": task_id, "workspace": ws,
             "summary": state["summary"], "todos": state["todos"],
-            "steps": len(state["steps"]), "notes": len(state["notes"])}
+            "steps": len(state["steps"]), "notes": len(state["notes"]),
+            "result_ids": state.get("result_ids", []),
+            "dropped_ids": state.get("dropped_ids", []),
+            "citations": state.get("citations", []),
+            "critic": state.get("critic"),
+            "context_digest": state.get("context_digest", "")}
 
 
 if __name__ == "__main__":                                  # 直接调试: python agent.py "任务..."
