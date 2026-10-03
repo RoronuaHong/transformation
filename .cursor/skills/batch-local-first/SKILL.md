@@ -15,7 +15,8 @@ description: Processes pending queue jobs with ASR/translate/notes and optional 
 - Site pack: `--langs site` (**16 langs**, same as `transform/lib/locales.ts`; pack name `site`, frontend dir `transform/`). Default in `pipeline.py` / `yarn batch` / `yarn full`. `yarn translate` still passes `--langs all` when you want the full set.
 - Notes (WF-02): source-lang `one_liner`/`summary`/`focuses`/`key_points`/`hard_points`, then localize to the same lang pack as captions.
 - Parallel translate / notes localize: `--lang-workers N` or env `VITUAL_LANG_WORKERS` (default **2**, max 8). Whisper/fetch stay serial.
-- After source SRT: **source notes ∥ subtitle translate** (fork). Notes localize still waits on source notes.
+- ASR default: **multipass** + LLM-1 suspicious polish + LLM-2 glossary/full correct (see `PIPELINE_BEST_PRACTICES.md`).
+- After source SRT: **source notes 与 subtitle translate 串行**（先 translate 再 notes；CPU-only Ollama 下并行会互相抢占致 summary 600s 超时，串行更快）。Notes localize 仍等待 source notes 完成。
 - GIF/MP4 cuts: parallel ffmpeg via `VITUAL_CLIP_WORKERS` (default **2**).
 - Controllable `--stages`:
   - `all` / `content` — 内容轨（fetch…clips），**不含** postproc
@@ -29,8 +30,7 @@ description: Processes pending queue jobs with ASR/translate/notes and optional 
 - Whisper stays local. Secrets: `llm.yaml` / `.env` are gitignored.
 - Source language in content.db / filenames must be a real code (`en`, `zh`, …), **never** `src`.
 - Config sample: `subtitle_pipeline/llm.example.yaml`.
-- Docs: `trans/加工闭环.md`, `trans/多语言与笔记.md`, `trans/模型可替换方案.md`. 验收: `main-path`. 日更: `ops-api`.
-
+- Docs: `PIPELINE_BEST_PRACTICES.md`（全链路对齐）, `trans/加工闭环.md`, `trans/多语言与笔记.md`. 验收: `main-path`. 日更: `ops-api`.
 ## Commands (cwd = subtitle_pipeline)
 
 ```bash

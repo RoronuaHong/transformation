@@ -9,7 +9,12 @@ description: Orchestrates the full inbox → batch → export-site → Next.js b
 > **本文只编排已实现验收**：WF-01 翻译 + WF-02 笔记 + 导出/SEO 旁路（N0–N8）。  
 > 不是「全部工作流」总编排；增强/压缩/拼接/二创/发布另立 skill。
 
-Stage manuals：`daily-discover`、`batch-local-first`、`sync-subs`。人类文档：`trans/全链路验证清单.md`、`trans/加工闭环.md`。
+Stage manuals：`daily-discover`、`batch-local-first`、`sync-subs`。  
+全链路最佳实践：`subtitle_pipeline/PIPELINE_BEST_PRACTICES.md`。  
+人类文档：`trans/全链路验证清单.md`、`trans/加工闭环.md`。
+
+发布级 ASR（非 smoke）：`yarn batch` / `yarn batch:release` / Try（multipass+双 LLM）。
+`batch:fast` 仅速度烟测，**不要**当字幕质量验收。
 
 ## Default vs daily
 

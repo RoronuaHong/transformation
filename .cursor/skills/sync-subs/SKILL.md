@@ -20,7 +20,8 @@ description: Keeps subtitle timelines aligned with the source video clock. Use w
 
 - Full-video embed + clip-only ASR requires `--slice-start-sec`.
 - Translate write: `assert_timeline_aligned` (hard fail).
-- Polish/correct must not split/merge cues.
+- Polish/correct must not split/merge cues（见 `PIPELINE_BEST_PRACTICES.md` §3：LLM 只改正文、锁时间戳；截断回补 pass A）。
+- Soft readability QA（CPS/时长）写入 `sync_meta.qa`，**不改轴**。
 - Embed ads offset: measure embed vs download, then `yarn shift-embed --work … --ms N` or `--embed-shift-ms`.
 - Multi-slice ASR: `yarn merge-slices --work …` (never `cat` zero-based clip SRTs).
 - ASR writes `{stem}_sync_meta.json`.
