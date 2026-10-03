@@ -103,6 +103,7 @@ def test_build_shot_index_ok_and_history():
         restore()
     assert r["status"] == "ok" and r["scenes"] == 3 and r["duration"] == 10.0, r
     assert calls and calls[0][0] == "ffmpeg", calls          # 用的是打桩的 ffmpeg
+    assert "-v" in calls[0] and calls[0][calls[0].index("-v") + 1] == "info", calls[0]
     # sidecar JSON 可读,片段为 3 段 [0-2.5, 2.5-7.1, 7.1-10]
     d = core.get_shots("s1")
     assert d and len(d["scenes"]) == 3, d
@@ -114,6 +115,27 @@ def test_build_shot_index_ok_and_history():
     hs = core.get_history(limit=10, target_id="s1")
     assert any(h["action"] == "shot_index" and h["detail"] == "scenes=3" for h in hs), hs
     print("PASS test_build_shot_index_ok_and_history")
+
+
+def test_thin_cuts_and_interval_fallback():
+    assert core._thin_cuts([1, 2, 3, 4, 5, 6], 3) == [1, 3, 6]
+    assert core._thin_cuts([1.0, 2.0], 10) == [1.0, 2.0]
+    _mk_material("s_int")
+    restore, calls = _mock_ffmpeg_env(stderr=b"frame=1\n")  # 无 pts_time → 空切点
+    # dur>12 才走 interval;打桩改成 100s
+    orig_dur = core._probe_duration
+    core._probe_duration = lambda p: 100.0
+    try:
+        r = core.build_shot_index("s_int", force=True)
+    finally:
+        core._probe_duration = orig_dur
+        restore()
+    assert r["status"] == "ok" and r["scenes"] >= 5, r
+    d = core.get_shots("s_int")
+    assert str(d.get("threshold", "")).startswith("interval:"), d
+    # 主档空 → 还会尝试 FALLBACK_LOW,至少 1 次 ffmpeg
+    assert len(calls) >= 1
+    print("PASS test_thin_cuts_and_interval_fallback")
 
 
 def test_build_shot_index_cached_no_subprocess():
@@ -177,6 +199,7 @@ def test_get_shots_roundtrip():
 if __name__ == "__main__":
     test_shot_sidecar_path_injection()
     test_build_shot_index_ok_and_history()
+    test_thin_cuts_and_interval_fallback()
     test_build_shot_index_cached_no_subprocess()
     test_build_shot_index_no_ffmpeg_and_guards()
     test_get_shots_roundtrip()

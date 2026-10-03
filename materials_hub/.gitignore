@@ -1,0 +1,4 @@
+# Local derived / large binaries (do not commit)
+models/clip/*.pt
+models/clip/**/*.bin
+index/_clip_frames/

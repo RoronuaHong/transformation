@@ -31,6 +31,7 @@
   python cli.py imgembed [--force] [--limit N] [--status]  建/查 CLIP 图像向量索引
   python cli.py auto [--limit N] [--autotag]  一条命令跑完自动处理链:封面→OCR→镜头索引→pHash→(可选)打标→语义索引(幂等)
   python cli.py facets [--limit N] [--link-clips|--link-parents]  补 DAM 面标签 + 回填 parent:
+  python cli.py facets [--scrub]  去掉与 parent: 重复的旧 from: 别名(库内治理)
   python cli.py agent --task "..."      Deep Agent 多步任务(LLM 拆待办→逐步执行,见 agent.py)
   python cli.py agent --task "..." --write  允许 agent 写(标签/登记;默认只读)
   python cli.py agent --status <id>     查看某次 agent 任务的状态与轨迹
@@ -55,7 +56,7 @@ from core import (
     search_by_image, search_by_text_image, clip_probe,
     build_image_embeddings, image_embed_status,
     auto_process_all, pending_processing,
-    apply_media_facet_tags, link_relation_parents,
+    apply_media_facet_tags, link_relation_parents, scrub_deprecated_from_tags,
 )
 
 
@@ -321,6 +322,9 @@ def main():
             link = link_relation_parents(limit=limit)
             print(f"link-parents: linked={link.get('linked')} "
                   f"clips={link.get('clips')} components={link.get('components')}")
+        if "--scrub" in args:
+            s = scrub_deprecated_from_tags(limit=limit)
+            print(f"scrub-from: scanned={s.get('scanned')} cleaned={s.get('cleaned')}")
 
     elif cmd == "embed":
         st = embed_status()

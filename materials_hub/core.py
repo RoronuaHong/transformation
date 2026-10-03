@@ -53,14 +53,19 @@ def external_path_allowed(p):
         return False
     return any(p == r or p.startswith(r + os.sep) for r in EXT_ROOTS)
 
-# 按扩展名分类。audio 单独成类便于检索。
+# kinds that get ffmpeg thumbs / visual auto-process
+VIDEO_LIKE_KINDS = ("videos", "silent")
+VISUAL_KINDS = ("videos", "silent", "images")
+# 按扩展名分类。video 容器再按「是否有音轨」拆成 videos / silent（无声）。
+VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".flv", ".ts"}
 KINDS = {
     "images": {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".svg", ".tif", ".tiff", ".ico", ".heic"},
     "anim": {".gif"},
-    "videos": {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".flv", ".ts"},
+    "videos": set(VIDEO_EXTS),          # 有音轨的画面
+    "silent": set(VIDEO_EXTS),          # 无声音轨的画面（同扩展名，靠探测分流）
     "docs": {".pdf", ".md", ".txt", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx",
              ".csv", ".json", ".yaml", ".yml", ".html", ".epub", ".rtf"},
-    "audio": {".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac"},
+    "audio": {".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac"},  # 纯音轨
     "subs": {".srt", ".ass", ".ssa", ".vtt", ".sub", ".sbv"},
 }
 
@@ -74,12 +79,473 @@ def init_hub():
     _init_db()
 
 
+def probe_has_audio(path, timeout=20):
+    """True when the file has at least one audio stream (ffprobe preferred).
+
+    Fail-open → True（探测失败仍归 videos，避免误丢进无声）。
+    """
+    if not path or not os.path.isfile(path):
+        return True
+    exe = _ffprobe_path()
+    flags = 0x08000000 if os.name == "nt" else 0
+    if exe:
+        try:
+            p = subprocess.run(
+                [
+                    exe, "-v", "error", "-select_streams", "a",
+                    "-show_entries", "stream=codec_type",
+                    "-of", "csv=p=0", path,
+                ],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                timeout=timeout, creationflags=flags,
+            )
+            out = (p.stdout or b"").decode("utf-8", "ignore").strip()
+            if out:
+                return True
+            # empty stdout with exit 0 → no audio streams
+            if p.returncode == 0:
+                return False
+        except Exception:
+            pass
+    # Fallback: ffmpeg -i stderr scan
+    ff = ffmpeg_path()
+    if not ff:
+        return True
+    try:
+        p = subprocess.run(
+            [ff, "-i", path],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            timeout=timeout, creationflags=flags,
+        )
+        err = (p.stderr or b"").decode("utf-8", "ignore").lower()
+        if re.search(r"audio:\s*\w+", err) or re.search(
+            r"stream\s+#\d+:\d+.*?\baudio\b", err
+        ):
+            return True
+        if re.search(r"video:\s*\w+", err) or re.search(
+            r"stream\s+#\d+:\d+.*?\bvideo\b", err
+        ):
+            return False
+    except Exception:
+        return True
+    return True
+
+
+def is_physical_clip_path(path):
+    """SP 交付切片: media/clips/range_XX.mp4（逻辑镜头仍只在 shots sidecar）。"""
+    low = (path or "").replace("\\", "/").lower()
+    base = os.path.basename(low)
+    if "/media/clips/" in low:
+        return True
+    if re.match(r"range_\d+\.(mp4|mkv|mov|webm)$", base):
+        return True
+    return False
+
+
+def load_clip_timecodes(path):
+    """从同目录 clips_meta.json 取该切片在母版上的 (t_start, t_end)；没有则 (None, None)。"""
+    if not path:
+        return None, None
+    meta_path = os.path.join(os.path.dirname(path), "clips_meta.json")
+    if not os.path.isfile(meta_path):
+        return None, None
+    try:
+        with open(meta_path, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+    except Exception:
+        return None, None
+    spans = data.get("spans") if isinstance(data, dict) else None
+    if not isinstance(spans, list):
+        return None, None
+    base = os.path.basename(path)
+    for row in spans:
+        if not isinstance(row, dict):
+            continue
+        if (row.get("file") or "") != base:
+            continue
+        try:
+            return float(row["start"]), float(row["end"])
+        except (KeyError, TypeError, ValueError):
+            return None, None
+    return None, None
+
+
+def relation_tags(parent_id=None, t_start=None, t_end=None):
+    """母版–子件关系标签: parent: + 可选时间码(物理 clip 用)。
+
+    不再双写 from:(与 parent: 同义,面板易混淆);读路径仍识别旧 from:。"""
+    tags = []
+    pid = (parent_id or "").strip()
+    if pid:
+        tags.append("parent:" + pid)
+    if t_start is not None and t_end is not None:
+        try:
+            tags.append("t_start:%.3f" % float(t_start))
+            tags.append("t_end:%.3f" % float(t_end))
+        except (TypeError, ValueError):
+            pass
+    return tags
+
+
+def inherit_parent_context_tags(parent_id):
+    """子件继承母版上下文: sp / job: / 平台名(便于 job_checkup 同筛)。"""
+    m = get_material(parent_id) if parent_id else None
+    if not m:
+        return []
+    out = []
+    for t in _material_tag_set(m):
+        if t == "sp" or t.startswith("job:") or t in (
+            "bilibili", "youtube", "upload", "sp",
+        ):
+            out.append(t)
+    return out
+
+
+def _material_tag_set(m_or_tags):
+    if isinstance(m_or_tags, dict):
+        raw = m_or_tags.get("tags") or ""
+    elif isinstance(m_or_tags, (set, list, tuple)):
+        return {str(t).strip() for t in m_or_tags if str(t).strip()}
+    else:
+        raw = m_or_tags or ""
+    return {t.strip() for t in raw.split(",") if t.strip()}
+
+
+def is_role_clip(m_or_tags):
+    return "role:clip" in _material_tag_set(m_or_tags)
+
+
+def is_role_master(m_or_tags):
+    tags = _material_tag_set(m_or_tags)
+    return "role:master" in tags and "role:clip" not in tags
+
+
+def coerce_role_tags(tags_csv, *, kind=None, path=None):
+    """互斥整理 role:：clip 与 master 不同时存在；非 clip 的 videos 补 role:master。"""
+    parts = [t.strip() for t in (tags_csv or "").split(",") if t.strip()]
+    tags = set(parts)
+    path_is_clip = bool(path) and is_physical_clip_path(path)
+    if path_is_clip or "role:clip" in tags or "type:clip" in tags:
+        tags.add("role:clip")
+        tags.add("type:clip")
+        tags.discard("role:master")
+        tags.discard("role:picture")
+    elif (kind or "") == "videos" or "role:picture" in tags:
+        if "role:clip" not in tags:
+            tags.add("role:master")
+            if "has_audio:0" not in tags:
+                tags.add("role:picture")
+    out = []
+    seen = set()
+    for t in parts:
+        if t not in tags or t in seen:
+            continue
+        out.append(t)
+        seen.add(t)
+    for t in ("role:master", "role:picture", "role:clip", "type:clip"):
+        if t in tags and t not in seen:
+            out.append(t)
+            seen.add(t)
+    for t in sorted(tags):
+        if t not in seen:
+            out.append(t)
+            seen.add(t)
+    return ",".join(out)
+
+
+def media_facet_tags(path, kind=None):
+    """DAM 面标签: master / clip / silent-picture / audio-stem。
+
+    四层模型(方案 A): 母版文件 + shots 逻辑切片 + silent/audio 组件 + 可选物理 clip。
+    物理切片路径 → role:clip(不当 master); 有声源片 → role:master+role:picture。
+    """
+    kind = kind or classify(path)
+    name = os.path.basename(path or "").lower()
+    tags = []
+    if kind == "silent":
+        tags.extend(["role:silent-picture", "has_audio:0"])
+    elif kind == "videos":
+        if is_physical_clip_path(path):
+            tags.extend(["role:clip", "type:clip", "has_audio:1"])
+            t0, t1 = load_clip_timecodes(path)
+            tags.extend(relation_tags(t_start=t0, t_end=t1))
+        else:
+            tags.extend(["role:master", "role:picture", "has_audio:1"])
+    elif kind == "audio":
+        tags.append("role:audio-stem")
+        tags.append("has_audio:1")
+        if "16k" in name or name.startswith("full_16k"):
+            tags.append("asr")
+    return tags
+
+
+def _merge_tag_csv(old, extra):
+    parts = [t.strip() for t in (old or "").split(",") if t.strip()]
+    for t in extra or []:
+        t = (t or "").strip()
+        if t and t not in parts:
+            parts.append(t)
+    return ",".join(parts)
+
+
+def _masters_by_job(all_ms=None):
+    """job: → 最佳母版 id(优先 role:master)。"""
+    all_ms = all_ms if all_ms is not None else all_materials()
+    best = {}
+    for x in all_ms:
+        if x.get("kind") != "videos" or is_role_clip(x):
+            continue
+        xt = _material_tag_set(x)
+        for t in xt:
+            if not t.startswith("job:"):
+                continue
+            cur = best.get(t)
+            if cur is None or "role:master" in xt:
+                best[t] = x["id"]
+    return best
+
+
+def _video_stem_index(all_ms=None):
+    """文件名 stem → 母版 id(非 clip 的 videos)。"""
+    all_ms = all_ms if all_ms is not None else all_materials()
+    by_stem = {}
+    for x in all_ms:
+        if x.get("kind") != "videos" or is_role_clip(x):
+            continue
+        stem = os.path.splitext(x.get("name") or "")[0].lower()
+        if stem:
+            by_stem[stem] = x["id"]
+    return by_stem
+
+
+def _component_stem(name):
+    stem = os.path.splitext(name or "")[0].lower()
+    for suffix in ("_silent", "_track", "_audio", "_stem"):
+        if stem.endswith(suffix):
+            return stem[: -len(suffix)]
+    return stem
+
+
+def link_clip_parents(*, mids=None, limit=0):
+    """给 role:clip 且缺 parent: 的条目补 parent:<同 job 母版 id>。
+
+    传入 mids 时:处理这些 id 及其同 job 下缺 parent 的 clip。
+    返回 {scanned, linked, skipped}。
+    """
+    all_ms = all_materials()
+    masters_by_job = _masters_by_job(all_ms)
+    mid_set = set(mids or [])
+    jobs = set()
+    if mid_set:
+        for m in all_ms:
+            if m["id"] not in mid_set:
+                continue
+            for t in _material_tag_set(m):
+                if t.startswith("job:"):
+                    jobs.add(t)
+    rows = []
+    for m in all_ms:
+        if not is_role_clip(m):
+            continue
+        if mid_set:
+            tags = _material_tag_set(m)
+            same_job = bool(jobs and any(j in tags for j in jobs))
+            if m["id"] not in mid_set and not same_job:
+                continue
+        rows.append(m)
+    scanned = linked = skipped = 0
+    for m in rows:
+        if limit and scanned >= limit:
+            break
+        scanned += 1
+        tags = _material_tag_set(m)
+        if any(t.startswith("parent:") for t in tags):
+            skipped += 1
+            continue
+        job = next((t for t in tags if t.startswith("job:")), "")
+        mid = masters_by_job.get(job) if job else None
+        if not mid:
+            skipped += 1
+            continue
+        _update_material(
+            m["id"],
+            tags=_merge_tag_csv(
+                m.get("tags"),
+                relation_tags(mid) + inherit_parent_context_tags(mid),
+            ),
+        )
+        linked += 1
+    return {"scanned": scanned, "linked": linked, "skipped": skipped}
+
+
+def link_component_parents(*, limit=0):
+    """给 silent/audio 缺 parent: 的组件回挂母版(可读旧 from: / 文件名 stem / 同 job)。"""
+    all_ms = all_materials()
+    by_stem = _video_stem_index(all_ms)
+    masters_by_job = _masters_by_job(all_ms)
+    scanned = linked = skipped = 0
+    for m in all_ms:
+        if m.get("kind") not in ("silent", "audio"):
+            continue
+        if limit and scanned >= limit:
+            break
+        scanned += 1
+        tags = _material_tag_set(m)
+        if any(t.startswith("parent:") for t in tags):
+            pid = next(t[7:] for t in tags if t.startswith("parent:"))
+            need = list(inherit_parent_context_tags(pid))
+            if "demux" not in tags and (m.get("source") or "").startswith("demux"):
+                need.append("demux")
+            # 只补缺失项
+            need = [t for t in need if t not in tags]
+            if need:
+                _update_material(m["id"], tags=_merge_tag_csv(m.get("tags"), need))
+                linked += 1
+            else:
+                skipped += 1
+            continue
+        pid = ""
+        fr = next((t[5:] for t in tags if t.startswith("from:")), "")
+        if fr and get_material(fr):
+            pid = fr
+        if not pid:
+            pid = by_stem.get(_component_stem(m.get("name") or "")) or ""
+        if not pid:
+            job = next((t for t in tags if t.startswith("job:")), "")
+            if job:
+                pid = masters_by_job.get(job) or ""
+        if not pid:
+            skipped += 1
+            continue
+        extra = list(relation_tags(pid)) + inherit_parent_context_tags(pid)
+        name_l = (m.get("name") or "").lower()
+        if "demux" not in tags and (
+            name_l.endswith("_silent.mp4")
+            or name_l.endswith("_track.wav")
+            or (m.get("source") or "").startswith("demux")
+        ):
+            extra.insert(0, "demux")
+        # 已有 parent 但缺 job: 时也补上下文
+        _update_material(m["id"], tags=_merge_tag_csv(m.get("tags"), extra))
+        linked += 1
+    return {"scanned": scanned, "linked": linked, "skipped": skipped}
+
+
+def link_relation_parents(*, mids=None, limit=0):
+    """方案 A 关系回填:物理 clip + silent/audio 组件 → parent:。"""
+    a = link_clip_parents(mids=mids, limit=limit)
+    b = link_component_parents(limit=limit)
+    return {
+        "clips": a,
+        "components": b,
+        "linked": a.get("linked", 0) + b.get("linked", 0),
+    }
+
+
 def classify(path):
+    """扩展名初分；视频容器再按音轨拆 videos / silent。"""
     ext = os.path.splitext(path)[1].lower()
+    if ext in VIDEO_EXTS:
+        return "videos" if probe_has_audio(path) else "silent"
     for k, exts in KINDS.items():
+        if k in ("videos", "silent"):
+            continue
         if ext in exts:
             return k
     return "other"
+
+
+def reclassify_video_audio_kinds(limit=0):
+    """把已入库的视频容器按音轨重分到 videos / silent。返回统计。"""
+    con = _con()
+    con.row_factory = sqlite3.Row
+    rows = con.execute(
+        "SELECT id, kind, location, external_path, rel_path FROM materials "
+        "WHERE kind IN ('videos','silent') OR ext IN ('.mp4','.mkv','.mov','.avi','.webm','.m4v','.flv','.ts')"
+    ).fetchall()
+    con.close()
+    changed = {"to_videos": 0, "to_silent": 0, "skipped": 0, "missing": 0}
+    n = 0
+    for r in rows:
+        if limit and n >= limit:
+            break
+        n += 1
+        p = r["external_path"] if (r["location"] or "") == "external" else None
+        if not p:
+            # internal: MATERIALS/kind/rel or rel_path
+            rp = r["rel_path"] or ""
+            p = rp if os.path.isabs(rp) else os.path.join(HUB, rp)
+        if not p or not os.path.isfile(p):
+            changed["missing"] += 1
+            continue
+        want = classify(p)
+        if want == r["kind"]:
+            extra = media_facet_tags(p, want)
+            cur = get_material(r["id"])
+            merged = coerce_role_tags(
+                _merge_tag_csv(cur.get("tags") if cur else "", extra),
+                kind=want, path=p,
+            )
+            if cur and merged != (cur.get("tags") or ""):
+                _update_material(r["id"], tags=merged)
+            changed["skipped"] += 1
+            continue
+        extra = media_facet_tags(p, want)
+        cur = get_material(r["id"])
+        _update_material(
+            r["id"],
+            kind=want,
+            tags=coerce_role_tags(
+                _merge_tag_csv(cur.get("tags") if cur else "", extra),
+                kind=want, path=p,
+            ),
+        )
+        if want == "silent":
+            changed["to_silent"] += 1
+        else:
+            changed["to_videos"] += 1
+    return changed
+
+
+def apply_media_facet_tags(limit=0):
+    """给已入库 videos/silent/audio 补 DAM 面标签，不改变 kind。"""
+    con = _con()
+    con.row_factory = sqlite3.Row
+    rows = con.execute(
+        "SELECT id, kind, location, external_path, rel_path, tags FROM materials "
+        "WHERE kind IN ('videos','silent','audio')"
+    ).fetchall()
+    con.close()
+    n = patched = 0
+    for r in rows:
+        if limit and n >= limit:
+            break
+        n += 1
+        p = r["external_path"] if (r["location"] or "") == "external" else None
+        if not p:
+            rp = r["rel_path"] or ""
+            p = rp if os.path.isabs(rp) else os.path.join(HUB, rp)
+        # 路径缺失时仍可按 kind 补角色面(不依赖磁盘)
+        kind = r["kind"] or (classify(p) if p and os.path.isfile(p) else None)
+        if not kind:
+            continue
+        if p and os.path.isfile(p):
+            extra = media_facet_tags(p, kind)
+        elif kind == "videos":
+            extra = ["role:master", "role:picture", "has_audio:1"]
+        elif kind == "silent":
+            extra = ["role:silent-picture", "has_audio:0"]
+        elif kind == "audio":
+            extra = ["role:audio-stem", "has_audio:1"]
+        else:
+            continue
+        merged = coerce_role_tags(
+            _merge_tag_csv(r["tags"], extra), kind=kind, path=p if p and os.path.isfile(p) else None
+        )
+        if merged != (r["tags"] or ""):
+            _update_material(r["id"], tags=merged)
+            patched += 1
+    return {"scanned": n, "patched": patched}
 
 
 def compute_sha256(path, chunk=1 << 20):
@@ -132,6 +598,17 @@ def _init_db():
     # 语义索引:向量以 float32 BLOB 存库,sig 用于检测文档文本变化(增量重建)
     con.execute(
         """CREATE TABLE IF NOT EXISTS embeddings(
+            mid TEXT PRIMARY KEY,
+            model TEXT,
+            dim INTEGER,
+            sig TEXT,
+            vec BLOB,
+            updated_at TEXT
+        )"""
+    )
+    # 图像 CLIP 向量(与文本 embeddings 分表;model 形如 ViT-B-32/openai)
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS image_embeddings(
             mid TEXT PRIMARY KEY,
             model TEXT,
             dim INTEGER,
@@ -648,7 +1125,9 @@ def chat_models():
     """列出 ollama 中具备「生成」能力的模型(排除仅 embedding 的)。无则空列表。
 
     用途:自动打标走本地 LLM 生成描述/标签;离线、无 API key。没有 chat 模型时
-    调用方应优雅跳过(见 auto_tag_material 的 skipped 状态),不抛错、不阻断检索。"""
+    调用方应优雅跳过(见 auto_tag_material 的 skipped 状态),不抛错、不阻断检索。
+    排序:VITUAL_CHAT_MODEL 优先;其次 qwen* 优于 gemma*(E2E: gemma4:e2b 常吐非法 JSON)。
+    """
     try:
         tags = _http_json(_embed_url() + "/api/tags", timeout=8)
     except Exception:
@@ -659,6 +1138,17 @@ def chat_models():
         if "embedding" in caps:          # 只做向量的模型不能生成文本
             continue
         out.append(m["name"])
+    prefer = (os.environ.get("VITUAL_CHAT_MODEL") or "").strip()
+    def _rank(name):
+        n = (name or "").lower()
+        if prefer and n == prefer.lower():
+            return (0, n)
+        if n.startswith("qwen"):
+            return (1, n)
+        if "gemma" in n:
+            return (3, n)
+        return (2, n)
+    out.sort(key=_rank)
     return out
 
 
@@ -874,6 +1364,8 @@ _RULE_DESC = {
     "deblur": "画面去模糊/增强清晰的素材",
     "segment": "按时间切出的视频片段",
     "subs": "字幕文本(外挂字幕)文件",
+    "silent": "无声音轨的画面(视频容器无 audio stream)",
+    "audio": "纯音轨/音频文件",
     "cmp": "渲染/处理前后对比结果",
     "facefix": "人脸修复(超分/还原)素材",
     "benchmark": "基准测试视频",
@@ -1203,6 +1695,10 @@ QUERY_SYNONYMS = {
     "片段": ["segments", "segment", "clip"],
     "音频": ["audio", "wav", "m4a"],
     "音轨": ["audio", "wav", "m4a"],
+    "无声": ["silent", "mute", "silent-video"],
+    "无声视频": ["silent"],
+    "静音": ["silent", "mute"],
+    "静音视频": ["silent"],
     "视频": ["video", "mp4"],
     "图片": ["image", "png", "jpg"],
     "笔记": ["notes"],
@@ -1317,7 +1813,9 @@ def duplicates():
 
 
 def update_tags(mid, tags, purge_ai_tags=True):
-    """更新素材的权威标签列(tags)。
+    """更新素材的权威标签列(tags)。**整体替换**语义(调用方需自备合并结果)。
+
+    Agent/MCP 打标请用 ``merge_material_tags``(只增不删 + 系统面标签护栏)。
 
     默认 purge_ai_tags=True:同步清理 ai_tags 中不在新 tags 里的 token。ai_tags 是
     LLM 自动打标产物,常含幻觉(实测 qwen2.5:7b 给烹饪视频打 subs/codeformer),
@@ -1342,6 +1840,204 @@ def update_tags(mid, tags, purge_ai_tags=True):
                 _update_material(mid, ai_tags=",".join(kept))
     return {"ok": True, "id": mid, "tags": tags,
             "ai_tags_kept": kept, "ai_tags_removed": removed}
+
+
+# 系统面标签(方案 A / bridge):Agent 合并打标时永不可删。
+# E2E 教训:7B 只传「美食,料理」做整体替换 → job:/role: 被抹掉,体检与关系链断裂。
+_SYSTEM_TAG_EXACT = frozenset({
+    "sp", "demux", "asr", "bilibili", "youtube", "upload",
+})
+_SYSTEM_TAG_PREFIXES = (
+    "role:", "has_audio:", "parent:", "from:", "t_start:", "t_end:",
+    "job:", "type:", "lang:",
+)
+
+
+def is_system_facet_tag(tag):
+    """是否系统/DAM 面标签(合并护栏保护对象)。"""
+    t = (tag or "").strip()
+    if not t:
+        return False
+    if t in _SYSTEM_TAG_EXACT:
+        return True
+    return any(t.startswith(p) for p in _SYSTEM_TAG_PREFIXES)
+
+
+# ---------- 标签人读文案(面板 / 卡片;过滤值仍用原始 tag) ----------
+# 与 README 受控词表对齐:系统面给中文名,内容标签原样展示。
+_TAG_EXACT_LABEL_ZH = {
+    "sp": "来源·流水线",
+    "upload": "来源·上传",
+    "bilibili": "平台·B站",
+    "youtube": "平台·YouTube",
+    "demux": "拆条产物",
+    "asr": "ASR 音轨",
+}
+_TAG_EXACT_LABEL_EN = {
+    "sp": "src·pipeline",
+    "upload": "src·upload",
+    "bilibili": "platform·Bilibili",
+    "youtube": "platform·YouTube",
+    "demux": "demuxed",
+    "asr": "ASR audio",
+}
+_TAG_TYPE_LABEL_ZH = {
+    "media": "源片",
+    "clip": "物理切片",
+    "subs": "字幕",
+    "notes": "笔记",
+    "benchmark": "基准样例",
+    "render": "渲染预览",
+    "test": "测试样例",
+    "batch": "任务杂项",  # 旧值,新入库不再写
+    "other": "其它",
+}
+_TAG_TYPE_LABEL_EN = {
+    "media": "source media",
+    "clip": "export clip",
+    "subs": "captions",
+    "notes": "notes",
+    "benchmark": "benchmark",
+    "render": "render",
+    "test": "test",
+    "batch": "job misc",
+    "other": "other",
+}
+_TAG_ROLE_LABEL_ZH = {
+    "master": "母版",
+    "clip": "物理切片",
+    "silent-picture": "无声画面",
+    "audio-stem": "音轨组件",
+    "picture": "画面轨",
+}
+_TAG_ROLE_LABEL_EN = {
+    "master": "master",
+    "clip": "export clip",
+    "silent-picture": "silent picture",
+    "audio-stem": "audio stem",
+    "picture": "picture track",
+}
+# 侧栏默认隐藏:与 parent: 同义的旧 from:;时间码噪音;与 kind/role:master 重复的面
+_UI_HIDE_TAG_EXACT = frozenset({
+    "has_audio:0", "has_audio:1", "role:picture",
+})
+_UI_HIDE_TAG_PREFIXES = ("from:", "t_start:", "t_end:")
+
+
+def tag_ui_meta(tag, lang="zh"):
+    """单标签面板元数据:{tag,label,group,hint,hide}。lang=zh|en。"""
+    t = (tag or "").strip()
+    zh = (lang or "zh").lower().startswith("zh")
+    exact = _TAG_EXACT_LABEL_ZH if zh else _TAG_EXACT_LABEL_EN
+    types = _TAG_TYPE_LABEL_ZH if zh else _TAG_TYPE_LABEL_EN
+    roles = _TAG_ROLE_LABEL_ZH if zh else _TAG_ROLE_LABEL_EN
+    hide = t in _UI_HIDE_TAG_EXACT or any(t.startswith(p) for p in _UI_HIDE_TAG_PREFIXES)
+    group, label, hint = "content", t, t
+    if t in exact:
+        group, label = "source", exact[t]
+        hint = t
+    elif t.startswith("type:"):
+        v = t[5:]
+        group = "type"
+        label = (("类型·" if zh else "type·") + types.get(v, v))
+        hint = t
+    elif t.startswith("role:"):
+        v = t[5:]
+        group = "role"
+        label = (("角色·" if zh else "role·") + roles.get(v, v))
+        hint = t
+    elif t.startswith("job:"):
+        v = t[4:]
+        short = v if len(v) <= 10 else (v[:8] + "…")
+        group = "job"
+        label = (("任务·" if zh else "job·") + short)
+        hint = t
+    elif t.startswith("parent:"):
+        v = t[7:]
+        short = v if len(v) <= 10 else (v[:8] + "…")
+        group = "rel"
+        label = (("父素材·" if zh else "parent·") + short)
+        hint = t
+    elif t.startswith("lang:"):
+        group = "lang"
+        label = (("语言·" if zh else "lang·") + t[5:])
+        hint = t
+    elif t.startswith("has_audio:"):
+        group = "tech"
+        label = ("有声" if t.endswith(":1") else "无声") if zh else t
+        hint = t
+    return {"tag": t, "label": label, "group": group, "hint": hint, "hide": hide}
+
+
+def scrub_deprecated_from_tags(*, limit=0):
+    """去掉与 parent: 重复的旧 from: 别名(库内治理,不经 Agent remove 护栏)。"""
+    scanned = cleaned = 0
+    for m in all_materials():
+        if limit and scanned >= limit:
+            break
+        scanned += 1
+        parts = [t.strip() for t in (m.get("tags") or "").split(",") if t.strip()]
+        parents = {t[7:] for t in parts if t.startswith("parent:")}
+        if not parents:
+            continue
+        new_parts = [
+            t for t in parts
+            if not (t.startswith("from:") and t[5:] in parents)
+        ]
+        if new_parts == parts:
+            continue
+        _update_material(m["id"], tags=",".join(new_parts))
+        cleaned += 1
+    return {"scanned": scanned, "cleaned": cleaned}
+
+
+def tags_for_ui(*, limit=48, lang="zh"):
+    """面板标签云:带人读 label,隐藏冗余系统面,按 count 倒序。"""
+    out = []
+    for t, c in distinct_tags():
+        meta = tag_ui_meta(t, lang=lang)
+        if meta["hide"]:
+            continue
+        out.append({
+            "tag": t, "count": c,
+            "label": meta["label"], "group": meta["group"], "hint": meta["hint"],
+        })
+        if limit and len(out) >= limit:
+            break
+    return out
+
+
+def _normalize_tag_list(tags):
+    if tags is None:
+        return []
+    if isinstance(tags, (list, tuple, set)):
+        return [str(t).strip() for t in tags if str(t).strip()]
+    return [t.strip() for t in str(tags).split(",") if t.strip()]
+
+
+def merge_material_tags(mid, tags="", remove=None, *, purge_ai_tags=True):
+    """合并打标:保留已有 → 追加 tags → 仅 remove 可删,且**系统面标签永不删**。
+
+    返回 update_tags 字段 + merged / protected_skipped / removed_applied。
+    """
+    m = get_material(mid)
+    if not m:
+        return {"ok": False, "error": "not found: " + str(mid)}
+    cur = [t.strip() for t in (m.get("tags") or "").split(",") if t.strip()]
+    add = _normalize_tag_list(tags)
+    want_remove = set(_normalize_tag_list(remove))
+    protected_skipped = sorted(t for t in want_remove if is_system_facet_tag(t))
+    removable = {t for t in want_remove if not is_system_facet_tag(t)}
+    merged = [t for t in cur if t not in removable]
+    for t in add:
+        if t and t not in merged:
+            merged.append(t)
+    new_csv = ",".join(merged)
+    r = update_tags(mid, new_csv, purge_ai_tags=purge_ai_tags)
+    r["merged"] = new_csv != (m.get("tags") or "")
+    r["protected_skipped"] = protected_skipped
+    r["removed_applied"] = sorted(removable & set(cur))
+    return r
 
 
 def update_description(mid, desc):
@@ -1408,13 +2104,181 @@ def ingest_file(src, move=True, source=""):
     else:
         shutil.copy2(src, dest)
     mid = sha[:12]
+    tags = _merge_tag_csv("", media_facet_tags(dest if os.path.isfile(dest) else src, kind))
     add_material(
         id=mid, kind=kind, ext=os.path.splitext(name)[1].lower(), name=name,
         rel_path=os.path.relpath(dest, HUB), size=os.path.getsize(dest), sha256=sha,
-        tags="", description="", source=source, orig_name=os.path.basename(src),
+        tags=tags, description="", source=source, orig_name=os.path.basename(src),
         created_at=datetime.datetime.now().isoformat(timespec="seconds"),
     )
     return {"status": "added", "id": mid, "path": os.path.relpath(dest, HUB)}
+
+
+def _material_abs_path(m):
+    p = m.get("external_path") or ""
+    if m.get("location") == "external" and p:
+        return p
+    rp = m.get("rel_path") or ""
+    if not rp:
+        return ""
+    return rp if os.path.isabs(rp) else os.path.join(HUB, rp)
+
+
+def split_video_to_silent_and_audio(mid, *, force=False):
+    """把库里一条有声视频拆成：无声画面(silent) + 音轨(audio)。
+
+    原 videos 条目保留。无声 = 无 audio stream 的 mp4（-an / -map 0:v）。
+    物理 clip(role:clip) 默认跳过(切条应在母版上做)。
+    返回 {status, silent_id?, audio_id?, silent_path?, audio_path?, reason?}。
+    """
+    m = get_material(mid)
+    if not m:
+        return {"status": "error", "reason": "not_found"}
+    if m.get("kind") not in ("videos", "silent"):
+        return {"status": "skipped", "reason": f"kind={m.get('kind')}"}
+    if is_role_clip(m) and not force:
+        return {"status": "skipped", "reason": "role:clip"}
+    src = _material_abs_path(m)
+    if not src or not os.path.isfile(src):
+        return {"status": "error", "reason": "missing_file"}
+    if m.get("kind") == "silent" and not force:
+        return {"status": "skipped", "reason": "already_silent"}
+    if m.get("kind") == "videos" and not probe_has_audio(src) and not force:
+        # 已无音轨：直接改 kind 即可，不必再拆
+        _update_material(
+            mid,
+            kind="silent",
+            tags=_merge_tag_csv(m.get("tags"), media_facet_tags(src, "silent")),
+        )
+        return {"status": "reclassified", "id": mid, "kind": "silent"}
+
+    ff = ffmpeg_path()
+    if not ff:
+        return {"status": "error", "reason": "no_ffmpeg"}
+    flags = 0x08000000 if os.name == "nt" else 0
+    stem = os.path.splitext(sanitize_name(m.get("name") or os.path.basename(src)))[0]
+    silent_dir = os.path.join(MATERIALS, "silent")
+    audio_dir = os.path.join(MATERIALS, "audio")
+    os.makedirs(silent_dir, exist_ok=True)
+    os.makedirs(audio_dir, exist_ok=True)
+    silent_path = _unique_dest(silent_dir, f"{stem}_silent.mp4")
+    audio_path = _unique_dest(audio_dir, f"{stem}_track.wav")
+
+    try:
+        subprocess.run(
+            [ff, "-y", "-i", src, "-map", "0:v:0", "-c:v", "copy", "-an", silent_path],
+            check=True, capture_output=True, creationflags=flags, timeout=600,
+        )
+    except Exception as e:
+        return {"status": "error", "reason": f"silent_demux:{type(e).__name__}:{e}"}
+
+    audio_ok = False
+    if probe_has_audio(src):
+        try:
+            subprocess.run(
+                [
+                    ff, "-y", "-i", src, "-vn",
+                    "-acodec", "pcm_s16le", "-ar", "48000", "-ac", "2",
+                    audio_path,
+                ],
+                check=True, capture_output=True, creationflags=flags, timeout=600,
+            )
+            audio_ok = os.path.isfile(audio_path) and os.path.getsize(audio_path) > 0
+        except Exception:
+            audio_ok = False
+
+    out = {"status": "ok", "source_id": mid}
+    # Register silent (already under materials/silent → don't copy again)
+    sha_s = compute_sha256(silent_path)
+    con = _con()
+    ex_s = con.execute("SELECT id FROM materials WHERE sha256=?", (sha_s,)).fetchone()
+    con.close()
+    if ex_s:
+        out["silent_id"] = ex_s[0]
+        out["silent_status"] = "duplicate"
+    else:
+        sid = sha_s[:12]
+        add_material(
+            id=sid, kind="silent", ext=".mp4",
+            name=os.path.basename(silent_path),
+            rel_path=os.path.relpath(silent_path, HUB),
+            size=os.path.getsize(silent_path), sha256=sha_s,
+            tags=_merge_tag_csv(
+                "sp,demux," + ",".join(relation_tags(mid) + inherit_parent_context_tags(mid)),
+                media_facet_tags(silent_path, "silent"),
+            ),
+            description=(m.get("description") or "").strip() or f"无声画面 ← {m.get('name')}",
+            source="demux-silent", orig_name=os.path.basename(silent_path),
+            created_at=datetime.datetime.now().isoformat(timespec="seconds"),
+        )
+        out["silent_id"] = sid
+        out["silent_status"] = "added"
+    out["silent_path"] = silent_path
+
+    if audio_ok:
+        sha_a = compute_sha256(audio_path)
+        con = _con()
+        ex_a = con.execute("SELECT id FROM materials WHERE sha256=?", (sha_a,)).fetchone()
+        con.close()
+        if ex_a:
+            out["audio_id"] = ex_a[0]
+            out["audio_status"] = "duplicate"
+        else:
+            aid = sha_a[:12]
+            add_material(
+                id=aid, kind="audio", ext=".wav",
+                name=os.path.basename(audio_path),
+                rel_path=os.path.relpath(audio_path, HUB),
+                size=os.path.getsize(audio_path), sha256=sha_a,
+                tags=_merge_tag_csv(
+                    "sp,demux,role:audio-stem,has_audio:1,"
+                    + ",".join(relation_tags(mid) + inherit_parent_context_tags(mid)),
+                    [],
+                ),
+                description=f"音轨 ← {m.get('name')}",
+                source="demux-audio", orig_name=os.path.basename(audio_path),
+                created_at=datetime.datetime.now().isoformat(timespec="seconds"),
+            )
+            out["audio_id"] = aid
+            out["audio_status"] = "added"
+        out["audio_path"] = audio_path
+    elif os.path.isfile(audio_path):
+        try:
+            os.remove(audio_path)
+        except OSError:
+            pass
+
+    # 拆条后给母版补 role:master(幂等)
+    cur = get_material(mid)
+    if cur and cur.get("kind") == "videos":
+        _update_material(
+            mid,
+            tags=_merge_tag_csv(
+                cur.get("tags"),
+                ["role:master", "role:picture", "has_audio:1"],
+            ),
+        )
+
+    return out
+
+
+def split_all_videos_to_silent(*, force=False, limit=0):
+    """对库内全部 videos 拆无声画面 + 音轨(跳过 role:clip)。"""
+    ms = [
+        m for m in all_materials()
+        if m.get("kind") == "videos" and (force or not is_role_clip(m))
+    ]
+    results = []
+    for i, m in enumerate(ms):
+        if limit and i >= limit:
+            break
+        results.append(split_video_to_silent_and_audio(m["id"], force=force))
+    return {
+        "total": len(ms),
+        "ran": len(results),
+        "ok": sum(1 for r in results if r.get("status") in ("ok", "reclassified")),
+        "results": results,
+    }
 
 
 def ingest_dir(dirpath, source=""):
@@ -1434,7 +2298,7 @@ def ingest_external(src, source="", tags="", description="", kind=None):
     """登记外部文件(不移动/复制),按原路径引用。用于跨项目联动(如 subtitle_pipeline)。
 
     视频等大文件不进 materials/ 仓库,只在索引里记 external_path,预览时按需读取,
-    避免重复占盘。按 sha256 去重。"""
+    避免重复占盘。按 sha256 去重;重复时合并 tags(并补空 description)。"""
     src = os.path.abspath(src)
     if not external_path_allowed(src):
         return {"status": "rejected",
@@ -1442,22 +2306,73 @@ def ingest_external(src, source="", tags="", description="", kind=None):
                           "(set VITUAL_HUB_EXT_ROOTS to widen)"}
     if not os.path.exists(src) or os.path.isdir(src):
         return None
+    base = os.path.basename(src)
+    if base.startswith("_probe"):
+        return {"status": "skipped", "reason": "probe_stub"}
     sha = compute_sha256(src)
     con = _con()
-    ex = con.execute("SELECT id FROM materials WHERE sha256=?", (sha,)).fetchone()
-    con.close()
+    con.row_factory = sqlite3.Row
+    want_kind = kind or classify(src)
+    incoming = [t.strip() for t in (tags or "").split(",") if t.strip()]
+    incoming.extend(media_facet_tags(src, want_kind))
+    by_path = con.execute(
+        "SELECT * FROM materials WHERE location='external' AND external_path=?",
+        (src,),
+    ).fetchone()
+    if by_path:
+        mid = by_path["id"]
+        fields = {
+            "kind": want_kind,
+            "tags": _merge_tag_csv(by_path["tags"], incoming),
+        }
+        if by_path["sha256"] != sha:
+            fields.update({
+                "sha256": sha,
+                "size": os.path.getsize(src),
+                "name": sanitize_name(os.path.basename(src)),
+                "ext": os.path.splitext(src)[1].lower(),
+                "rel_path": src,
+            })
+        if description:
+            fields["description"] = description
+        if source:
+            fields["source"] = source
+        con.close()
+        _update_material(mid, **fields)
+        return {
+            "status": "updated" if by_path["sha256"] != sha else "duplicate",
+            "id": mid,
+            "merged": True,
+        }
+    ex = con.execute("SELECT * FROM materials WHERE sha256=?", (sha,)).fetchone()
     if ex:
-        return {"status": "duplicate", "id": ex[0]}
-    k = kind or classify(src)
+        mid = ex["id"]
+        fields = {}
+        merged_tags = _merge_tag_csv(ex["tags"], incoming)
+        if merged_tags != (ex["tags"] or ""):
+            fields["tags"] = merged_tags
+        if (ex["kind"] or "") != want_kind:
+            fields["kind"] = want_kind
+        if description and not (ex["description"] or "").strip():
+            fields["description"] = description
+        if source and not (ex["source"] or "").strip():
+            fields["source"] = source
+        if (ex["external_path"] or "") != src and (ex["location"] or "") == "external":
+            fields["external_path"] = src
+            fields["rel_path"] = src
+        con.close()
+        if fields:
+            _update_material(mid, **fields)
+        return {"status": "duplicate", "id": mid, "merged": bool(fields)}
     name = sanitize_name(os.path.basename(src))
     mid = sha[:12]
-    con = _con()
     con.execute(
         """INSERT OR REPLACE INTO materials
            (id,kind,ext,name,rel_path,size,sha256,tags,description,source,orig_name,created_at,location,external_path)
            VALUES(:id,:kind,:ext,:name,:rel_path,:size,:sha256,:tags,:description,:source,:orig_name,:created_at,'external',:external_path)""",
-        dict(id=mid, kind=k, ext=os.path.splitext(name)[1].lower(), name=name,
-             rel_path=src, size=os.path.getsize(src), sha256=sha, tags=tags,
+        dict(id=mid, kind=want_kind, ext=os.path.splitext(name)[1].lower(), name=name,
+             rel_path=src, size=os.path.getsize(src), sha256=sha,
+             tags=_merge_tag_csv("", incoming),
              description=description, source=source, orig_name=os.path.basename(src),
              created_at=datetime.datetime.now().isoformat(timespec="seconds"),
              external_path=src),
@@ -1538,7 +2453,7 @@ def health():
         size += m.get("size") or 0
     st = thumbs_status()
     ex = external_stats()
-    videos = kinds.get("videos", 0)
+    videos = kinds.get("videos", 0) + kinds.get("silent", 0)
     return {
         "ok": (ex["broken"] == 0),
         "total": len(ms),
@@ -1622,7 +2537,7 @@ def make_thumb(mid, retry_failed=False):
     抽帧失败的会留下 `<id>.jpg.fail` 标记:源文件损坏/未写完时 ffmpeg 很费时,
     标记后不再反复重试(想重试:purge_thumbs() 清标记,或传 retry_failed=True)。"""
     m = get_material(mid)
-    if not m or m["kind"] != "videos":
+    if not m or m["kind"] not in VIDEO_LIKE_KINDS:
         return None
     dst = thumb_path(mid)
     if os.path.exists(dst) and os.path.getsize(dst) > 0:
@@ -1747,7 +2662,7 @@ def ocr_material(mid, frames=5, force=False):
     m = get_material(mid)
     if not m:
         return {"id": mid, "status": "error", "reason": "not_found"}
-    if m.get("kind") not in ("videos", "images"):
+    if m.get("kind") not in VISUAL_KINDS:
         return {"id": mid, "status": "skipped", "reason": f"kind={m.get('kind')}"}
     sc = ocr_sidecar_path(mid)
     if not sc:
@@ -1846,7 +2761,7 @@ def ocr_material(mid, frames=5, force=False):
 def ocr_all(limit=0, force=False):
     """批量 OCR:对全部视频/图片素材补齐 sidecar(默认跳过已有)。"""
     out = []
-    ms = [m for m in all_materials() if m.get("kind") in ("videos", "images")]
+    ms = [m for m in all_materials() if m.get("kind") in VISUAL_KINDS]
     if limit:
         ms = ms[:limit]
     for m in ms:
@@ -1867,19 +2782,23 @@ def shot_index_path(mid):
     return os.path.join(SHOT_DIR, mid + ".json")
 
 
-# 场景检测阈值阶梯:切点过多(>max_scenes)时逐级提高灵敏度门槛重试,直到切点数可接受。
-_SHOT_THRESHOLDS = (0.30, 0.40, 0.50)
+# 主阈值 + 过稀/过密再调。注意:showinfo 必须在 -v info 才有 pts_time;
+# -v warning/error 会吞掉 Parsed_showinfo(实测 0 切点 → 误走 interval)。
+_SHOT_PRIMARY = 0.30
+_SHOT_FALLBACK_LOW = (0.20, 0.15)     # 主档 0 切点再放宽
+_SHOT_FALLBACK_HIGH = (0.40, 0.50)    # 切点过多再收紧
 
 
 def _ffmpeg_scene_cuts(exe, src, threshold):
     """跑一遍 ffmpeg 场景检测,返回切点列表(秒,升序去重)。
 
     用 select='gt(scene,t)' 过滤镜头切换帧,showinfo 把被选中的帧打印到 stderr,
-    从 stderr 解析 `pts_time:([0-9.]+)` 即切点。子进程失败返回 None(调用方报 error)。"""
+    从 stderr 解析 `pts_time:([0-9.]+)` 即切点。子进程失败返回 None(调用方报 error)。
+    日志级别必须是 info:warning 会丢掉 showinfo 行。"""
     flags = 0x08000000 if os.name == "nt" else 0          # CREATE_NO_WINDOW,避免弹黑框
     try:
         p = subprocess.run(
-            [exe, "-v", "warning", "-i", src,
+            [exe, "-v", "info", "-i", src,
              "-vf", f"select='gt(scene,{threshold})',showinfo",
              "-f", "null", "-"],
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -1891,6 +2810,17 @@ def _ffmpeg_scene_cuts(exe, src, threshold):
     return sorted(set(cuts))
 
 
+def _thin_cuts(cuts, max_n):
+    """切点仍多于 max_n 时等间隔抽样,保留首尾感(下标均匀)。"""
+    if max_n <= 0 or len(cuts) <= max_n:
+        return cuts
+    if max_n == 1:
+        return [cuts[len(cuts) // 2]]
+    step = (len(cuts) - 1) / float(max_n - 1)
+    idxs = sorted({int(round(i * step)) for i in range(max_n)})
+    return [cuts[i] for i in idxs]
+
+
 def build_shot_index(mid, force=False, max_scenes=60):
     """为视频建立镜头索引:ffmpeg 场景检测 → 切点 → 片段级 start/end 时间轴,
     落 sidecar `index/shots/<id>.json`。幂等:已有 sidecar 且未 force → cached。
@@ -1898,7 +2828,7 @@ def build_shot_index(mid, force=False, max_scenes=60):
     m = get_material(mid)
     if not m:
         return {"id": mid, "status": "error", "reason": "not_found"}
-    if m.get("kind") != "videos":
+    if m.get("kind") not in VIDEO_LIKE_KINDS:
         return {"id": mid, "status": "skipped", "reason": f"kind={m.get('kind')}"}
     sc = shot_index_path(mid)
     if not sc:
@@ -1918,29 +2848,56 @@ def build_shot_index(mid, force=False, max_scenes=60):
     if not exe:
         return {"id": mid, "status": "skipped", "reason": "no_ffmpeg"}
     dur = _probe_duration(src)
-    # 阈值阶梯:切点过多就提高阈值重跑(重新跑 ffmpeg),直到 ≤max_scenes 或阈值用尽
-    cuts, thr = [], None
-    for t in _SHOT_THRESHOLDS:
-        c = _ffmpeg_scene_cuts(exe, src, t)
-        if c is None:
-            return {"id": mid, "status": "error", "reason": "ffmpeg_failed"}
-        cuts, thr = c, t
-        if len(cuts) <= max_scenes:
-            break
-    # 切点 → 片段:首段 start=0,末段 end=duration;相邻切点间为一段。
-    # dur 探测失败(=0)时用最后切点兜底,避免末段被截成空区间。
+    # 主档一次;0 切点再放宽;过多再收紧;仍过多则 thin(少跑全片)
+    cuts = _ffmpeg_scene_cuts(exe, src, _SHOT_PRIMARY)
+    if cuts is None:
+        return {"id": mid, "status": "error", "reason": "ffmpeg_failed"}
+    thr = _SHOT_PRIMARY
+    if not cuts:
+        for t in _SHOT_FALLBACK_LOW:
+            c = _ffmpeg_scene_cuts(exe, src, t)
+            if c is None:
+                return {"id": mid, "status": "error", "reason": "ffmpeg_failed"}
+            if c:
+                cuts, thr = c, t
+                break
+    elif len(cuts) > max_scenes:
+        for t in _SHOT_FALLBACK_HIGH:
+            c = _ffmpeg_scene_cuts(exe, src, t)
+            if c is None:
+                return {"id": mid, "status": "error", "reason": "ffmpeg_failed"}
+            cuts, thr = c, t
+            if len(cuts) <= max_scenes:
+                break
+    if len(cuts) > max_scenes:
+        cuts = _thin_cuts(cuts, max_scenes)
+        thr = "%s+thin%d" % (thr, max_scenes)
+    # 场景检测全空(长镜头/渐变):按等间隔切逻辑段,供 Agent 按时间窗调用
+    if not cuts and dur and dur > 12:
+        step = max(8.0, min(20.0, dur / 10.0))
+        t = step
+        while t < dur - 2.0:
+            cuts.append(round(t, 3))
+            t += step
+        thr = "interval:%.1f" % step
     last = max(dur, cuts[-1] if cuts else 0.0)
     bounds = [0.0] + [c for c in cuts if 0.0 < c < last] + [last]
     scenes = [{"start": round(a, 3), "end": round(b, 3)}
               for a, b in zip(bounds, bounds[1:]) if b > a]
-    if not scenes:                       # 无切点(静态视频)→ 单段全覆盖
-        scenes = [{"start": 0.0, "end": round(last, 3)}]
+    if not scenes:
+        if last > 0:
+            scenes = [{"start": 0.0, "end": round(last, 3)}]
+        else:
+            # 取不到时长(dur<=0)且无切点:合成 0 秒 scene 会误导 job_checkup 误判母版
+            # "有镜头",直接报错而非写假 sidecar。
+            return {"id": mid, "status": "error", "reason": "no_duration"}
     os.makedirs(SHOT_DIR, exist_ok=True)
     with open(sc, "w", encoding="utf-8") as f:
         json.dump({"duration": dur, "threshold": thr, "scenes": scenes},
                   f, ensure_ascii=False)
     log_history("app", "shot_index", mid, f"scenes={len(scenes)}")
-    return {"id": mid, "status": "ok", "scenes": len(scenes), "duration": dur}
+    return {"id": mid, "status": "ok", "scenes": len(scenes), "duration": dur,
+            "threshold": thr, "cuts": len(cuts)}
 
 
 def get_shots(mid):
@@ -1958,7 +2915,7 @@ def get_shots(mid):
 def shots_all(limit=0, force=False):
     """批量镜头索引:对全部视频素材补齐(默认跳过已有 sidecar),仿 ocr_all。"""
     out = []
-    ms = [m for m in all_materials() if m.get("kind") == "videos"]
+    ms = [m for m in all_materials() if m.get("kind") in VIDEO_LIKE_KINDS]
     if limit:
         ms = ms[:limit]
     for m in ms:
@@ -2023,7 +2980,7 @@ def phash_material(mid, force=False):
     m = get_material(mid)
     if not m:
         return {"id": mid, "status": "error", "reason": "not_found"}
-    if m.get("kind") not in ("images", "videos"):
+    if m.get("kind") not in VISUAL_KINDS:
         return {"id": mid, "status": "skipped", "reason": f"kind={m.get('kind')}"}
     sc = phash_path(mid)
     if not sc:
@@ -2054,7 +3011,7 @@ def phash_material(mid, force=False):
 def phash_all(limit=0, force=False):
     """批量 pHash:对全部图片/视频素材补齐(默认跳过已有 sidecar),仿 ocr_all。"""
     out = []
-    ms = [m for m in all_materials() if m.get("kind") in ("images", "videos")]
+    ms = [m for m in all_materials() if m.get("kind") in VISUAL_KINDS]
     if limit:
         ms = ms[:limit]
     for m in ms:
@@ -2100,22 +3057,571 @@ def similar_assets(mid, max_dist=10):
     return {"id": mid, "status": "ok", "similar": hits, "total": total}
 
 
+def _load_all_phashes():
+    """读全部 phash sidecar → [(id, bits_int), ...]。坏文件跳过。"""
+    out = []
+    if not os.path.isdir(PHASH_DIR):
+        return out
+    for fn in os.listdir(PHASH_DIR):
+        if not fn.endswith(".txt"):
+            continue
+        mid = fn[:-len(".txt")]
+        if not mid or any(c in mid for c in "\\/:"):
+            continue
+        try:
+            with open(os.path.join(PHASH_DIR, fn), "r", encoding="utf-8") as f:
+                out.append((mid, int(f.read().strip(), 16)))
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def near_duplicate_report(max_dist=10, limit_pairs=50):
+    """全库画面近重复报告(只读):扫全部 dHash sidecar,列出汉明距离≤max_dist 的对,
+    并用并查集归成「一实体多引用」簇。
+
+    返回:
+      hashed      — 参与比较的 sidecar 数
+      pairs       — [{a,b,dist,a_name,b_name},...] 按 dist 升序,最多 limit_pairs
+      clusters    — [{ids,size,names},...] size≥2,按 size 降序
+      pair_count  — 未截断前的近重复对数
+    """
+    try:
+        max_dist = int(max_dist)
+    except (TypeError, ValueError):
+        max_dist = 10
+    try:
+        limit_pairs = int(limit_pairs)
+    except (TypeError, ValueError):
+        limit_pairs = 50
+    items = _load_all_phashes()
+    parent = {mid: mid for mid, _ in items}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    pairs = []
+    n = len(items)
+    for i in range(n):
+        mid_a, ha = items[i]
+        for j in range(i + 1, n):
+            mid_b, hb = items[j]
+            d = hamming(ha, hb)
+            if d <= max_dist:
+                union(mid_a, mid_b)
+                ma = get_material(mid_a) or {}
+                mb = get_material(mid_b) or {}
+                pairs.append({
+                    "a": mid_a, "b": mid_b, "dist": d,
+                    "a_name": ma.get("name", ""), "b_name": mb.get("name", ""),
+                    "a_kind": ma.get("kind", ""), "b_kind": mb.get("kind", ""),
+                })
+    pairs.sort(key=lambda x: (x["dist"], x["a"], x["b"]))
+    pair_count = len(pairs)
+    # 并查集聚簇
+    buckets = {}
+    for mid, _ in items:
+        buckets.setdefault(find(mid), []).append(mid)
+    clusters = []
+    for ids in buckets.values():
+        if len(ids) < 2:
+            continue
+        ids = sorted(ids)
+        names = [(get_material(i) or {}).get("name", "") for i in ids]
+        clusters.append({"ids": ids, "size": len(ids), "names": names})
+    clusters.sort(key=lambda c: (-c["size"], c["ids"][0]))
+    return {
+        "hashed": n,
+        "max_dist": max_dist,
+        "pair_count": pair_count,
+        "pairs": pairs[: max(0, limit_pairs)],
+        "clusters": clusters,
+        "cluster_count": len(clusters),
+    }
+
+
+def _clip_python():
+    """承载 open_clip 的 python:优先 VITUAL_CLIP_PYTHON,否则与 OCR 同用 SP venv。"""
+    env = os.environ.get("VITUAL_CLIP_PYTHON", "").strip()
+    if env and os.path.isfile(env):
+        return env
+    return _ocr_python()
+
+
+def _clip_cache_dir():
+    d = (os.environ.get("VITUAL_CLIP_CACHE") or os.environ.get("OPEN_CLIP_CACHE_DIR")
+         or "").strip()
+    return d or os.path.join(HUB, "models", "clip")
+
+
+def _clip_runner_cmd(args, timeout=600):
+    """调 clip_runner.py;返回解析后的 dict。失败 → {"error": ...}。"""
+    py = _clip_python()
+    runner = os.path.join(HUB, "clip_runner.py")
+    if not py or not os.path.isfile(runner):
+        return {"error": "no_clip_python"}
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env.setdefault("VITUAL_CLIP_CACHE", _clip_cache_dir())
+    env.setdefault("OPEN_CLIP_CACHE_DIR", env["VITUAL_CLIP_CACHE"])
+    flags = 0x08000000 if os.name == "nt" else 0
+    try:
+        p = subprocess.run(
+            [py, runner] + list(args),
+            capture_output=True, timeout=timeout, env=env,
+            creationflags=flags,
+        )
+    except Exception as e:
+        return {"error": "%s: %s" % (type(e).__name__, e)}
+    raw = (p.stdout or b"").decode("utf-8", "replace").strip()
+    if not raw:
+        err = (p.stderr or b"").decode("utf-8", "replace")[:300]
+        return {"error": "empty_stdout:" + err}
+    try:
+        return json.loads(raw.splitlines()[-1])
+    except Exception as e:
+        return {"error": "bad_json:%s" % e, "raw": raw[:200]}
+
+
+_CLIP_PROBE_CACHE = {"probed": False, "info": None}
+
+
+def clip_probe(refresh=False):
+    """探测 CLIP 后端优先级:
+      1) 本地 open_clip(SP venv + 已下载权重) → backend=local
+      2) VITUAL_CLIP_URL HTTP → backend=http
+      否则 ok=False(以图搜图自动降级 dHash)。
+    """
+    if _CLIP_PROBE_CACHE["probed"] and not refresh:
+        return _CLIP_PROBE_CACHE["info"]
+    # HTTP 优先仅当显式要求? 否:本地优先(离线友好)
+    r = _clip_runner_cmd(["probe"], timeout=120)
+    if r.get("ok"):
+        info = {"ok": True, "backend": "local", "model": r.get("model", ""),
+                "dim": r.get("dim", 0), "device": r.get("device", ""),
+                "cache": r.get("cache", ""), "url": "", "err": ""}
+        _CLIP_PROBE_CACHE.update(probed=True, info=info)
+        return info
+    local_err = r.get("error") or r.get("hint") or "local_unavailable"
+    url = (os.environ.get("VITUAL_CLIP_URL") or "").strip().rstrip("/")
+    if url:
+        info = {"ok": True, "backend": "http", "url": url, "model": "http",
+                "dim": 0, "err": "", "local_err": local_err}
+        _CLIP_PROBE_CACHE.update(probed=True, info=info)
+        return info
+    info = {"ok": False, "backend": "", "url": "", "model": "",
+            "err": local_err, "cache": _clip_cache_dir()}
+    _CLIP_PROBE_CACHE.update(probed=True, info=info)
+    return info
+
+
+def _dhash_bits_from_path(path):
+    """任意本地图片/视频路径 → 64-bit dHash int;失败 None。"""
+    if not path or not os.path.isfile(path):
+        return None
+    exe = ffmpeg_path()
+    if not exe:
+        return None
+    return _ffmpeg_dhash_bits(exe, path)
+
+
+def _resolve_image_query(query):
+    """把 query(素材 id 或路径)解析为 (bits|None, meta dict)。"""
+    q = (query or "").strip().strip('"')
+    meta = {"query": q, "source": ""}
+    if not q:
+        return None, {**meta, "error": "empty_query"}
+    sc = phash_path(q)
+    if sc and os.path.isfile(sc):
+        try:
+            with open(sc, "r", encoding="utf-8") as f:
+                return int(f.read().strip(), 16), {**meta, "source": "sidecar", "id": q}
+        except (OSError, ValueError):
+            pass
+    m = get_material(q)
+    if m:
+        src = _abs_source(m)
+        bits = _dhash_bits_from_path(src)
+        if bits is not None:
+            return bits, {**meta, "source": "material", "id": q, "path": src}
+        return None, {**meta, "error": "hash_failed", "id": q, "path": src or ""}
+    path = os.path.abspath(q) if not os.path.isabs(q) else q
+    if os.path.isfile(path):
+        if not external_path_allowed(path):
+            return None, {**meta, "error": "path_not_allowed", "path": path}
+        bits = _dhash_bits_from_path(path)
+        if bits is not None:
+            return bits, {**meta, "source": "path", "path": path}
+        return None, {**meta, "error": "hash_failed", "path": path}
+    return None, {**meta, "error": "not_found"}
+
+
+def _clip_visual_path(m):
+    """素材用于 CLIP 的画面路径:优先封面 jpg,否则图片源文件,视频则抽 1 帧到临时。"""
+    mid = m["id"]
+    tp = thumb_path(mid)
+    if tp and os.path.isfile(tp) and os.path.getsize(tp) > 0:
+        return tp, "thumb"
+    src = _abs_source(m) or ""
+    if m.get("kind") == "images" and src and os.path.isfile(src):
+        return src, "source"
+    if m.get("kind") in VIDEO_LIKE_KINDS and src and os.path.isfile(src):
+        # 无封面时临时抽一帧(不污染 thumbs 失败标记)
+        exe = ffmpeg_path()
+        if not exe:
+            return "", "no_ffmpeg"
+        os.makedirs(os.path.join(INDEX_DIR, "_clip_frames"), exist_ok=True)
+        dst = os.path.join(INDEX_DIR, "_clip_frames", mid + ".jpg")
+        if not (os.path.isfile(dst) and os.path.getsize(dst) > 0):
+            flags = 0x08000000 if os.name == "nt" else 0
+            try:
+                subprocess.run(
+                    [exe, "-v", "error", "-y", "-i", src, "-frames:v", "1",
+                     "-vf", "scale=224:-2", "-q:v", "4", dst],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=60, creationflags=flags,
+                )
+            except Exception:
+                return "", "frame_fail"
+        if os.path.isfile(dst) and os.path.getsize(dst) > 0:
+            return dst, "frame"
+    return "", "missing"
+
+
+def _clip_embed_images(paths):
+    """批量嵌图。返回 list[list[float]|None]。"""
+    if not paths:
+        return []
+    info = clip_probe()
+    if not info["ok"]:
+        return [None] * len(paths)
+    if info.get("backend") == "http":
+        out = []
+        for p in paths:
+            out.append(_clip_embed_image_http(p))
+        return out
+    r = _clip_runner_cmd(["embed-image"] + list(paths), timeout=max(120, 30 * len(paths)))
+    if r.get("error"):
+        return [None] * len(paths)
+    vecs = r.get("vectors") or []
+    # 对齐长度
+    while len(vecs) < len(paths):
+        vecs.append(None)
+    return vecs[:len(paths)]
+
+
+def _clip_embed_texts(texts):
+    if not texts:
+        return []
+    info = clip_probe()
+    if not info["ok"]:
+        return [None] * len(texts)
+    if info.get("backend") == "http":
+        return [_clip_embed_text_http(t) for t in texts]
+    r = _clip_runner_cmd(["embed-text"] + list(texts), timeout=120)
+    if r.get("error"):
+        return [None] * len(texts)
+    vecs = r.get("vectors") or []
+    while len(vecs) < len(texts):
+        vecs.append(None)
+    return vecs[:len(texts)]
+
+
+def _clip_embed_image_http(path):
+    info = clip_probe()
+    if not info.get("url"):
+        return None
+    try:
+        import base64
+        with open(path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("ascii")
+        r = _http_json(info["url"] + "/embed_image", timeout=60,
+                       payload={"image_b64": b64, "path": path})
+        vec = r.get("embedding") or r.get("vector")
+        if isinstance(vec, list) and vec:
+            return [float(x) for x in vec]
+    except Exception:
+        return None
+    return None
+
+
+def _clip_embed_text_http(text):
+    info = clip_probe()
+    if not info.get("url") or not (text or "").strip():
+        return None
+    try:
+        r = _http_json(info["url"] + "/embed_text", timeout=30,
+                       payload={"text": text})
+        vec = r.get("embedding") or r.get("vector")
+        if isinstance(vec, list) and vec:
+            return [float(x) for x in vec]
+    except Exception:
+        return None
+    return None
+
+
+def _cosine(a, b):
+    if not a or not b or len(a) != len(b):
+        return -1.0
+    import math
+    na = math.sqrt(sum(x * x for x in a)) or 1.0
+    nb = math.sqrt(sum(x * x for x in b)) or 1.0
+    return sum(x * y for x, y in zip(a, b)) / (na * nb)
+
+
+def image_embed_status():
+    """图像 CLIP 索引覆盖率。"""
+    info = clip_probe()
+    con = _con()
+    n = con.execute("SELECT COUNT(*) c FROM image_embeddings").fetchone()[0]
+    con.close()
+    visuals = sum(1 for m in all_materials() if m.get("kind") in VISUAL_KINDS)
+    return {
+        "available": bool(info.get("ok")),
+        "backend": info.get("backend", ""),
+        "model": info.get("model", ""),
+        "embedded": n,
+        "visual_total": visuals,
+        "coverage": round(n / visuals, 3) if visuals else 0.0,
+        "err": info.get("err", ""),
+    }
+
+
+def build_image_embeddings(force=False, limit=0, progress=None):
+    """为 videos/silent/images 建 CLIP 图像向量(增量)。无后端 → available=False。"""
+    info = clip_probe(refresh=True)
+    if not info.get("ok"):
+        return {"available": False, "embedded": 0, "skipped": 0, "total": 0,
+                "err": info.get("err", "clip_unavailable")}
+    model = info.get("model") or "clip"
+    ms = [m for m in all_materials() if m.get("kind") in VISUAL_KINDS]
+    con = _con()
+    con.row_factory = sqlite3.Row
+    have = {r["mid"]: (r["model"], r["sig"]) for r in con.execute(
+        "SELECT mid, model, sig FROM image_embeddings").fetchall()}
+    con.close()
+    todo = []
+    for m in ms:
+        path, how = _clip_visual_path(m)
+        if not path:
+            continue
+        try:
+            sig = "%s:%d" % (how, os.path.getsize(path))
+        except OSError:
+            continue
+        if not force and have.get(m["id"]) == (model, sig):
+            continue
+        todo.append((m["id"], path, sig))
+    total = len(ms)
+    skipped = total - len(todo)
+    if limit:
+        todo = todo[:limit]
+    done = 0
+    batch = 8
+    for i in range(0, len(todo), batch):
+        chunk = todo[i:i + batch]
+        vecs = _clip_embed_images([p for _, p, _ in chunk])
+        con = _con()
+        now = datetime.datetime.now().isoformat(timespec="seconds")
+        for (mid, path, sig), vec in zip(chunk, vecs):
+            if not vec:
+                continue
+            con.execute(
+                "INSERT OR REPLACE INTO image_embeddings(mid,model,dim,sig,vec,updated_at)"
+                " VALUES(?,?,?,?,?,?)",
+                (mid, model, len(vec), sig, _vec_to_blob(vec), now),
+            )
+            done += 1
+        con.commit()
+        con.close()
+        if progress:
+            progress(min(i + batch, len(todo)), len(todo))
+    log_history("app", "imgembed", "", "embedded=%d model=%s" % (done, model))
+    return {"available": True, "model": model, "total": total,
+            "embedded": done, "skipped": skipped, "pending": len(todo) - done}
+
+
+def _load_image_vectors(model=None):
+    con = _con()
+    con.row_factory = sqlite3.Row
+    if model:
+        rows = con.execute(
+            "SELECT mid, vec FROM image_embeddings WHERE model=?", (model,)
+        ).fetchall()
+    else:
+        rows = con.execute("SELECT mid, vec FROM image_embeddings").fetchall()
+    con.close()
+    return {r["mid"]: _blob_to_vec(r["vec"]) for r in rows}
+
+
+def search_by_clip_vector(qv, *, limit=20, skip_id="", min_score=0.15):
+    """给定查询向量,在 image_embeddings 里余弦召回。"""
+    if not qv:
+        return []
+    info = clip_probe()
+    model = info.get("model") or None
+    store = _load_image_vectors(model if info.get("backend") == "local" else None)
+    scored = []
+    for mid, iv in store.items():
+        if skip_id and mid == skip_id:
+            continue
+        s = _cosine(qv, iv)
+        if s < min_score:
+            continue
+        m = get_material(mid) or {}
+        scored.append({"id": mid, "name": m.get("name", ""),
+                       "kind": m.get("kind", ""), "score": round(s, 4)})
+    scored.sort(key=lambda x: -x["score"])
+    return scored[:limit]
+
+
+def search_by_text_image(text, *, limit=20, min_score=0.15):
+    """以文搜图(CLIP 共空间)。无后端/无索引 → status unavailable/empty。"""
+    text = (text or "").strip()
+    if not text:
+        return {"status": "error", "mode": "clip-text", "matches": [],
+                "error": "empty_query"}
+    info = clip_probe()
+    if not info.get("ok"):
+        return {"status": "unavailable", "mode": "clip-text", "clip": info,
+                "matches": [], "hint": "需 SP venv open_clip + 权重,或 VITUAL_CLIP_URL"}
+    st = image_embed_status()
+    if st["embedded"] <= 0:
+        return {"status": "empty_index", "mode": "clip-text", "matches": [],
+                "hint": "先 python cli.py imgembed 建图像索引"}
+    vecs = _clip_embed_texts([text])
+    if not vecs or not vecs[0]:
+        return {"status": "error", "mode": "clip-text", "matches": [],
+                "error": "embed_failed"}
+    hits = search_by_clip_vector(vecs[0], limit=limit, min_score=min_score)
+    return {"status": "ok", "mode": "clip-text", "matches": hits,
+            "total": len(hits), "model": info.get("model", "")}
+
+
+def search_by_image(query, *, max_dist=10, limit=20, mode="auto"):
+    """以图搜图。
+
+    mode:
+      auto  — 有 CLIP 索引则 clip,否则 phash
+      phash — dHash 汉明近邻
+      clip  — CLIP 向量;无后端/无索引 → unavailable/empty_index
+    """
+    mode = (mode or "auto").strip().lower()
+    try:
+        max_dist = int(max_dist)
+        limit = int(limit) or 20
+    except (TypeError, ValueError):
+        max_dist, limit = 10, 20
+
+    st = image_embed_status()  # 一次探测,auto/clip/phash 三路径共用(去冗余)
+    want_clip = mode == "clip"
+    if mode == "auto":
+        want_clip = bool(st.get("available") and st.get("embedded", 0) > 0)
+
+    if want_clip or mode == "clip":
+        info = clip_probe()
+        if not info.get("ok"):
+            if mode == "clip":
+                return {"status": "unavailable", "mode": "clip", "clip": info,
+                        "matches": [],
+                        "hint": "本地 open_clip 权重未就绪且无 VITUAL_CLIP_URL;"
+                                "可改 mode=phash,或下载权重到 models/clip"}
+            want_clip = False
+        else:
+            if st["embedded"] <= 0 and mode == "clip":
+                return {"status": "empty_index", "mode": "clip", "matches": [],
+                        "hint": "先 python cli.py imgembed"}
+            if st["embedded"] > 0:
+                # 解析查询为可嵌图路径
+                path, skip_id = "", ""
+                m = get_material((query or "").strip())
+                if m:
+                    skip_id = m["id"]
+                    path, _ = _clip_visual_path(m)
+                else:
+                    cand = os.path.abspath((query or "").strip())
+                    if os.path.isfile(cand) and external_path_allowed(cand):
+                        path = cand
+                if not path:
+                    if mode == "clip":
+                        return {"status": "error", "mode": "clip", "matches": [],
+                                "error": "no_visual_for_query"}
+                    want_clip = False
+                else:
+                    vecs = _clip_embed_images([path])
+                    if not vecs or not vecs[0]:
+                        if mode == "clip":
+                            return {"status": "error", "mode": "clip",
+                                    "matches": [], "error": "embed_failed"}
+                        want_clip = False
+                    else:
+                        hits = search_by_clip_vector(
+                            vecs[0], limit=limit, skip_id=skip_id)
+                        return {"status": "ok", "mode": "clip",
+                                "matches": hits, "total": len(hits),
+                                "model": info.get("model", ""),
+                                "id": skip_id or "", "path": path}
+
+    bits, meta = _resolve_image_query(query)
+    if bits is None:
+        return {"status": "error", "mode": "phash", "matches": [], **meta}
+    skip_id = meta.get("id") or ""
+    hits, total = [], 0
+    for oid, other in _load_all_phashes():
+        if skip_id and oid == skip_id:
+            continue
+        total += 1
+        d = hamming(bits, other)
+        if d <= max_dist:
+            m = get_material(oid) or {}
+            hits.append({"id": oid, "name": m.get("name", ""),
+                         "kind": m.get("kind", ""), "dist": d})
+    hits.sort(key=lambda x: x["dist"])
+    out = {"status": "ok", "mode": "phash", "matches": hits[:limit],
+           "total": total, "max_dist": max_dist,
+           "clip_ready": bool(clip_probe().get("ok")),
+           "clip_embedded": st.get("embedded", 0),
+           }
+    for k in ("source", "id", "path"):
+        if k in meta:
+            out[k] = meta[k]
+    return out
+
+
 # ---------- 事件驱动自动处理链(封面→OCR→镜头索引→pHash→自动打标→语义索引) ----------
 def pending_processing(mid):
     """返回该素材还缺哪些自动处理步骤(True=缺)。
 
     判断依据:thumb 看 thumb_path(mid) 的 jpg 是否存在且非空;
     ocr/shots/phash 看各自 sidecar(index/ocr|shots|phash/<id>.*)是否已落盘。
-    非 videos/images 素材(docs/subs/audio/other)不需要画面类派生数据 → 全 False。"""
+    非 videos/silent/images 素材(docs/subs/audio/other)不需要画面类派生数据 → 全 False。
+    物理 clip(role:clip):镜头索引挂在母版上,shots 永不标缺。
+    images:不需要 shots(场景检测只对视频)。"""
     m = get_material(mid)
-    if not m or m.get("kind") not in ("videos", "images"):
+    if not m or m.get("kind") not in VISUAL_KINDS:
         return {"thumb": False, "ocr": False, "shots": False, "phash": False}
     tp = thumb_path(mid)
     op, sp, pp = ocr_sidecar_path(mid), shot_index_path(mid), phash_path(mid)
+    kind = m.get("kind")
+    # 图片本身可当封面;有文件即不缺 thumb
+    if kind == "images":
+        src = _material_abs_path(m)
+        need_thumb = not (src and os.path.isfile(src))
+    else:
+        need_thumb = not (tp and os.path.exists(tp) and os.path.getsize(tp) > 0)
+    need_shots = kind in ("videos", "silent") and not is_role_clip(m)
     return {
-        "thumb": not (tp and os.path.exists(tp) and os.path.getsize(tp) > 0),
+        "thumb": need_thumb,
         "ocr": not (op and os.path.isfile(op)),
-        "shots": not (sp and os.path.isfile(sp)),
+        "shots": need_shots and not (sp and os.path.isfile(sp)),
         "phash": not (pp and os.path.isfile(pp)),
     }
 
@@ -2150,7 +3656,14 @@ def auto_process_material(mid, ocr=True, shots=True, phash=True, autotag=False):
     _attempt("thumb", _thumb)
     if ocr:
         _attempt("ocr", lambda: ocr_material(mid))
-    if shots:
+    # 物理 clip / 图片 不建镜头表(逻辑片段只在母版 videos/silent shots)
+    m0 = get_material(mid) or {}
+    run_shots = (
+        shots
+        and m0.get("kind") in ("videos", "silent")
+        and not is_role_clip(m0)
+    )
+    if run_shots:
         _attempt("shots", lambda: build_shot_index(mid))
     if phash:
         _attempt("phash", lambda: phash_material(mid))
@@ -2163,11 +3676,11 @@ def auto_process_material(mid, ocr=True, shots=True, phash=True, autotag=False):
 
 
 def auto_process_all(limit=0, autotag=False):
-    """批处理:找出所有还有缺项的 videos/images 素材,逐条跑 auto_process_material,
+    """批处理:找出所有还有缺项的 videos/silent/images 素材,逐条跑 auto_process_material,
     最后调一次 build_embeddings()(增量:只补新素材/文本有变化的向量)。
     limit>0 时只处理前 limit 条。返回 {"processed", "results", "embed"}。"""
     ms = [m for m in all_materials()
-          if m.get("kind") in ("videos", "images")
+          if m.get("kind") in VISUAL_KINDS
           and any(pending_processing(m["id"]).values())]
     if limit:
         ms = ms[:limit]
@@ -2210,7 +3723,7 @@ def missing_thumbnail_ids(skip_failed=True):
     skip_failed=True 时跳过已知损坏(有 .fail 标记)的,避免每次批量都白跑。"""
     out = []
     for m in all_materials():
-        if m["kind"] != "videos":
+        if m["kind"] not in VIDEO_LIKE_KINDS:
             continue
         p = thumb_path(m["id"])
         if os.path.exists(p) and os.path.getsize(p) > 0:
@@ -2219,6 +3732,135 @@ def missing_thumbnail_ids(skip_failed=True):
             continue
         out.append(m["id"])
     return out
+
+
+def list_missing_covers(kind="", skip_failed=True, limit=50):
+    """无封面的 videos/silent 清单(Agent/MCP 只读技能用)。
+    kind 可滤 `silent`/`videos`;空=两者。返回 [{id,kind,name,tags},...]。"""
+    want = {kind} if kind in VIDEO_LIKE_KINDS else set(VIDEO_LIKE_KINDS)
+    ids = set(missing_thumbnail_ids(skip_failed=skip_failed))
+    out = []
+    for m in all_materials():
+        if m["id"] not in ids or m.get("kind") not in want:
+            continue
+        out.append({
+            "id": m["id"], "kind": m.get("kind", ""), "name": m.get("name", ""),
+            "tags": m.get("tags", ""),
+        })
+        if limit and len(out) >= limit:
+            break
+    return out
+
+
+def job_checkup(job_id):
+    """某 subtitle_pipeline job 的资产体检(只读,确定性,零幻觉)。
+
+    看 kinds 是否齐(videos/silent/audio/subs/docs)、封面/镜头缺项、asr 音轨标签、
+    失效外部引用;并汇总 master/clip/组件关系(方案 A)。
+    Agent Prompt「job 体检」与 MCP tool 共用。
+    """
+    jid = (job_id or "").strip()
+    if not jid:
+        return {"ok": False, "error": "job_id required"}
+    tag = jid if jid.startswith("job:") else ("job:" + jid)
+    rows = search("", tag=tag, limit=500) or []
+    # 兼容 tag 里只有裸 job id 的旧数据
+    if not rows and not jid.startswith("job:"):
+        rows = [m for m in all_materials()
+                if ("job:" + jid) in (m.get("tags") or "")
+                or jid in (m.get("tags") or "").split(",")]
+    kinds = {}
+    missing_thumbs, missing_shots = [], []
+    asr_ids, broken_ids = [], []
+    master_ids, clip_ids, component_ids = [], [], []
+    clips_missing_parent = []
+    for m in rows:
+        k = m.get("kind") or "?"
+        kinds[k] = kinds.get(k, 0) + 1
+        tags = _material_tag_set(m)
+        if is_role_master(tags) or (
+            k == "videos" and "role:clip" not in tags and "type:clip" not in tags
+        ):
+            if m["id"] not in master_ids:
+                master_ids.append(m["id"])
+        if is_role_clip(tags) or "type:clip" in tags:
+            clip_ids.append(m["id"])
+            if not any(t.startswith("parent:") for t in tags):
+                clips_missing_parent.append(m["id"])
+        if "role:silent-picture" in tags or "role:audio-stem" in tags or "demux" in tags:
+            component_ids.append(m["id"])
+        if k in VIDEO_LIKE_KINDS:
+            tp = thumb_path(m["id"])
+            if not (os.path.exists(tp) and os.path.getsize(tp) > 0):
+                if not os.path.exists(tp + ".fail"):
+                    missing_thumbs.append(m["id"])
+            # 镜头挂母版:物理 clip / demux silent 不要求 shots
+            if (
+                not is_role_clip(tags)
+                and "type:clip" not in tags
+                and k == "videos"
+                and get_shots(m["id"]) is None
+            ):
+                missing_shots.append(m["id"])
+        if k == "audio" and ("asr" in tags or "16k" in (m.get("name") or "").lower()):
+            asr_ids.append(m["id"])
+        if m.get("location") == "external":
+            ep = m.get("external_path") or ""
+            if ep and not os.path.isfile(ep):
+                broken_ids.append(m["id"])
+    ok = (
+        bool(rows)
+        and not broken_ids
+        and (kinds.get("videos", 0) + kinds.get("silent", 0)) > 0
+    )
+    return {
+        "ok": ok,
+        "job": jid,
+        "tag": tag,
+        "count": len(rows),
+        "kinds": kinds,
+        "has_silent": kinds.get("silent", 0) > 0,
+        "has_audio": kinds.get("audio", 0) > 0,
+        "has_subs": kinds.get("subs", 0) > 0,
+        "has_notes": kinds.get("docs", 0) > 0,
+        "master_ids": master_ids,
+        "clip_ids": clip_ids,
+        "component_ids": component_ids,
+        "clips_missing_parent": clips_missing_parent,
+        "asr_ids": asr_ids,
+        "missing_thumbs": missing_thumbs,
+        "missing_shots": missing_shots,
+        "broken_ids": broken_ids,
+        "materials": [
+            {"id": m["id"], "kind": m.get("kind"), "name": m.get("name", "")}
+            for m in rows[:40]
+        ],
+    }
+
+
+def split_new_videos(mids, *, force=False):
+    """对一批素材 id 里 kind=videos 且有音轨的条目跑 split_video_to_silent_and_audio。
+    跳过 role:clip(除非 force)。返回 {ran, ok, results, new_ids}。"""
+    results, new_ids = [], []
+    for mid in mids or []:
+        m = get_material(mid)
+        if not m or m.get("kind") != "videos":
+            continue
+        if is_role_clip(m) and not force:
+            results.append({"status": "skipped", "reason": "role:clip", "source_id": mid})
+            continue
+        r = split_video_to_silent_and_audio(mid, force=force)
+        results.append(r)
+        if r.get("silent_status") == "added" and r.get("silent_id"):
+            new_ids.append(r["silent_id"])
+        if r.get("audio_status") == "added" and r.get("audio_id"):
+            new_ids.append(r["audio_id"])
+    return {
+        "ran": len(results),
+        "ok": sum(1 for r in results if r.get("status") in ("ok", "reclassified")),
+        "results": results,
+        "new_ids": new_ids,
+    }
 
 
 if __name__ == "__main__":

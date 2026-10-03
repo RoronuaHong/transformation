@@ -134,12 +134,15 @@ def _require_confirm(a):
 
 
 def t_update_tags(a):
+    """写:合并打标(只增不删;系统面标签不可删;需 confirm=true)。
+
+    与 Deep Agent 同语义,避免 MCP 整体替换抹掉 job:/role:。
+    """
     _require_confirm(a)
-    mid = a.get("id", "")
+    mid = str(a.get("id") or "").strip()
     if not core.get_material(mid):
         raise ValueError("not found: " + mid)
-    r = core.update_tags(mid, a.get("tags", ""))
-    return r
+    return core.merge_material_tags(mid, a.get("tags", ""), a.get("remove"))
 
 
 def t_register(a):
@@ -459,9 +462,11 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "q": {"type": "string"}, "kind": {"type": "string"},
          "tag": {"type": "string"}, "limit": {"type": "integer"}}}},
-    {"name": "update_tags", "description": "写:更新素材标签(需 confirm=true)",
+    {"name": "update_tags", "description": "写:合并打标(只增不删;系统面标签永不动;删须 remove;需 confirm=true)",
      "inputSchema": {"type": "object", "properties": {
          "id": {"type": "string"}, "tags": {"type": "string"},
+         "remove": {"type": "array", "items": {"type": "string"},
+                    "description": "显式删除的非系统标签"},
          "confirm": {"type": "boolean"}}, "required": ["id", "confirm"]}},
     {"name": "register_asset", "description": "写:登记外部文件引用(不复制,按原路径索引,需 confirm=true)",
      "inputSchema": {"type": "object", "properties": {

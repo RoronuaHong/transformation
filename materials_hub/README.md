@@ -55,13 +55,18 @@
 sp | <platform> | job:<id> | type:<media|clip|subs|notes|benchmark|render|test>
   | role:<master|clip|silent-picture|audio-stem|picture> | parent:<id> | t_start: | t_end: | lang:<xx>
 ```
-- `sp` —— 来源标记(固定值,表示来自 subtitle_pipeline)
+- `sp` —— 来源·流水线(subtitle_pipeline 登记)
+- `upload` —— 来源·本机上传
 - `<platform>` —— bilibili / youtube 等(受控:只填已知平台)
 - `job:<id>` —— 对应某次采集任务(同一任务的全套素材可一键筛出)
-- `type:<...>` —— 业务类型；`clip`=物理交付切片(非新 kind)
+- `type:<...>` —— 业务类型；`clip`=物理交付切片(非新 kind)；未知路径**不**再写 `type:batch`
 - `role:master` / `role:clip` —— 母版 vs 物理切片；逻辑镜头只在 `shots` sidecar
-- `parent:<id>` / `from:<id>` —— 子件连回母版(demux / clip)
+- `role:silent-picture` / `role:audio-stem` —— 拆条组件(≠剪辑切片)
+- `parent:<id>` —— 子件连回母版；旧别名 `from:` **已弃用**(读兼容,新写入与面板均不再用)
 - `lang:<xx>` —— 从文件名识别的语言(zh/en/ja…)
+
+面板侧栏显示**人读标签**(如「角色·母版」「类型·源片」),悬停可见原始 `key:value`;过滤仍用原始值。
+冗余面默认不进标签云:`from:` / `has_audio:` / `role:picture` / 时间码。
 
 **扩展规则(保持一致,便于检索)**:
 1. 维度用 `key:value` 形式(`job:`、`type:`、`lang:`、`role:`、`parent:`),便于分面过滤;自由文本放进 `description`,别塞进 tags。
@@ -428,7 +433,7 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 `near_duplicate_report(max_dist?,limit?)` 全库近重复对+簇 /
 `search_by_image(query|id|path)` 以图搜图(dHash;CLIP 待权重) /
 `list_missing_covers` / `job_checkup` 运维只读技能 /
-`update_tags(id,tags,confirm)` 与 `register_asset(path,...,confirm)` **写工具(强制 `confirm=true`,缺省即拒绝,防 Agent 误改)**。
+`update_tags(id,tags,confirm[,remove])` 与 `register_asset(path,...,confirm)` **写工具(强制 `confirm=true`)**；`update_tags` 为**合并语义**(只增不删，系统面标签永不动，删须 `remove`)。
 
 Resources(订阅式只读,比 tool 更省 token):`hub://recent/{n}` 最新素材、`hub://job/{jobid}` 某 subtitle_pipeline job 全套、
 `hub://history/{n}` **写操作审计日志**、`hub://shots/{id}` **镜头索引**(未建则 `{status:missing}`)、

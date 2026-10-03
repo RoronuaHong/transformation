@@ -19,9 +19,14 @@ def _setup():
     """惰性初始化临时环境(直接跑与 pytest 均可用)。"""
     global _TMP
     if _TMP is None:
-        _TMP = tempfile.mkdtemp(prefix="hub_phash_test_")
+        # 同盘临时目录,避免污染真实 index/phash
+        _TMP = tempfile.mkdtemp(prefix="hub_phash_test_", dir=core.HUB)
         core.INDEX_DB = os.path.join(_TMP, "hub.db")
+        core.INDEX_DIR = _TMP
         core.PHASH_DIR = os.path.join(_TMP, "phash")
+        core.MATERIALS = os.path.join(_TMP, "materials")
+        core.THUMBS = os.path.join(_TMP, "thumbs")
+        os.makedirs(core.PHASH_DIR, exist_ok=True)
         core._init_db()
 
 
@@ -137,6 +142,59 @@ def test_similar_assets():
     print("PASS test_similar_assets")
 
 
+def test_near_duplicate_report_clusters():
+    # 全库报告:me↔b1 近重复成簇;a1 距离 64 不进簇
+    _setup()
+    os.makedirs(core.PHASH_DIR, exist_ok=True)
+    for fn in list(os.listdir(core.PHASH_DIR)):
+        os.remove(os.path.join(core.PHASH_DIR, fn))
+    _mk_material("me")
+    _mk_material("a1")
+    _mk_material("b1")
+    _mk_material("c1")
+    _write_hash("me", "ffffffffffffffff")
+    _write_hash("a1", "0000000000000000")
+    _write_hash("b1", "ffffffffffffff00")   # dist(me)=8
+    _write_hash("c1", "fffffffffffffe00")   # dist(b1)小 → 与 me/b1 同簇
+    r = core.near_duplicate_report(max_dist=10, limit_pairs=20)
+    assert r["hashed"] == 4, r
+    assert r["pair_count"] >= 1, r
+    assert r["cluster_count"] >= 1, r
+    # me 与 b1 应在同一簇
+    clustered = {frozenset(c["ids"]) for c in r["clusters"]}
+    assert any("me" in ids and "b1" in ids for ids in clustered), clustered
+    # a1 不应与 me 同簇
+    assert not any("me" in ids and "a1" in ids for ids in clustered), clustered
+    # limit_pairs 截断
+    r2 = core.near_duplicate_report(max_dist=64, limit_pairs=1)
+    assert len(r2["pairs"]) == 1 and r2["pair_count"] >= 1, r2
+    print("PASS test_near_duplicate_report_clusters")
+
+
+def test_search_by_image_phash_and_clip_gate():
+    _setup()
+    os.makedirs(core.PHASH_DIR, exist_ok=True)
+    for fn in list(os.listdir(core.PHASH_DIR)):
+        os.remove(os.path.join(core.PHASH_DIR, fn))
+    _mk_material("me")
+    _mk_material("b1")
+    _write_hash("me", "ffffffffffffffff")
+    _write_hash("b1", "ffffffffffffff00")
+    r = core.search_by_image("me", max_dist=10, mode="phash")
+    assert r["status"] == "ok" and r["mode"] == "phash", r
+    assert [m["id"] for m in r["matches"]] == ["b1"], r
+    assert r["matches"][0]["dist"] == 8, r
+    # 空查询
+    assert core.search_by_image("")["status"] == "error"
+    # clip 模式:无后端 → unavailable;有后端无索引 → empty_index
+    r2 = core.search_by_image("me", mode="clip")
+    assert r2["mode"] == "clip" and r2["status"] in ("unavailable", "empty_index"), r2
+    # 未知 id
+    r3 = core.search_by_image("no_such_material_xyz")
+    assert r3["status"] == "error", r3
+    print("PASS test_search_by_image_phash_and_clip_gate")
+
+
 def test_phash_path_injection():
     # ⑥ 防注入:含分隔符/冒号/空 id 拒绝生成 sidecar 路径
     _setup()
@@ -183,6 +241,8 @@ if __name__ == "__main__":
     test_phash_material_cached_no_subprocess()
     test_phash_material_guards()
     test_similar_assets()
+    test_near_duplicate_report_clusters()
+    test_search_by_image_phash_and_clip_gate()
     test_phash_path_injection()
     test_phash_material_ok_writes_sidecar()
     _teardown()

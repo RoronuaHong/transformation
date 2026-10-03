@@ -29,10 +29,29 @@ subtitle_pipeline/
 → 足以生成富标签(标题/平台/任务ID/类型)。
 
 ## 3. 素材类型 → 素材中心分类映射
-| subtitle_pipeline 产物 | 分类(kind) | type 标签 |
+| subtitle_pipeline 产物 | 分类(kind) | type / role 标签 |
 |---|---|---|
-| `media/*.mp4` 等 | videos | type:media |
-| `media/*.m4a/*.wav` | audio | type:media |
+| `media/*.mp4` 等（有音轨，**母版**） | videos | type:media + **role:master** + role:picture + has_audio:1 |
+| `media/clips/range_*.mp4`（**物理交付切片**） | videos | type:clip + **role:clip** + parent:`<母版id>` + t_start:/t_end: |
+| **库内拆条**：有声视频 demux 出的无声画面 | **silent（无声）** | demux + role:silent-picture + has_audio:0 + parent: |
+| `media/*.mp4` 等（本身无 audio stream） | **silent** | 直接 `classify` / `reclassify` |
+| 拆出的音轨 `*_track.wav` | audio | role:audio-stem + parent: |
+| `media/full_16k.wav` | audio | 同上 + **asr**（Whisper 派生，16 kHz） |
+
+对库内已有有声视频一键拆无声：`POST /api/split-silent`（或 Python `core.split_all_videos_to_silent()`）。
+原 `videos` 条目保留；新增 `silent` + `audio`。
+
+### 3.1 四层模型（方案 A，对齐 DAM 最佳实践）
+
+| 层 | 含义 | 本项目落点 |
+|----|------|------------|
+| **Master** | 权威源片，一份实体 | `role:master`；Agent 默认检索面 |
+| **Logical shot** | 母版时间轴片段 | `index/shots/<id>.json` + MCP `get_shots`；**不**每镜落盘 |
+| **Component** | 声画拆层 | silent / audio + `parent:` |
+| **Physical clip** | 已导出供二创的文件 | `role:clip`（可选）；bridge 登记后 `link_clip_parents` |
+
+**原则**：切片优先元数据；只有要发给下游的 mp4 才登记为 clip。回填：`python cli.py facets --link-parents`。
+
 | `subs/*.srt` | **subs(新增)** | type:subs |
 | `notes/*.md` | docs | type:notes |
 | `notes/*.json` / `*.json` 元数据 | docs | type:notes / type:meta |
@@ -40,7 +59,7 @@ subtitle_pipeline/
 | `benchmarks/*.mp4` | videos | type:benchmark |
 | `instances/*` 对比图 | images | type:test |
 
-自动标签统一为:`sp | <platform> | job:<id> | type:<...> | lang:<xx>`,
+自动标签统一为:`sp | <platform> | job:<id> | type:<...> | lang:<xx>`(+ role/parent 面),
 描述填 `title`(来自 fetch_meta.json)。
 
 ## 4. 架构(已落地)
@@ -68,16 +87,45 @@ Web 面板 /api/file/<id> ───┘ 按需读 external_path 预览(图片直�
 ```
 
 ## 5. 触发方式(任选)
-1. **手动**:`python bridge_subtitle.py`(先 `--dry-run` 看统计)。
-2. **轮询守护(零改动 subtitle_pipeline)**:`python bridge_subtitle.py --watch` 每 30s
+1. **流水线自动**(已落地):`discover/run_batch.py` 在 `mark_done` 后调用
+   `discover/hub_push.push_work_dir_to_hub` → `bridge.run_job_dir`(只登记本任务目录)。
+   关同步:环境变量 `VITUAL_HUB_SYNC=0`。
+   **登记后默认**：① 有声 videos → silent+track（`VITUAL_HUB_SPLIT_SILENT=0` 关）
+   ② auto 链 thumb→OCR→shots→pHash（`VITUAL_HUB_AUTOPROC=0` 关）。
+2. **手动**:`python bridge_subtitle.py`(先 `--dry-run` 看统计)。
+3. **轮询守护**:`python bridge_subtitle.py --watch` 每 30s
    增量扫描并登记新素材(`--interval` 调间隔、`--scope` 限定范围),Ctrl+C 退出。
-   适合长期挂一个后台进程,流水线产出即自动入编目。
-3. **定时**:Windows 任务计划程序 / cron,在 batch 跑完后执行,增量登记(sha256 去重保证幂等)。
-4. **流水线内钩子(进阶,需改 subtitle_pipeline)**:在 `discover/run_batch.py` 收尾调用
-   `bridge_subtitle.py --scope batch`,或在 `api/app.py` 暴露 `POST /api/register-asset`
-   转发到素材中心服务。默认**不改动 subtitle_pipeline**,保持只读联动。
+4. **定时**:Windows 任务计划程序 / cron,在 batch 跑完后执行,增量登记。
+   **幂等**:同 `sha256` 去重;同 `external_path` 内容变更时 **update** sha/size(不叠重复条目)。
 5. **MCP(进阶)**:subtitle_pipeline 已有 `vitual_mcp`;可加一个工具把产物 POST 到
-   素材中心(素材中心未来可加 `/api/register` 接收绝对路径)。阶段二再做。
+   素材中心。阶段二再做。
+
+### 5.0 事件驱动后处理(2026-09-29 对齐 §18/§19)
+
+入库成功后自动补齐派生数据,不必手跑 CLI:
+
+| 入口 | 触发 |
+|------|------|
+| Hub `POST /api/upload` `/api/ingest` `/api/scan` | `enqueue_autoproc` 后台线程 |
+| Hub `POST /api/split-silent` | 拆条成功 → 同上 |
+| Hub `POST /api/auto` / `GET /api/auto/status` | 手动全量 / 查进度 |
+| bridge `run_job_dir` | ① `link_clip_parents` ② `split_new_videos`(跳过 role:clip) ③ `do_auto` |
+| `bridge_subtitle.py --auto` | 登记后显式跑 auto 链 |
+| MCP `auto_process` / `get_shots` / `list_missing_covers` / `job_checkup` / `near_duplicate_report` | 写需 `confirm=true`;读镜头用 tool 或 `hub://shots/{id}` |
+| MCP Prompts | `fill_missing_thumbs`、`job_checkup`、`segment_first`（`prompts/list` / `prompts/get`） |
+| CLI `near-dupes` | 全库近重复对+簇报告 |
+| CLI / MCP `imgsearch` / `search_by_image` | 以图搜图(dHash/CLIP)；`imgsearch --text` 以文搜图 |
+| CLI `imgembed` / MCP `build_image_embeddings` | CLIP 图像向量索引（需 `models/clip/ViT-B-32.pt`） |
+| CLI `facets [--link-parents]` | 补 role:master/clip 面标签；回填 clip+组件 `parent:` |
+
+镜头索引:`python cli.py shots <id>` / `shots --all` → `index/shots/<id>.json`。
+近重复:`python cli.py near-dupes [--max-dist 10]`。
+以图/以文搜:`python cli.py phash --all`；`imgembed`；`imgsearch <id>` / `imgsearch --text "厨房"`。
+Agent 技能 Cursor skill: `.cursor/skills/materials-hub-agent/SKILL.md`。
+
+## 5.1 ASR→字幕校准链(与 PIPELINE_BEST_PRACTICES 对齐)
+详见 [`subtitle_pipeline/PIPELINE_BEST_PRACTICES.md`](../subtitle_pipeline/PIPELINE_BEST_PRACTICES.md)。
+摘要:16k wav → Whisper multipass → LLM-1 可疑校对 → glossary+LLM-2 全量 → 翻译 `.srt` → hub 登记。
 
 ## 6. 引用完整性(引用的固有代价,已一并处理)
 只登记索引就意味着**索引可能指向已经不存在的文件**(subtitle_pipeline 清理 `mode-renders/`、
@@ -92,11 +140,12 @@ Web 面板 /api/file/<id> ───┘ 按需读 external_path 预览(图片直�
 
 **一轮完整同步**(推荐挂后台或任务计划):
 ```bash
-python bridge_subtitle.py --thumbs --embed --prune   # 登记 + 补封面 + 刷新语义索引 + 引用巡检
+python bridge_subtitle.py --auto --embed --prune   # 登记 + 自动处理链 + 语义索引 + 引用巡检
 python bridge_subtitle.py --state                    # 查看上次同步时间/新增/引用完整性
 ```
-`--embed` 让新登记的产物**立刻可被自然语言搜到**(需要本机 ollama 有 embedding 模型;没有会自动跳过)。
-同步结果写入 `index/bridge_state.json`,便于运维核对"上次什么时候同步的、新增了多少"。
+`--auto` 覆盖单独 `--thumbs`(auto 链已含封面);`--embed` 让新登记立刻可被自然语言搜到
+(需要本机 ollama embedding 模型;没有会自动跳过)。
+同步结果写入 `index/bridge_state.json`。
 
 ## 7. 取舍与后续
 - **引用 vs 复制**:默认引用(省盘、幂等、不动原工程);若需素材中心自带备份,可加 `--copy` 走 `ingest_file`。

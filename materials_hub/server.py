@@ -13,14 +13,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from core import (
     init_hub, HUB, MATERIALS, get_material, all_materials, search,
-    count_materials, ingest_file, ingest_dir, scan_materials, update_tags,
+    count_materials, ingest_file, ingest_dir, scan_materials,
     update_description, remove_material, duplicates, sanitize_name,
-    distinct_tags, make_thumb, thumb_path, thumbs_status, purge_thumbs,
+    distinct_tags, tags_for_ui, make_thumb, thumb_path, thumbs_status, purge_thumbs,
     missing_thumbnail_ids, thumb_failure_reason, health, broken_externals,
     prune_broken_externals, external_stats,     build_embeddings, embed_status, chat_models,
     ensure_ollama, external_path_allowed,
     auto_process_all, pending_processing,
+    split_all_videos_to_silent, split_video_to_silent_and_audio,
+    reclassify_video_audio_kinds, apply_media_facet_tags, link_relation_parents,
+    merge_material_tags, is_system_facet_tag,
 )
+from gateway import proxy_target, forward as gateway_forward
 
 PORT = 8000
 # 鉴权(可选):设置 VITUAL_HUB_TOKEN 后,所有请求(含面板)都需带 token(Bearer 头或 ?token=),
@@ -79,7 +83,7 @@ def enqueue_autoproc(autotag=False, kicked_by=""):
         return
     if not any(pending_processing(m["id"]).values()
                for m in all_materials()
-               if m.get("kind") in ("videos", "images")):
+               if m.get("kind") in ("videos", "silent", "images")):
         return
     _AUTOPROC_JOB["running"] = True
     _AUTOPROC_JOB["error"] = ""
@@ -88,11 +92,29 @@ def enqueue_autoproc(autotag=False, kicked_by=""):
                      daemon=True).start()
 
 
-def _run_agent_job(task, allow_write, max_steps, task_id):
+def _thread_context(thread_id):
+    """同一对话线程的近期发言,注入下一轮 Deep Agent(短时记忆,不进 checkpoint 压缩)。"""
+    tid = str(thread_id or "").strip()
+    if not tid:
+        return ""
+    import agent as _agent_mod
+    th = _agent_mod.thread_get(tid)
+    if th.get("error"):
+        return ""
+    lines = []
+    for m in (th.get("messages") or [])[-6:]:
+        role = m.get("role")
+        content = str(m.get("content") or "").strip()
+        if role in ("user", "assistant") and content:
+            lines.append("%s: %s" % (role, content[:500]))
+    return "\n".join(lines)[:2500]
+
+
+def _run_agent_job(task, allow_write, max_steps, task_id, thread_context=""):
     import agent                                  # 延迟导入:agent 依赖 ollama 可用性
     try:
         r = agent.agent_run(task, allow_write=allow_write, max_steps=max_steps,
-                            task_id=task_id)
+                            task_id=task_id, thread_context=thread_context or "")
         _AGENT_JOB.update(running=False, status=r.get("status", "done"),
                           task_id=r.get("task_id", task_id), error=r.get("summary", "")[:200])
     except Exception as e:                        # noqa: BLE001
@@ -148,6 +170,19 @@ def parse_multipart(raw, boundary):
     return files
 
 
+def _cors_headers(handler):
+    """允许本机 Next(:3000) 直传大文件到 hub(:8000),绕过 rewrite 体积上限。"""
+    origin = (handler.headers.get("Origin") or "").strip()
+    if not origin:
+        return
+    if origin.startswith("http://127.0.0.1:") or origin.startswith("http://localhost:"):
+        handler.send_header("Access-Control-Allow-Origin", origin)
+        handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        handler.send_header("Access-Control-Allow-Headers",
+                            "Content-Type, Authorization")
+        handler.send_header("Access-Control-Max-Age", "86400")
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code, body, ctype="application/json"):
         if isinstance(body, str):
@@ -155,11 +190,19 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        _cors_headers(self)
         self.end_headers()
         self.wfile.write(body)
 
     def _json(self, obj, code=200):
         self._send(code, json.dumps(obj, ensure_ascii=False), "application/json; charset=utf-8")
+
+    def do_OPTIONS(self):
+        # 预检:浏览器跨域直传 multipart 到 :8000
+        self.send_response(204)
+        _cors_headers(self)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _serve_static(self, name, ctype=None):
         fp = os.path.join(HUB, "static", name)
@@ -172,46 +215,122 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype or mimetypes.guess_type(fp)[0] or "application/octet-stream")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-cache")
+        _cors_headers(self)
         self.end_headers()
         self.wfile.write(data)
 
-    def _serve_file(self, fp, ctype):
-        """发送文件,支持 HTTP Range(大视频可拖拽/边下边播)。"""
+    def _serve_file(self, fp, ctype, head_only=False):
+        """发送文件,支持 HTTP Range(大视频可拖拽/边下边播);流式写出避免整文件进内存。"""
         size = os.path.getsize(fp)
+        start, end, code = 0, size - 1, 200
         rng = self.headers.get("Range", "")
         if rng.startswith("bytes="):
             spec = rng[6:].split(",")[0].strip()
             if "-" in spec:
                 s, e = spec.split("-", 1)
-                start = int(s) if s else 0
-                end = int(e) if e else size - 1
+                try:
+                    start = int(s) if s else 0
+                    end = int(e) if e else size - 1
+                except ValueError:
+                    start, end = 0, size - 1
+                if start < 0:
+                    start = 0
                 if end >= size:
                     end = size - 1
-                length = end - start + 1
-                with open(fp, "rb") as f:
-                    f.seek(start)
-                    data = f.read(length)
-                self.send_response(206)
-                self.send_header("Content-Type", ctype)
-                self.send_header("Accept-Ranges", "bytes")
-                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-                self.send_header("Content-Length", str(length))
-                self.end_headers()
-                self.wfile.write(data)
-                return
-        with open(fp, "rb") as f:
-            data = f.read()
-        self.send_response(200)
+                if start > end or start >= size:
+                    self.send_response(416)
+                    self.send_header("Content-Range", "bytes */%d" % size)
+                    self.send_header("Content-Length", "0")
+                    _cors_headers(self)
+                    self.end_headers()
+                    return
+                code = 206
+        length = end - start + 1
+        self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Accept-Ranges", "bytes")
-        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Length", str(length))
+        if code == 206:
+            self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
+        # 媒体短缓存:利于拖拽 seek 复用已缓冲段,又避免永久脏缓存
+        self.send_header("Cache-Control", "public, max-age=3600")
+        _cors_headers(self)
         self.end_headers()
-        self.wfile.write(data)
+        if head_only:
+            return
+        with open(fp, "rb") as f:
+            f.seek(start)
+            left = length
+            while left > 0:
+                chunk = f.read(min(256 * 1024, left))
+                if not chunk:
+                    break
+                try:
+                    self.wfile.write(chunk)
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    return
+                left -= len(chunk)
+
+    def do_HEAD(self):
+        """浏览器探测媒体时常发 HEAD;缺省 501 会导致部分环境无法 seek。"""
+        if not _authorized(self):
+            self.send_response(401)
+            self.send_header("Content-Length", "0")
+            _cors_headers(self)
+            self.end_headers()
+            return
+        u = urllib.parse.urlparse(self.path)
+        p = u.path
+        if p.startswith("/api/file/"):
+            mid = p[len("/api/file/"):]
+            m = get_material(mid)
+            if not m:
+                return self._send(404, b"not found")
+            if m.get("location") == "external":
+                fp = m["external_path"]
+                if not external_path_allowed(fp):
+                    return self._send(403, b"forbidden")
+            else:
+                fp = _safe_resolve(HUB, m["rel_path"])
+                if not fp:
+                    return self._send(403, b"forbidden")
+            if not os.path.exists(fp):
+                return self._send(404, b"missing")
+            mt = mimetypes.guess_type(fp)[0]
+            ctype = {
+                "images": mt or "image/*",
+                "videos": mt or "video/*",
+                "silent": mt or "video/*",
+                "anim": mt or "image/gif",
+                "audio": mt or "audio/*",
+            }.get(m["kind"], mt or "application/octet-stream")
+            return self._serve_file(fp, ctype, head_only=True)
+        if p.startswith("/api/thumb/"):
+            mid = p[len("/api/thumb/"):]
+            fp = thumb_path(mid)
+            if not (fp and os.path.isfile(fp) and os.path.getsize(fp) > 0):
+                return self._send(404, b"not found")
+            return self._serve_file(fp, "image/jpeg", head_only=True)
+        self.send_response(404)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _maybe_gateway(self):
+        """Same-origin routes for transform workbench + ops-api (no iframe)."""
+        u = urllib.parse.urlparse(self.path)
+        hit = proxy_target(u.path)
+        if not hit:
+            return False
+        origin, up_path = hit
+        gateway_forward(self, origin, up_path)
+        return True
 
     def do_GET(self):
         if not _authorized(self):
             return self._send(401, json.dumps({"error": "unauthorized"}, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
+        if self._maybe_gateway():
+            return
         u = urllib.parse.urlparse(self.path)
         p = u.path
         if p in ("/", "/index.html"):
@@ -233,7 +352,7 @@ class Handler(BaseHTTPRequestHandler):
                           sort=sort if sort in ("newest", "oldest", "name", "size") else "")
             for m in rows:
                 # 给视频标注封面是否已就绪,前端据此决定要不要请求 poster
-                if m["kind"] == "videos":
+                if m["kind"] in ("videos", "silent"):
                     tp = thumb_path(m["id"])
                     m["thumb"] = os.path.exists(tp) and os.path.getsize(tp) > 0
                 # 外部引用标注原文件是否还在(缺失则卡片提示,不再发起必然 404 的请求)
@@ -252,9 +371,9 @@ class Handler(BaseHTTPRequestHandler):
             kinds = {}
             for m in ms:
                 kinds[m["kind"]] = kinds.get(m["kind"], 0) + 1
-            # 自动处理链待处理数(videos/images 中还有缺项的素材条数;全库遍历成本低)
+            # 自动处理链待处理数(videos/silent/images 中还有缺项的素材条数)
             pending = sum(1 for m in ms
-                          if m.get("kind") in ("videos", "images")
+                          if m.get("kind") in ("videos", "silent", "images")
                           and any(pending_processing(m["id"]).values()))
             return self._json({"total": len(ms), "dupes": len(duplicates()), "kinds": kinds,
                                "thumbs": thumbs_status(), "thumb_job": dict(_THUMB_JOB),
@@ -262,16 +381,19 @@ class Handler(BaseHTTPRequestHandler):
                                "embed": {**embed_status(), "job": dict(_EMBED_JOB)},
                                "auto": {"pending": pending}})
         if p == "/api/agent":
-            # Deep Agent 状态:?task_id= 取该任务 todos/summary/轨迹;无参取最近 job 快照
+            # Deep Agent 状态:?task_id= 始终读 checkpoint(每步落盘的 todos/progress)。
+            # 任务进行中也要带回这些字段,否则前端轮询只能看到 running,进度条不走。
             qs = urllib.parse.parse_qs(u.query)
             tid = (qs.get("task_id") or [""])[0]
-            if _AGENT_JOB["running"] and (not tid or tid == _AGENT_JOB["task_id"]):
-                return self._json({"running": True, "job": dict(_AGENT_JOB)})
             if tid:
                 import agent
                 st = agent.agent_status(tid)
                 st["job"] = dict(_AGENT_JOB)
+                st["running"] = bool(
+                    _AGENT_JOB["running"] and tid == _AGENT_JOB["task_id"])
                 return self._json(st)
+            if _AGENT_JOB["running"]:
+                return self._json({"running": True, "job": dict(_AGENT_JOB)})
             return self._json({"running": False, "job": dict(_AGENT_JOB)})
 
         if p == "/api/agent/caps":
@@ -279,6 +401,16 @@ class Handler(BaseHTTPRequestHandler):
             cms = chat_models()
             return self._json({"chat_models": cms, "model_ready": bool(cms),
                                "model": cms[0] if cms else ""})
+
+        if p == "/api/agent/threads":
+            # Deep Agent 对话线程:无 id → 列表;?id=th… → 完整 messages
+            import agent as _agent_mod
+            qs = urllib.parse.parse_qs(u.query)
+            tid = (qs.get("id") or qs.get("thread_id") or [""])[0].strip()
+            if tid:
+                return self._json(_agent_mod.thread_get(tid))
+            limit = int((qs.get("limit") or ["40"])[0] or 40)
+            return self._json({"threads": _agent_mod.thread_list(limit)})
 
         if p == "/api/auto/status":
             # 后台自动处理任务状态(上传/入库事件驱动触发,可轮询)
@@ -294,6 +426,11 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/dupes":
             return self._json(duplicates())
         if p == "/api/tags":
+            qs = urllib.parse.parse_qs(u.query)
+            lang = (qs.get("lang") or ["zh"])[0]
+            ui = (qs.get("ui") or ["1"])[0] not in ("0", "false", "no")
+            if ui:
+                return self._json(tags_for_ui(lang=lang))
             return self._json([{"tag": t, "count": c} for t, c in distinct_tags()])
         if p == "/api/export":
             fmt = urllib.parse.parse_qs(u.query).get("fmt", ["json"])[0]
@@ -364,12 +501,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, b"missing")
             mt = mimetypes.guess_type(fp)[0]
             ctype = {
-                "images": mt or "image/*", "videos": mt or "video/*",
+                "images": mt or "image/*",
+                "videos": mt or "video/*",
+                "silent": mt or "video/*",
                 "anim": mt or "image/gif",
                 "audio": mt or "audio/*",
-                "docs": "application/octet-stream", "subs": "application/octet-stream",
+                "docs": "application/octet-stream",
+                "subs": "application/octet-stream",
                 "other": "application/octet-stream",
-            }[m["kind"]]
+            }.get(m["kind"], mt or "application/octet-stream")
             return self._serve_file(fp, ctype)
         return self._send(404, b"not found")
 
@@ -377,6 +517,8 @@ class Handler(BaseHTTPRequestHandler):
         if not _authorized(self):
             return self._send(401, json.dumps({"error": "unauthorized"}, ensure_ascii=False).encode(),
                               "application/json; charset=utf-8")
+        if self._maybe_gateway():
+            return
         u = urllib.parse.urlparse(self.path)
         p = u.path
         length = int(self.headers.get("Content-Length", 0))
@@ -386,24 +528,28 @@ class Handler(BaseHTTPRequestHandler):
             ctype = self.headers.get("Content-Type", "")
             bm = re.search(r"boundary=([^;]+)", ctype)
             if not bm:
-                return self._send(400, b"no boundary")
-            files = parse_multipart(raw, bm.group(1).strip().encode())
-            res = None
-            added = False
-            for _, (filename, content) in files.items():
-                if not filename:
-                    continue
-                os.makedirs(INGEST if False else os.path.join(HUB, "ingest"), exist_ok=True)
-                tmp = os.path.join(HUB, "ingest", sanitize_name(filename))
-                with open(tmp, "wb") as o:
-                    o.write(content)
-                r = ingest_file(tmp, move=True)
-                if r and r.get("status") == "added":
-                    added = True
-                res = r or res
-            if added:
-                enqueue_autoproc(kicked_by="upload")
-            return self._json(res or {"status": "empty"})
+                return self._json({"error": "no boundary"}, 400)
+            boundary = bm.group(1).strip().strip('"').encode()
+            try:
+                files = parse_multipart(raw, boundary)
+                res = None
+                added = False
+                for _, (filename, content) in files.items():
+                    if not filename:
+                        continue
+                    os.makedirs(os.path.join(HUB, "ingest"), exist_ok=True)
+                    tmp = os.path.join(HUB, "ingest", sanitize_name(filename))
+                    with open(tmp, "wb") as o:
+                        o.write(content)
+                    r = ingest_file(tmp, move=True)
+                    if r and r.get("status") == "added":
+                        added = True
+                    res = r or res
+                if added:
+                    enqueue_autoproc(kicked_by="upload")
+                return self._json(res or {"status": "empty"})
+            except Exception as e:  # noqa: BLE001
+                return self._json({"error": "%s: %s" % (type(e).__name__, e)}, 500)
 
         if p == "/api/ingest":
             r = ingest_dir(os.path.join(HUB, "ingest"))
@@ -415,6 +561,29 @@ class Handler(BaseHTTPRequestHandler):
             if r:
                 enqueue_autoproc(kicked_by="scan")
             return self._json({"new": len(r)})
+        if p == "/api/split-silent":
+            # 库内有声视频 → 无声画面 + 音轨（DAM：picture / silent picture / stem）
+            try:
+                opt = json.loads(raw or b"{}")
+            except Exception:
+                opt = {}
+            mid = (opt.get("id") or "").strip()
+            force = bool(opt.get("force"))
+            if mid:
+                r = split_video_to_silent_and_audio(mid, force=force)
+                if r.get("status") in ("ok", "reclassified") or r.get("silent_status") == "added":
+                    enqueue_autoproc(kicked_by="split-silent")
+                return self._json(r)
+            r = split_all_videos_to_silent(force=force, limit=int(opt.get("limit") or 0))
+            if r.get("ok"):
+                enqueue_autoproc(kicked_by="split-silent")
+            return self._json(r)
+        if p == "/api/reclassify-media":
+            return self._json({
+                "reclassify": reclassify_video_audio_kinds(),
+                "facets": apply_media_facet_tags(),
+                "link_parents": link_relation_parents(),
+            })
 
         if p == "/api/thumbs":
             # {purge:true} 清空封面缓存;否则后台批量抽帧(limit 可限个数)
@@ -439,8 +608,18 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             body = {}
         if p == "/api/tag":
-            update_tags(body.get("id"), body.get("tags", ""))
-            return self._json({"ok": True})
+            # 安全合并:保留系统面标签(role:/job:/parent:/type:/sp/…),仅替换内容标签。
+            # 旧 update_tags 是整体替换,经面板回传会抹掉关系链标签(与 merge 契约冲突)。
+            mid = str(body.get("id") or "").strip()
+            m = get_material(mid)
+            if not m:
+                return self._json({"ok": False, "error": "not found: " + mid})
+            provided = [t.strip() for t in str(body.get("tags", "")).split(",") if t.strip()]
+            cur = [t.strip() for t in (m.get("tags") or "").split(",") if t.strip()]
+            cur_content = [t for t in cur if not is_system_facet_tag(t)]
+            remove = [t for t in cur_content if t not in provided]
+            r = merge_material_tags(mid, tags=",".join(provided), remove=remove)
+            return self._json(r)
         if p == "/api/describe":
             update_description(body.get("id"), body.get("description", ""))
             return self._json({"ok": True})
@@ -491,9 +670,42 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(
                 target=_run_agent_job,
                 args=(task, bool(opt.get("allow_write")),
-                      max(3, min(int(opt.get("max_steps") or 12), 20)), tid),
+                      max(3, min(int(opt.get("max_steps") or 12), 20)), tid,
+                      _thread_context(opt.get("thread_id") or opt.get("thread"))),
                 daemon=True).start()
             return self._json({"running": True, "task_id": tid, "job": dict(_AGENT_JOB)})
+
+        if p == "/api/agent/cancel":
+            # 协作式取消:写 cancel.flag,主循环步边界终止
+            try:
+                opt = json.loads(raw or b"{}")
+            except Exception:
+                opt = {}
+            tid = str(opt.get("task_id") or "").strip()
+            if not tid:
+                return self._json({"error": "task_id required"})
+            import agent as _agent_mod
+            return self._json(_agent_mod.agent_cancel(tid))
+
+        if p == "/api/agent/threads":
+            # 保存/删除对话线程(与 agent_workspace checkpoint 解耦)
+            try:
+                opt = json.loads(raw or b"{}")
+            except Exception:
+                opt = {}
+            import agent as _agent_mod
+            action = str(opt.get("action") or "save").strip().lower()
+            if action in ("delete", "remove"):
+                tid = str(opt.get("thread_id") or opt.get("id") or "").strip()
+                if not tid:
+                    return self._json({"error": "thread_id required"})
+                return self._json(_agent_mod.thread_delete(tid))
+            return self._json(_agent_mod.thread_save(
+                thread_id=opt.get("thread_id") or opt.get("id"),
+                title=str(opt.get("title") or ""),
+                messages=opt.get("messages"),
+                task_ids=opt.get("task_ids"),
+            ))
 
         if p == "/api/remove":
             remove_material(body.get("id"))
@@ -503,6 +715,30 @@ class Handler(BaseHTTPRequestHandler):
             bad = prune_broken_externals()
             return self._json({"pruned": len(bad),
                                "items": [m["name"] for m in bad[:50]]})
+        return self._send(404, b"not found")
+
+    def do_PUT(self):
+        if not _authorized(self):
+            return self._send(401, json.dumps({"error": "unauthorized"}, ensure_ascii=False).encode(),
+                              "application/json; charset=utf-8")
+        if self._maybe_gateway():
+            return
+        return self._send(404, b"not found")
+
+    def do_DELETE(self):
+        if not _authorized(self):
+            return self._send(401, json.dumps({"error": "unauthorized"}, ensure_ascii=False).encode(),
+                              "application/json; charset=utf-8")
+        if self._maybe_gateway():
+            return
+        return self._send(404, b"not found")
+
+    def do_PATCH(self):
+        if not _authorized(self):
+            return self._send(401, json.dumps({"error": "unauthorized"}, ensure_ascii=False).encode(),
+                              "application/json; charset=utf-8")
+        if self._maybe_gateway():
+            return
         return self._send(404, b"not found")
 
     def log_message(self, *a):
@@ -519,7 +755,8 @@ def main():
     init_hub()
     srv = ThreadingHTTPServer((HUB_HOST, PORT), Handler)
     auth = " (token required: VITUAL_HUB_TOKEN set)" if HUB_TOKEN else " (open, no token)"
-    print(f"Materials Hub running -> http://{HUB_HOST}:{PORT}{auth}")
+    print(f"Materials Hub API -> http://{HUB_HOST}:{PORT}/api/*{auth}")
+    print(f"  UI moved to transform: http://127.0.0.1:3000/zh/hub  (proxy /hub-api → this server)")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
