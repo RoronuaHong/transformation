@@ -1,6 +1,1968 @@
 {
   "articles": [
     {
+      "platform": "upload",
+      "video_id": "96e97c8ff04f",
+      "topic": "general",
+      "slug": "bv1q1hj6wef3-2",
+      "canonical_url": "upload://96e97c8ff04f",
+      "embed_url": "",
+      "source_lang": "zh",
+      "title_src": "解锁身边物品隐藏功能，提升烹饪效率与美食体验",
+      "author": null,
+      "locales": {
+        "en": {
+          "title": "解锁身边物品隐藏功能，提升烹饪效率与美食体验",
+          "one_liner": "通过利用日常物品的隐藏功能，实现懒人高效、美味升级的烹饪技巧。",
+          "summary": "本期视频展示了如何通过解锁身边物品的隐藏功能，让懒人也能快速提升烹饪效率和美食体验。首先，我们利用随手扔掉的瓶盖作为计量工具，通过量化食材实现标准一人量（推荐）。在食材准备上，可以采用柠檬切面中心向下分割来省力高效地处理柠檬，以及橙子竖切至中心横切后片来丝滑享用。对于蔬菜，我们倡导科学切菜，以实现效率直超流血线。在烹饪环节，微波炉高火20秒即可实现蒜皮脱离本体，而肥牛送进微波炉则能实现脆皮效果。此外，通过卤肥肠盖盖，结合微波炉，可以实现米其林级别的空气脆皮口感，豆干空气炸锅烤制更是实现了零食到料理的进化。调味方面，可以利用研磨瓶和橘子皮调味，实现清香解腻，并加入香料发散思维。对于寿司等料理，可以磨冬萝卜泥混合芥末，实现现磨山葵的口感，喜欢辣味的人可以加入柠檬汁放大辣味。同时，将料酒换成黄酒能显著提升厨艺。最后，清洁炸锅时，使用小苏打和洗洁精热水进行清洁，并用纸巾顶在新的纸巾上实现无缝衔接，让懒人也能轻松享受美食。",
+          "outline": [
+            "利用日常物品实现食材计量",
+            "科学切菜与食材处理",
+            "烹饪过程中的隐藏技巧"
+          ],
+          "keypoints_intro": "通过利用日常物品的隐藏功能，实现懒人高效、美味升级的烹饪技巧。",
+          "key_points": [
+            {
+              "title": "使用瓶盖进行食材计量",
+              "detail": "一盖液体约等于8克，可用于量化盐、糖、蚝油等，实现标准一人量。"
+            },
+            {
+              "title": "高效处理柠檬",
+              "detail": "柠檬切面中心向下分割，比传统切法更省力，且能更好地释放风味。"
+            },
+            {
+              "title": "丝滑处理橙子",
+              "detail": "橙子先切掉头尾，然后竖切至中心，再横切成片，实现丝滑口感。"
+            },
+            {
+              "title": "科学切菜原则",
+              "detail": "切菜的目标是效率，辣椒素是脂溶性物质，科学切菜能提高效率并避免不必要的浪费。"
+            },
+            {
+              "title": "微波炉快速脱皮",
+              "detail": "微波炉高火20秒可使蒜皮脱离本体，肥牛送入微波炉可实现脆皮效果。"
+            },
+            {
+              "title": "空气炸锅烹饪升级",
+              "detail": "豆干空气炸锅烤制可实现从零食到料理的进化，肉类可获得薄脆口感。"
+            },
+            {
+              "title": "利用香料提升风味",
+              "detail": "使用研磨瓶和橘子皮调味，可实现清香解腻，并可自由加入其他香料。"
+            },
+            {
+              "title": "寿司现磨山葵",
+              "detail": "磨冬萝卜泥混合芥末可模拟现磨山葵的口感，喜欢辣味可加入柠檬汁放大辣味。"
+            },
+            {
+              "title": "厨艺提升的秘诀",
+              "detail": "将料酒替换为黄酒，能显著提升整体厨艺水平。"
+            }
+          ],
+          "focuses": [
+            {
+              "title": "利用日常物品实现食材计量",
+              "detail": "将瓶盖等物品作为计量工具，实现标准的一人份量，简化食材准备的麻烦。"
+            },
+            {
+              "title": "科学切菜与食材处理",
+              "detail": "通过科学的切菜方法和利用热能，高效处理蔬菜和肉类，提升烹饪效率。"
+            },
+            {
+              "title": "烹饪过程中的隐藏技巧",
+              "detail": "利用微波炉和空气炸锅等设备，实现食材的快速烹饪和口感升级。"
+            }
+          ],
+          "hard_points": [
+            {
+              "title": "计量工具的准确性",
+              "detail": "使用瓶盖量化食材时，需确保理解其体积与重量的近似关系，以保证一人量的准确性。"
+            },
+            {
+              "title": "辣椒素的理解",
+              "detail": "理解辣椒素是脂溶性物质，切菜的效率和食材处理应结合这种知识，避免不必要的损耗。"
+            },
+            {
+              "title": "微波炉操作安全",
+              "detail": "使用微波炉进行脱皮操作时，需注意时间控制，避免食材过度烹饪或损伤。"
+            },
+            {
+              "title": "清洁炸锅的步骤",
+              "detail": "清洁炸锅时，使用小苏打、洗洁精热水进行清洁，并使用纸巾顶在新的纸巾上实现无缝衔接。"
+            }
+          ],
+          "srt_path": "D:\\MineWeb\\2026\\Vitual\\subtitle_pipeline\\downloads\\batch\\upload_96e97c8ff04f\\subs\\en.srt"
+        },
+        "zh": {
+          "title": "解锁身边物品隐藏功能，提升烹饪效率与美食体验",
+          "one_liner": "通过利用日常物品的隐藏功能，实现懒人高效、美味升级的烹饪技巧。",
+          "summary": "本期视频展示了如何通过解锁身边物品的隐藏功能，让懒人也能快速提升烹饪效率和美食体验。首先，我们利用随手扔掉的瓶盖作为计量工具，通过量化食材实现标准一人量（推荐）。在食材准备上，可以采用柠檬切面中心向下分割来省力高效地处理柠檬，以及橙子竖切至中心横切后片来丝滑享用。对于蔬菜，我们倡导科学切菜，以实现效率直超流血线。在烹饪环节，微波炉高火20秒即可实现蒜皮脱离本体，而肥牛送进微波炉则能实现脆皮效果。此外，通过卤肥肠盖盖，结合微波炉，可以实现米其林级别的空气脆皮口感，豆干空气炸锅烤制更是实现了零食到料理的进化。调味方面，可以利用研磨瓶和橘子皮调味，实现清香解腻，并加入香料发散思维。对于寿司等料理，可以磨冬萝卜泥混合芥末，实现现磨山葵的口感，喜欢辣味的人可以加入柠檬汁放大辣味。同时，将料酒换成黄酒能显著提升厨艺。最后，清洁炸锅时，使用小苏打和洗洁精热水进行清洁，并用纸巾顶在新的纸巾上实现无缝衔接，让懒人也能轻松享受美食。",
+          "outline": [
+            "利用日常物品实现食材计量",
+            "科学切菜与食材处理",
+            "烹饪过程中的隐藏技巧"
+          ],
+          "keypoints_intro": "通过利用日常物品的隐藏功能，实现懒人高效、美味升级的烹饪技巧。",
+          "key_points": [
+            {
+              "title": "使用瓶盖进行食材计量",
+              "detail": "一盖液体约等于8克，可用于量化盐、糖、蚝油等，实现标准一人量。"
+            },
+            {
+              "title": "高效处理柠檬",
+              "detail": "柠檬切面中心向下分割，比传统切法更省力，且能更好地释放风味。"
+            },
+            {
+              "title": "丝滑处理橙子",
+              "detail": "橙子先切掉头尾，然后竖切至中心，再横切成片，实现丝滑口感。"
+            },
+            {
+              "title": "科学切菜原则",
+              "detail": "切菜的目标是效率，辣椒素是脂溶性物质，科学切菜能提高效率并避免不必要的浪费。"
+            },
+            {
+              "title": "微波炉快速脱皮",
+              "detail": "微波炉高火20秒可使蒜皮脱离本体，肥牛送入微波炉可实现脆皮效果。"
+            },
+            {
+              "title": "空气炸锅烹饪升级",
+              "detail": "豆干空气炸锅烤制可实现从零食到料理的进化，肉类可获得薄脆口感。"
+            },
+            {
+              "title": "利用香料提升风味",
+              "detail": "使用研磨瓶和橘子皮调味，可实现清香解腻，并可自由加入其他香料。"
+            },
+            {
+              "title": "寿司现磨山葵",
+              "detail": "磨冬萝卜泥混合芥末可模拟现磨山葵的口感，喜欢辣味可加入柠檬汁放大辣味。"
+            },
+            {
+              "title": "厨艺提升的秘诀",
+              "detail": "将料酒替换为黄酒，能显著提升整体厨艺水平。"
+            }
+          ],
+          "focuses": [
+            {
+              "title": "利用日常物品实现食材计量",
+              "detail": "将瓶盖等物品作为计量工具，实现标准的一人份量，简化食材准备的麻烦。"
+            },
+            {
+              "title": "科学切菜与食材处理",
+              "detail": "通过科学的切菜方法和利用热能，高效处理蔬菜和肉类，提升烹饪效率。"
+            },
+            {
+              "title": "烹饪过程中的隐藏技巧",
+              "detail": "利用微波炉和空气炸锅等设备，实现食材的快速烹饪和口感升级。"
+            }
+          ],
+          "hard_points": [
+            {
+              "title": "计量工具的准确性",
+              "detail": "使用瓶盖量化食材时，需确保理解其体积与重量的近似关系，以保证一人量的准确性。"
+            },
+            {
+              "title": "辣椒素的理解",
+              "detail": "理解辣椒素是脂溶性物质，切菜的效率和食材处理应结合这种知识，避免不必要的损耗。"
+            },
+            {
+              "title": "微波炉操作安全",
+              "detail": "使用微波炉进行脱皮操作时，需注意时间控制，避免食材过度烹饪或损伤。"
+            },
+            {
+              "title": "清洁炸锅的步骤",
+              "detail": "清洁炸锅时，使用小苏打、洗洁精热水进行清洁，并使用纸巾顶在新的纸巾上实现无缝衔接。"
+            }
+          ],
+          "srt_path": "D:\\MineWeb\\2026\\Vitual\\subtitle_pipeline\\downloads\\batch\\upload_96e97c8ff04f\\subs\\zh.srt"
+        }
+      },
+      "cue_clock": "source",
+      "cues": [
+        {
+          "start": "00:00:00,000",
+          "end": "00:00:03,000",
+          "text": {
+            "en": "How lazy people can quickly improve their happiness index",
+            "zh": "懒人如何幸福指数快速提升"
+          }
+        },
+        {
+          "start": "00:00:03,000",
+          "end": "00:00:05,760",
+          "text": {
+            "en": "Just unlock the hidden functions of the items around you",
+            "zh": "只需解锁身边物品的隐藏功能"
+          }
+        },
+        {
+          "start": "00:00:05,760",
+          "end": "00:00:08,100",
+          "text": {
+            "en": "I found a problem with cooking",
+            "zh": "我发现做饭有一个问题"
+          }
+        },
+        {
+          "start": "00:00:08,100",
+          "end": "00:00:10,520",
+          "text": {
+            "en": "You need to wash the pot once",
+            "zh": "没有一种调料就要洗一次烧"
+          }
+        },
+        {
+          "start": "00:00:10,520",
+          "end": "00:00:11,720",
+          "text": {
+            "en": "The food hasn't been eaten yet",
+            "zh": "菜还没吃上"
+          }
+        },
+        {
+          "start": "00:00:11,720",
+          "end": "00:00:13,060",
+          "text": {
+            "en": "The faucet is already disconnected",
+            "zh": "水龙头已离结"
+          }
+        },
+        {
+          "start": "00:00:13,060",
+          "end": "00:00:17,780",
+          "text": {
+            "en": "In fact, every pair of delivery gloves given by fate",
+            "zh": "其实命运赠送的每一副外卖手套"
+          }
+        },
+        {
+          "start": "00:00:17,780",
+          "end": "00:00:19,580",
+          "text": {
+            "en": "I've already installed it, I'm so happy",
+            "zh": "早已安装要好了感慨"
+          }
+        },
+        {
+          "start": "00:00:19,580",
+          "end": "00:00:22,180",
+          "text": {
+            "en": "Replace one glove with a spice.",
+            "zh": "没有一种调料就换一根手套纸"
+          }
+        },
+        {
+          "start": "00:00:22,180",
+          "end": "00:00:24,060",
+          "text": {
+            "en": "Neither wear nor wash.",
+            "zh": "既不穿位还不用洗烧"
+          }
+        },
+        {
+          "start": "00:00:24,060",
+          "end": "00:00:25,860",
+          "text": {
+            "en": "When cooking, you need to follow a recipe.",
+            "zh": "做菜时需要看食谱"
+          }
+        },
+        {
+          "start": "00:00:25,860",
+          "end": "00:00:28,000",
+          "text": {
+            "en": "You can also use a phone to hold the gloves.",
+            "zh": "还可以用手机夹住手套"
+          }
+        },
+        {
+          "start": "00:00:28,000",
+          "end": "00:00:30,840",
+          "text": {
+            "en": "Gloves made of paper can be hung on any object.",
+            "zh": "手套纸挂在身边任意的物品上"
+          }
+        },
+        {
+          "start": "00:00:30,840",
+          "end": "00:00:32,000",
+          "text": {
+            "en": "Adjustable height",
+            "zh": "高低可调"
+          }
+        },
+        {
+          "start": "00:00:32,000",
+          "end": "00:00:33,320",
+          "text": {
+            "en": "Everyone can fly.",
+            "zh": "全家可飞"
+          }
+        },
+        {
+          "start": "00:00:33,320",
+          "end": "00:00:35,220",
+          "text": {
+            "en": "Work and leisure, as you please.",
+            "zh": "工作娱乐随心所欲"
+          }
+        },
+        {
+          "start": "00:00:35,220",
+          "end": "00:00:36,160",
+          "text": {
+            "en": "Let's talk about recipes.",
+            "zh": "说到食谱"
+          }
+        },
+        {
+          "start": "00:00:36,160",
+          "end": "00:00:39,320",
+          "text": {
+            "en": "People can't escape being confused by numbers.",
+            "zh": "人终究逃不过被一堆克数所迷惑"
+          }
+        },
+        {
+          "start": "00:00:39,320",
+          "end": "00:00:40,800",
+          "text": {
+            "en": "Actually, it's just a discarded bottle cap.",
+            "zh": "其实随手扔掉的瓶盖"
+          }
+        },
+        {
+          "start": "00:00:40,800",
+          "end": "00:00:42,340",
+          "text": {
+            "en": "It's a comprehensive measuring tool.",
+            "zh": "就是全面的计量工具"
+          }
+        },
+        {
+          "start": "00:00:42,340",
+          "end": "00:00:44,140",
+          "text": {
+            "en": "One cap is about 8 grams.",
+            "zh": "一盖液体大约就是8克"
+          }
+        },
+        {
+          "start": "00:00:44,140",
+          "end": "00:00:46,520",
+          "text": {
+            "en": "Salt, sugar, oyster sauce, and flour can all be measured.",
+            "zh": "盐糖蚝油淀粉都可以量化"
+          }
+        },
+        {
+          "start": "00:00:46,520",
+          "end": "00:00:48,640",
+          "text": {
+            "en": "And each time you cook, you're re-reading.",
+            "zh": "而每次煮一面就是再读"
+          }
+        },
+        {
+          "start": "00:00:48,640",
+          "end": "00:00:49,400",
+          "text": {
+            "en": "Just put it in.",
+            "zh": "一把下去"
+          }
+        },
+        {
+          "start": "00:00:49,400",
+          "end": "00:00:52,500",
+          "text": {
+            "en": "Always jumping back and forth between the two",
+            "zh": "总在撑死与厄云间反复横跳"
+          }
+        },
+        {
+          "start": "00:00:52,500",
+          "end": "00:00:53,840",
+          "text": {
+            "en": "Actually, just measure with a bottle cap",
+            "zh": "其实用瓶盖量一下"
+          }
+        },
+        {
+          "start": "00:00:53,840",
+          "end": "00:00:55,200",
+          "text": {
+            "en": "It's the standard amount for one person",
+            "zh": "就是标准的一人量"
+          }
+        },
+        {
+          "start": "00:00:55,200",
+          "end": "00:00:57,660",
+          "text": {
+            "en": "This is the gift your boyfriend/girlfriend needs for the holiday",
+            "zh": "这才是你对象需要的节日礼物"
+          }
+        },
+        {
+          "start": "00:00:57,660",
+          "end": "00:01:00,260",
+          "text": {
+            "en": "A friend who has read through the middle school biology textbook",
+            "zh": "通读过初中生物的朋友"
+          }
+        },
+        {
+          "start": "00:01:00,260",
+          "end": "00:01:02,240",
+          "text": {
+            "en": "Finally, we've achieved knowledge monetization",
+            "zh": "终于迎来了知识变现"
+          }
+        },
+        {
+          "start": "00:01:02,240",
+          "end": "00:01:03,220",
+          "text": {
+            "en": "Lemon tree",
+            "zh": "柠檬树放"
+          }
+        },
+        {
+          "start": "00:01:03,220",
+          "end": "00:01:04,160",
+          "text": {
+            "en": "Make a diagonal cut",
+            "zh": "斜切一刀"
+          }
+        },
+        {
+          "start": "00:01:04,160",
+          "end": "00:01:06,520",
+          "text": {
+            "en": "Divide from the center of the slice downwards.",
+            "zh": "从切面中心向下分割"
+          }
+        },
+        {
+          "start": "00:01:06,520",
+          "end": "00:01:08,200",
+          "text": {
+            "en": "Can perfectly compare to white heart",
+            "zh": "就能完美比开白心"
+          }
+        },
+        {
+          "start": "00:01:08,200",
+          "end": "00:01:09,100",
+          "text": {
+            "en": "More efficient",
+            "zh": "更省力不说"
+          }
+        },
+        {
+          "start": "00:01:09,100",
+          "end": "00:01:11,040",
+          "text": {
+            "en": "Lemon trees produce twice as many pigs as regular trees.",
+            "zh": "柠檬枝产猪仅多一倍"
+          }
+        },
+        {
+          "start": "00:01:11,040",
+          "end": "00:01:12,860",
+          "text": {
+            "en": "First, peel the oranges.",
+            "zh": "橙子则先切掉头尾"
+          }
+        },
+        {
+          "start": "00:01:12,860",
+          "end": "00:01:14,620",
+          "text": {
+            "en": "Then cut it to the center.",
+            "zh": "然后竖切至中心"
+          }
+        },
+        {
+          "start": "00:01:14,620",
+          "end": "00:01:16,260",
+          "text": {
+            "en": "Cut off the end last",
+            "zh": "最后横切成后片"
+          }
+        },
+        {
+          "start": "00:01:16,260",
+          "end": "00:01:17,500",
+          "text": {
+            "en": "Enjoy smoothly",
+            "zh": "即能丝滑享用"
+          }
+        },
+        {
+          "start": "00:01:17,500",
+          "end": "00:01:19,240",
+          "text": {
+            "en": "Significantly improve research skills",
+            "zh": "大大提升起研之术"
+          }
+        },
+        {
+          "start": "00:01:19,240",
+          "end": "00:01:20,820",
+          "text": {
+            "en": "But vegetables have evolved like this.",
+            "zh": "但蔬菜进化成这样"
+          }
+        },
+        {
+          "start": "00:01:20,820",
+          "end": "00:01:22,280",
+          "text": {
+            "en": "Not just for aesthetics",
+            "zh": "也不是为了好看"
+          }
+        },
+        {
+          "start": "00:01:22,280",
+          "end": "00:01:23,280",
+          "text": {
+            "en": "To make a good profit",
+            "zh": "是为了好宰"
+          }
+        },
+        {
+          "start": "00:01:23,280",
+          "end": "00:01:24,180",
+          "text": {
+            "en": "Cutting vegetables scientifically",
+            "zh": "科学切菜"
+          }
+        },
+        {
+          "start": "00:01:24,180",
+          "end": "00:01:25,860",
+          "text": {
+            "en": "Efficiency is far beyond expectations.",
+            "zh": "效率直超流血线"
+          }
+        },
+        {
+          "start": "00:01:25,860",
+          "end": "00:01:27,540",
+          "text": {
+            "en": "But often cutting off friends' peppers",
+            "zh": "而经常切朋友的辣椒"
+          }
+        },
+        {
+          "start": "00:01:27,540",
+          "end": "00:01:28,080",
+          "text": {
+            "en": "Everyone knows",
+            "zh": "都知道"
+          }
+        },
+        {
+          "start": "00:01:28,080",
+          "end": "00:01:29,900",
+          "text": {
+            "en": "Capsaicin is a fat-soluble substance",
+            "zh": "辣椒素是脂溶性物质"
+          }
+        },
+        {
+          "start": "00:01:29,900",
+          "end": "00:01:31,600",
+          "text": {
+            "en": "Next time, be careful not to get it on your hands",
+            "zh": "下次不小心再拉到手"
+          }
+        },
+        {
+          "start": "00:01:31,600",
+          "end": "00:01:34,800",
+          "text": {
+            "en": "I remember the gloves that were given as a gift",
+            "zh": "记得想起馈赠的手套"
+          }
+        },
+        {
+          "start": "00:01:34,800",
+          "end": "00:01:35,820",
+          "text": {
+            "en": "Add cooking oil",
+            "zh": "装上食用油"
+          }
+        },
+        {
+          "start": "00:01:35,820",
+          "end": "00:01:36,760",
+          "text": {
+            "en": "People are doing their best",
+            "zh": "人尽其难"
+          }
+        },
+        {
+          "start": "00:01:36,760",
+          "end": "00:01:37,880",
+          "text": {
+            "en": "Things are being used to their full extent",
+            "zh": "物尽其用"
+          }
+        },
+        {
+          "start": "00:01:37,880",
+          "end": "00:01:39,280",
+          "text": {
+            "en": "I also have these expensive gloves",
+            "zh": "隔下金贵的双手"
+          }
+        },
+        {
+          "start": "00:01:39,280",
+          "end": "00:01:40,580",
+          "text": {
+            "en": "Of course, I can't use garlic",
+            "zh": "当然也不能包蒜"
+          }
+        },
+        {
+          "start": "00:01:40,580",
+          "end": "00:01:42,000",
+          "text": {
+            "en": "Microwave on high for 20 seconds.",
+            "zh": "微波炉高火20秒"
+          }
+        },
+        {
+          "start": "00:01:42,000",
+          "end": "00:01:44,360",
+          "text": {
+            "en": "Actively peeling off the skin of garlic",
+            "zh": "蒜皮主动脱离本体"
+          }
+        },
+        {
+          "start": "00:01:44,360",
+          "end": "00:01:46,680",
+          "text": {
+            "en": "And those things that were already delicious",
+            "zh": "而那些本来就很好吃的东西"
+          }
+        },
+        {
+          "start": "00:01:46,680",
+          "end": "00:01:48,340",
+          "text": {
+            "en": "Unlock the next hidden skill.",
+            "zh": "再解锁一步隐藏技能"
+          }
+        },
+        {
+          "start": "00:01:48,340",
+          "end": "00:01:49,320",
+          "text": {
+            "en": "Not yet worthy of heaven",
+            "zh": "还不得上天"
+          }
+        },
+        {
+          "start": "00:01:49,320",
+          "end": "00:01:50,020",
+          "text": {
+            "en": "Braised chicken leg",
+            "zh": "卤鸡腿"
+          }
+        },
+        {
+          "start": "00:01:50,020",
+          "end": "00:01:51,700",
+          "text": {
+            "en": "If you can, don't eat it yet.",
+            "zh": "你若能忍住先不吃"
+          }
+        },
+        {
+          "start": "00:01:51,700",
+          "end": "00:01:53,280",
+          "text": {
+            "en": "Air fryer, bake one more time.",
+            "zh": "空气炸锅多烤一步"
+          }
+        },
+        {
+          "start": "00:01:53,280",
+          "end": "00:01:54,780",
+          "text": {
+            "en": "Thin and crispy like paper.",
+            "zh": "鸡皮薄脆如纸"
+          }
+        },
+        {
+          "start": "00:01:54,780",
+          "end": "00:01:55,820",
+          "text": {
+            "en": "The meat is very juicy.",
+            "zh": "肉还多汁"
+          }
+        },
+        {
+          "start": "00:01:55,820",
+          "end": "00:01:57,100",
+          "text": {
+            "en": "Don't buy Niu Cui Cui.",
+            "zh": "牛脆脆不要买"
+          }
+        },
+        {
+          "start": "00:01:57,100",
+          "end": "00:01:59,160",
+          "text": {
+            "en": "Silently put the beef in the microwave.",
+            "zh": "默默把肥牛送进微波炉"
+          }
+        },
+        {
+          "start": "00:01:59,160",
+          "end": "00:02:01,280",
+          "text": {
+            "en": "It's so dry and hard, like cow dung.",
+            "zh": "出来已经脆得不行牛屎"
+          }
+        },
+        {
+          "start": "00:02:01,280",
+          "end": "00:02:02,360",
+          "text": {
+            "en": "Halibang sausage with a sauce",
+            "zh": "卤肥肠盖盖"
+          }
+        },
+        {
+          "start": "00:02:02,360",
+          "end": "00:02:03,980",
+          "text": {
+            "en": "Microwave for 3 minutes.",
+            "zh": "微波炉盛造三分钟"
+          }
+        },
+        {
+          "start": "00:02:03,980",
+          "end": "00:02:06,360",
+          "text": {
+            "en": "Enjoy crispy, air-fried Michelin-style sausages.",
+            "zh": "坐享米其林空气脆皮肠"
+          }
+        },
+        {
+          "start": "00:02:06,360",
+          "end": "00:02:07,600",
+          "text": {
+            "en": "It's almost Mid-Autumn Festival.",
+            "zh": "快中秋了"
+          }
+        },
+        {
+          "start": "00:02:07,600",
+          "end": "00:02:10,240",
+          "text": {
+            "en": "Mooncakes, egg tarts, mochi, etc. - let's try them out.",
+            "zh": "月饼蛋黄酥麻糬等修炼一下"
+          }
+        },
+        {
+          "start": "00:02:10,240",
+          "end": "00:02:11,600",
+          "text": {
+            "en": "The crust is even stickier and more chewy.",
+            "zh": "外皮更加粘糯"
+          }
+        },
+        {
+          "start": "00:02:11,600",
+          "end": "00:02:12,940",
+          "text": {
+            "en": "The filling is even more gooey.",
+            "zh": "馅料更加流心"
+          }
+        },
+        {
+          "start": "00:02:12,940",
+          "end": "00:02:15,040",
+          "text": {
+            "en": "And also, try air-fried dried tofu.",
+            "zh": "还有豆干空气炸锅烤一下"
+          }
+        },
+        {
+          "start": "00:02:15,040",
+          "end": "00:02:18,200",
+          "text": {
+            "en": "It's even evolved from snacks to dishes.",
+            "zh": "甚至完成了从零食到料理的进化"
+          }
+        },
+        {
+          "start": "00:02:18,200",
+          "end": "00:02:23,840",
+          "text": {
+            "en": "Just open the unused grinder.",
+            "zh": "只需打开没用完的研磨瓶"
+          }
+        },
+        {
+          "start": "00:02:23,840",
+          "end": "00:02:26,040",
+          "text": {
+            "en": "Add dried orange peel to the salt.",
+            "zh": "在盐里加入晒干的橘子皮"
+          }
+        },
+        {
+          "start": "00:02:26,040",
+          "end": "00:02:27,080",
+          "text": {
+            "en": "The flavors are complex and layered.",
+            "zh": "口味有层次"
+          }
+        },
+        {
+          "start": "00:02:27,080",
+          "end": "00:02:28,300",
+          "text": {
+            "en": "Refreshing and cooling",
+            "zh": "还清香解腻"
+          }
+        },
+        {
+          "start": "00:02:28,300",
+          "end": "00:02:29,580",
+          "text": {
+            "en": "Also, think outside the box.",
+            "zh": "还可以发散思维"
+          }
+        },
+        {
+          "start": "00:02:29,580",
+          "end": "00:02:30,960",
+          "text": {
+            "en": "Add your favorite spices",
+            "zh": "加入你喜欢的香料"
+          }
+        },
+        {
+          "start": "00:02:30,960",
+          "end": "00:02:31,540",
+          "text": {
+            "en": "Stir-fried",
+            "zh": "炒菜"
+          }
+        },
+        {
+          "start": "00:02:31,540",
+          "end": "00:02:32,200",
+          "text": {
+            "en": "Pan-fried steak",
+            "zh": "煎牛排"
+          }
+        },
+        {
+          "start": "00:02:32,200",
+          "end": "00:02:32,780",
+          "text": {
+            "en": "Barbecue",
+            "zh": "烤肉"
+          }
+        },
+        {
+          "start": "00:02:32,780",
+          "end": "00:02:33,980",
+          "text": {
+            "en": "Next time, let's have a get-together with friends.",
+            "zh": "下次朋友聚餐"
+          }
+        },
+        {
+          "start": "00:02:33,980",
+          "end": "00:02:35,440",
+          "text": {
+            "en": "You will raise a fawn.",
+            "zh": "你必将小鹿一手"
+          }
+        },
+        {
+          "start": "00:02:35,440",
+          "end": "00:02:37,100",
+          "text": {
+            "en": "If I'm eating sushi at home.",
+            "zh": "如果是在家吃寿司"
+          }
+        },
+        {
+          "start": "00:02:37,100",
+          "end": "00:02:38,620",
+          "text": {
+            "en": "First, mash some winter radish.",
+            "zh": "先磨一点冬萝卜泥"
+          }
+        },
+        {
+          "start": "00:02:38,620",
+          "end": "00:02:39,740",
+          "text": {
+            "en": "Mix with mustard",
+            "zh": "混合到芥末里"
+          }
+        },
+        {
+          "start": "00:02:39,740",
+          "end": "00:02:40,780",
+          "text": {
+            "en": "I can make it like a restaurant.",
+            "zh": "就能像料理店"
+          }
+        },
+        {
+          "start": "00:02:40,780",
+          "end": "00:02:42,480",
+          "text": {
+            "en": "Freshly ground wasabi is just as delicious.",
+            "zh": "现磨山葵一样好吃"
+          }
+        },
+        {
+          "start": "00:02:42,480",
+          "end": "00:02:43,640",
+          "text": {
+            "en": "Friends who like spicy food",
+            "zh": "喜欢吃辣的朋友"
+          }
+        },
+        {
+          "start": "00:02:43,640",
+          "end": "00:02:44,860",
+          "text": {
+            "en": "You can also add lemon juice.",
+            "zh": "还可以加入柠檬汁"
+          }
+        },
+        {
+          "start": "00:02:44,860",
+          "end": "00:02:46,280",
+          "text": {
+            "en": "Can enhance the spiciness of wasabi.",
+            "zh": "就能放大芥末辣味"
+          }
+        },
+        {
+          "start": "00:02:46,280",
+          "end": "00:02:47,420",
+          "text": {
+            "en": "Apartment name",
+            "zh": "深藏公寓名"
+          }
+        },
+        {
+          "start": "00:02:47,420",
+          "end": "00:02:48,480",
+          "text": {
+            "en": "Most importantly",
+            "zh": "最重要的是"
+          }
+        },
+        {
+          "start": "00:02:48,480",
+          "end": "00:02:50,080",
+          "text": {
+            "en": "Don't forget to bring the home-brewed rice wine.",
+            "zh": "记得把家里的料酒"
+          }
+        },
+        {
+          "start": "00:02:50,080",
+          "end": "00:02:51,060",
+          "text": {
+            "en": "Change to yellow wine",
+            "zh": "换成黄酒"
+          }
+        },
+        {
+          "start": "00:02:51,060",
+          "end": "00:02:51,880",
+          "text": {
+            "en": "Experience firsthand",
+            "zh": "亲自感受"
+          }
+        },
+        {
+          "start": "00:02:51,880",
+          "end": "00:02:53,260",
+          "text": {
+            "en": "Significantly improved cooking skills",
+            "zh": "厨艺显著提升"
+          }
+        },
+        {
+          "start": "00:02:53,260",
+          "end": "00:02:56,060",
+          "text": {
+            "en": "But after eating, people are lazy and don't want to face...",
+            "zh": "而饭后懒人不想面对的"
+          }
+        },
+        {
+          "start": "00:02:56,060",
+          "end": "00:02:57,780",
+          "text": {
+            "en": "Just turned off the air fryer.",
+            "zh": "是刚下班的空气炸锅"
+          }
+        },
+        {
+          "start": "00:02:57,780",
+          "end": "00:02:59,020",
+          "text": {
+            "en": "One spoonful of baking soda",
+            "zh": "一勺小苏打"
+          }
+        },
+        {
+          "start": "00:02:59,020",
+          "end": "00:03:00,060",
+          "text": {
+            "en": "Two pounds of dish soap",
+            "zh": "两磅洗洁精"
+          }
+        },
+        {
+          "start": "00:03:00,060",
+          "end": "00:03:00,840",
+          "text": {
+            "en": "Pour in hot water",
+            "zh": "倒入热水"
+          }
+        },
+        {
+          "start": "00:03:00,840",
+          "end": "00:03:02,620",
+          "text": {
+            "en": "Add 180 degrees to it.",
+            "zh": "给它加个180度的搬"
+          }
+        },
+        {
+          "start": "00:03:02,620",
+          "end": "00:03:03,340",
+          "text": {
+            "en": "10 minutes",
+            "zh": "10分钟"
+          }
+        },
+        {
+          "start": "00:03:03,340",
+          "end": "00:03:03,880",
+          "text": {
+            "en": "Clear water",
+            "zh": "清水"
+          }
+        },
+        {
+          "start": "00:03:03,880",
+          "end": "00:03:04,720",
+          "text": {
+            "en": "How many kilograms per pound?",
+            "zh": "一重几斤"
+          }
+        },
+        {
+          "start": "00:03:04,720",
+          "end": "00:03:06,520",
+          "text": {
+            "en": "Also, remove the smell from the frying pan.",
+            "zh": "还顺便去除炸锅异味"
+          }
+        },
+        {
+          "start": "00:03:06,520",
+          "end": "00:03:08,240",
+          "text": {
+            "en": "Whenever the paper towels run out",
+            "zh": "而每当纸巾见底时"
+          }
+        },
+        {
+          "start": "00:03:08,240",
+          "end": "00:03:09,820",
+          "text": {
+            "en": "The paper towels suddenly became very rebellious.",
+            "zh": "抽纸就变得很叛逆"
+          }
+        },
+        {
+          "start": "00:03:09,820",
+          "end": "00:03:13,220",
+          "text": {
+            "en": "Place it on top of the new roll of toilet paper.",
+            "zh": "把它顶在新的抽纸上"
+          }
+        },
+        {
+          "start": "00:03:13,220",
+          "end": "00:03:14,720",
+          "text": {
+            "en": "Can be seamlessly integrated",
+            "zh": "就能无缝衔接"
+          }
+        }
+      ]
+    },
+    {
+      "platform": "upload",
+      "video_id": "a49c40e9e7c8",
+      "topic": "general",
+      "slug": "bv1q1hj6wef3",
+      "canonical_url": "upload://a49c40e9e7c8",
+      "embed_url": "",
+      "source_lang": "zh",
+      "title_src": "BV1q1hJ6wEf3",
+      "author": null,
+      "locales": {
+        "zh": {
+          "title": "",
+          "one_liner": "",
+          "summary": "",
+          "outline": [],
+          "keypoints_intro": "",
+          "key_points": [],
+          "focuses": [],
+          "hard_points": [],
+          "srt_path": "D:\\MineWeb\\2026\\Vitual\\subtitle_pipeline\\downloads\\batch\\upload_a49c40e9e7c8\\subs\\zh.srt"
+        }
+      },
+      "cue_clock": "source",
+      "cues": [
+        {
+          "start": "00:00:00,000",
+          "end": "00:00:03,000",
+          "text": {
+            "zh": "懒人如何幸福指数快速提升"
+          }
+        },
+        {
+          "start": "00:00:03,000",
+          "end": "00:00:05,760",
+          "text": {
+            "zh": "只需解锁身边物品的隐藏功能"
+          }
+        },
+        {
+          "start": "00:00:05,760",
+          "end": "00:00:08,100",
+          "text": {
+            "zh": "我发现做饭有一个问题"
+          }
+        },
+        {
+          "start": "00:00:08,100",
+          "end": "00:00:10,520",
+          "text": {
+            "zh": "没有一种调料就要洗一次烧"
+          }
+        },
+        {
+          "start": "00:00:10,520",
+          "end": "00:00:11,720",
+          "text": {
+            "zh": "菜还没吃上"
+          }
+        },
+        {
+          "start": "00:00:11,720",
+          "end": "00:00:13,060",
+          "text": {
+            "zh": "水龙头已离结"
+          }
+        },
+        {
+          "start": "00:00:13,060",
+          "end": "00:00:17,780",
+          "text": {
+            "zh": "其实命运赠送的每一副外卖手套"
+          }
+        },
+        {
+          "start": "00:00:17,780",
+          "end": "00:00:19,580",
+          "text": {
+            "zh": "早已安装要好了感慨"
+          }
+        },
+        {
+          "start": "00:00:19,580",
+          "end": "00:00:22,180",
+          "text": {
+            "zh": "没有一种调料就换一根手套纸"
+          }
+        },
+        {
+          "start": "00:00:22,180",
+          "end": "00:00:24,060",
+          "text": {
+            "zh": "既不穿位还不用洗烧"
+          }
+        },
+        {
+          "start": "00:00:24,060",
+          "end": "00:00:25,860",
+          "text": {
+            "zh": "做菜时需要看食谱"
+          }
+        },
+        {
+          "start": "00:00:25,860",
+          "end": "00:00:28,000",
+          "text": {
+            "zh": "还可以用手机夹住手套"
+          }
+        },
+        {
+          "start": "00:00:28,000",
+          "end": "00:00:30,840",
+          "text": {
+            "zh": "手套纸挂在身边任意的物品上"
+          }
+        },
+        {
+          "start": "00:00:30,840",
+          "end": "00:00:32,000",
+          "text": {
+            "zh": "高低可调"
+          }
+        },
+        {
+          "start": "00:00:32,000",
+          "end": "00:00:33,320",
+          "text": {
+            "zh": "全家可飞"
+          }
+        },
+        {
+          "start": "00:00:33,320",
+          "end": "00:00:35,220",
+          "text": {
+            "zh": "工作娱乐随心所欲"
+          }
+        },
+        {
+          "start": "00:00:35,220",
+          "end": "00:00:36,160",
+          "text": {
+            "zh": "说到食谱"
+          }
+        },
+        {
+          "start": "00:00:36,160",
+          "end": "00:00:39,320",
+          "text": {
+            "zh": "人终究逃不过被一堆克数所迷惑"
+          }
+        },
+        {
+          "start": "00:00:39,320",
+          "end": "00:00:40,800",
+          "text": {
+            "zh": "其实随手扔掉的瓶盖"
+          }
+        },
+        {
+          "start": "00:00:40,800",
+          "end": "00:00:42,340",
+          "text": {
+            "zh": "就是全面的计量工具"
+          }
+        },
+        {
+          "start": "00:00:42,340",
+          "end": "00:00:44,140",
+          "text": {
+            "zh": "一盖液体大约就是8克"
+          }
+        },
+        {
+          "start": "00:00:44,140",
+          "end": "00:00:46,520",
+          "text": {
+            "zh": "盐糖蚝油淀粉都可以量化"
+          }
+        },
+        {
+          "start": "00:00:46,520",
+          "end": "00:00:48,640",
+          "text": {
+            "zh": "而每次煮一面就是再读"
+          }
+        },
+        {
+          "start": "00:00:48,640",
+          "end": "00:00:49,400",
+          "text": {
+            "zh": "一把下去"
+          }
+        },
+        {
+          "start": "00:00:49,400",
+          "end": "00:00:52,500",
+          "text": {
+            "zh": "总在撑死与厄云间反复横跳"
+          }
+        },
+        {
+          "start": "00:00:52,500",
+          "end": "00:00:53,840",
+          "text": {
+            "zh": "其实用瓶盖量一下"
+          }
+        },
+        {
+          "start": "00:00:53,840",
+          "end": "00:00:55,200",
+          "text": {
+            "zh": "就是标准的一人量"
+          }
+        },
+        {
+          "start": "00:00:55,200",
+          "end": "00:00:57,660",
+          "text": {
+            "zh": "这才是你对象需要的节日礼物"
+          }
+        },
+        {
+          "start": "00:00:57,660",
+          "end": "00:01:00,260",
+          "text": {
+            "zh": "通读过初中生物的朋友"
+          }
+        },
+        {
+          "start": "00:01:00,260",
+          "end": "00:01:02,240",
+          "text": {
+            "zh": "终于迎来了知识变现"
+          }
+        },
+        {
+          "start": "00:01:02,240",
+          "end": "00:01:03,220",
+          "text": {
+            "zh": "柠檬树放"
+          }
+        },
+        {
+          "start": "00:01:03,220",
+          "end": "00:01:04,160",
+          "text": {
+            "zh": "斜切一刀"
+          }
+        },
+        {
+          "start": "00:01:04,160",
+          "end": "00:01:06,520",
+          "text": {
+            "zh": "从切面中心向下分割"
+          }
+        },
+        {
+          "start": "00:01:06,520",
+          "end": "00:01:08,200",
+          "text": {
+            "zh": "就能完美比开白心"
+          }
+        },
+        {
+          "start": "00:01:08,200",
+          "end": "00:01:09,100",
+          "text": {
+            "zh": "更省力不说"
+          }
+        },
+        {
+          "start": "00:01:09,100",
+          "end": "00:01:11,040",
+          "text": {
+            "zh": "柠檬枝产猪仅多一倍"
+          }
+        },
+        {
+          "start": "00:01:11,040",
+          "end": "00:01:12,860",
+          "text": {
+            "zh": "橙子则先切掉头尾"
+          }
+        },
+        {
+          "start": "00:01:12,860",
+          "end": "00:01:14,620",
+          "text": {
+            "zh": "然后竖切至中心"
+          }
+        },
+        {
+          "start": "00:01:14,620",
+          "end": "00:01:16,260",
+          "text": {
+            "zh": "最后横切成后片"
+          }
+        },
+        {
+          "start": "00:01:16,260",
+          "end": "00:01:17,500",
+          "text": {
+            "zh": "即能丝滑享用"
+          }
+        },
+        {
+          "start": "00:01:17,500",
+          "end": "00:01:19,240",
+          "text": {
+            "zh": "大大提升起研之术"
+          }
+        },
+        {
+          "start": "00:01:19,240",
+          "end": "00:01:20,820",
+          "text": {
+            "zh": "但蔬菜进化成这样"
+          }
+        },
+        {
+          "start": "00:01:20,820",
+          "end": "00:01:22,280",
+          "text": {
+            "zh": "也不是为了好看"
+          }
+        },
+        {
+          "start": "00:01:22,280",
+          "end": "00:01:23,280",
+          "text": {
+            "zh": "是为了好宰"
+          }
+        },
+        {
+          "start": "00:01:23,280",
+          "end": "00:01:24,180",
+          "text": {
+            "zh": "科学切菜"
+          }
+        },
+        {
+          "start": "00:01:24,180",
+          "end": "00:01:25,860",
+          "text": {
+            "zh": "效率直超流血线"
+          }
+        },
+        {
+          "start": "00:01:25,860",
+          "end": "00:01:27,540",
+          "text": {
+            "zh": "而经常切朋友的辣椒"
+          }
+        },
+        {
+          "start": "00:01:27,540",
+          "end": "00:01:28,080",
+          "text": {
+            "zh": "都知道"
+          }
+        },
+        {
+          "start": "00:01:28,080",
+          "end": "00:01:29,900",
+          "text": {
+            "zh": "辣椒素是脂溶性物质"
+          }
+        },
+        {
+          "start": "00:01:29,900",
+          "end": "00:01:31,600",
+          "text": {
+            "zh": "下次不小心再拉到手"
+          }
+        },
+        {
+          "start": "00:01:31,600",
+          "end": "00:01:34,800",
+          "text": {
+            "zh": "记得想起馈赠的手套"
+          }
+        },
+        {
+          "start": "00:01:34,800",
+          "end": "00:01:35,820",
+          "text": {
+            "zh": "装上食用油"
+          }
+        },
+        {
+          "start": "00:01:35,820",
+          "end": "00:01:36,760",
+          "text": {
+            "zh": "人尽其难"
+          }
+        },
+        {
+          "start": "00:01:36,760",
+          "end": "00:01:37,880",
+          "text": {
+            "zh": "物尽其用"
+          }
+        },
+        {
+          "start": "00:01:37,880",
+          "end": "00:01:39,280",
+          "text": {
+            "zh": "隔下金贵的双手"
+          }
+        },
+        {
+          "start": "00:01:39,280",
+          "end": "00:01:40,580",
+          "text": {
+            "zh": "当然也不能包蒜"
+          }
+        },
+        {
+          "start": "00:01:40,580",
+          "end": "00:01:42,000",
+          "text": {
+            "zh": "微波炉高火20秒"
+          }
+        },
+        {
+          "start": "00:01:42,000",
+          "end": "00:01:44,360",
+          "text": {
+            "zh": "蒜皮主动脱离本体"
+          }
+        },
+        {
+          "start": "00:01:44,360",
+          "end": "00:01:46,680",
+          "text": {
+            "zh": "而那些本来就很好吃的东西"
+          }
+        },
+        {
+          "start": "00:01:46,680",
+          "end": "00:01:48,340",
+          "text": {
+            "zh": "再解锁一步隐藏技能"
+          }
+        },
+        {
+          "start": "00:01:48,340",
+          "end": "00:01:49,320",
+          "text": {
+            "zh": "还不得上天"
+          }
+        },
+        {
+          "start": "00:01:49,320",
+          "end": "00:01:50,020",
+          "text": {
+            "zh": "卤鸡腿"
+          }
+        },
+        {
+          "start": "00:01:50,020",
+          "end": "00:01:51,700",
+          "text": {
+            "zh": "你若能忍住先不吃"
+          }
+        },
+        {
+          "start": "00:01:51,700",
+          "end": "00:01:53,280",
+          "text": {
+            "zh": "空气炸锅多烤一步"
+          }
+        },
+        {
+          "start": "00:01:53,280",
+          "end": "00:01:54,780",
+          "text": {
+            "zh": "鸡皮薄脆如纸"
+          }
+        },
+        {
+          "start": "00:01:54,780",
+          "end": "00:01:55,820",
+          "text": {
+            "zh": "肉还多汁"
+          }
+        },
+        {
+          "start": "00:01:55,820",
+          "end": "00:01:57,100",
+          "text": {
+            "zh": "牛脆脆不要买"
+          }
+        },
+        {
+          "start": "00:01:57,100",
+          "end": "00:01:59,160",
+          "text": {
+            "zh": "默默把肥牛送进微波炉"
+          }
+        },
+        {
+          "start": "00:01:59,160",
+          "end": "00:02:01,280",
+          "text": {
+            "zh": "出来已经脆得不行牛屎"
+          }
+        },
+        {
+          "start": "00:02:01,280",
+          "end": "00:02:02,360",
+          "text": {
+            "zh": "卤肥肠盖盖"
+          }
+        },
+        {
+          "start": "00:02:02,360",
+          "end": "00:02:03,980",
+          "text": {
+            "zh": "微波炉盛造三分钟"
+          }
+        },
+        {
+          "start": "00:02:03,980",
+          "end": "00:02:06,360",
+          "text": {
+            "zh": "坐享米其林空气脆皮肠"
+          }
+        },
+        {
+          "start": "00:02:06,360",
+          "end": "00:02:07,600",
+          "text": {
+            "zh": "快中秋了"
+          }
+        },
+        {
+          "start": "00:02:07,600",
+          "end": "00:02:10,240",
+          "text": {
+            "zh": "月饼蛋黄酥麻糬等修炼一下"
+          }
+        },
+        {
+          "start": "00:02:10,240",
+          "end": "00:02:11,600",
+          "text": {
+            "zh": "外皮更加粘糯"
+          }
+        },
+        {
+          "start": "00:02:11,600",
+          "end": "00:02:12,940",
+          "text": {
+            "zh": "馅料更加流心"
+          }
+        },
+        {
+          "start": "00:02:12,940",
+          "end": "00:02:15,040",
+          "text": {
+            "zh": "还有豆干空气炸锅烤一下"
+          }
+        },
+        {
+          "start": "00:02:15,040",
+          "end": "00:02:18,200",
+          "text": {
+            "zh": "甚至完成了从零食到料理的进化"
+          }
+        },
+        {
+          "start": "00:02:18,200",
+          "end": "00:02:23,840",
+          "text": {
+            "zh": "只需打开没用完的研磨瓶"
+          }
+        },
+        {
+          "start": "00:02:23,840",
+          "end": "00:02:26,040",
+          "text": {
+            "zh": "在盐里加入晒干的橘子皮"
+          }
+        },
+        {
+          "start": "00:02:26,040",
+          "end": "00:02:27,080",
+          "text": {
+            "zh": "口味有层次"
+          }
+        },
+        {
+          "start": "00:02:27,080",
+          "end": "00:02:28,300",
+          "text": {
+            "zh": "还清香解腻"
+          }
+        },
+        {
+          "start": "00:02:28,300",
+          "end": "00:02:29,580",
+          "text": {
+            "zh": "还可以发散思维"
+          }
+        },
+        {
+          "start": "00:02:29,580",
+          "end": "00:02:30,960",
+          "text": {
+            "zh": "加入你喜欢的香料"
+          }
+        },
+        {
+          "start": "00:02:30,960",
+          "end": "00:02:31,540",
+          "text": {
+            "zh": "炒菜"
+          }
+        },
+        {
+          "start": "00:02:31,540",
+          "end": "00:02:32,200",
+          "text": {
+            "zh": "煎牛排"
+          }
+        },
+        {
+          "start": "00:02:32,200",
+          "end": "00:02:32,780",
+          "text": {
+            "zh": "烤肉"
+          }
+        },
+        {
+          "start": "00:02:32,780",
+          "end": "00:02:33,980",
+          "text": {
+            "zh": "下次朋友聚餐"
+          }
+        },
+        {
+          "start": "00:02:33,980",
+          "end": "00:02:35,440",
+          "text": {
+            "zh": "你必将小鹿一手"
+          }
+        },
+        {
+          "start": "00:02:35,440",
+          "end": "00:02:37,100",
+          "text": {
+            "zh": "如果是在家吃寿司"
+          }
+        },
+        {
+          "start": "00:02:37,100",
+          "end": "00:02:38,620",
+          "text": {
+            "zh": "先磨一点冬萝卜泥"
+          }
+        },
+        {
+          "start": "00:02:38,620",
+          "end": "00:02:39,740",
+          "text": {
+            "zh": "混合到芥末里"
+          }
+        },
+        {
+          "start": "00:02:39,740",
+          "end": "00:02:40,780",
+          "text": {
+            "zh": "就能像料理店"
+          }
+        },
+        {
+          "start": "00:02:40,780",
+          "end": "00:02:42,480",
+          "text": {
+            "zh": "现磨山葵一样好吃"
+          }
+        },
+        {
+          "start": "00:02:42,480",
+          "end": "00:02:43,640",
+          "text": {
+            "zh": "喜欢吃辣的朋友"
+          }
+        },
+        {
+          "start": "00:02:43,640",
+          "end": "00:02:44,860",
+          "text": {
+            "zh": "还可以加入柠檬汁"
+          }
+        },
+        {
+          "start": "00:02:44,860",
+          "end": "00:02:46,280",
+          "text": {
+            "zh": "就能放大芥末辣味"
+          }
+        },
+        {
+          "start": "00:02:46,280",
+          "end": "00:02:47,420",
+          "text": {
+            "zh": "深藏公寓名"
+          }
+        },
+        {
+          "start": "00:02:47,420",
+          "end": "00:02:48,480",
+          "text": {
+            "zh": "最重要的是"
+          }
+        },
+        {
+          "start": "00:02:48,480",
+          "end": "00:02:50,080",
+          "text": {
+            "zh": "记得把家里的料酒"
+          }
+        },
+        {
+          "start": "00:02:50,080",
+          "end": "00:02:51,060",
+          "text": {
+            "zh": "换成黄酒"
+          }
+        },
+        {
+          "start": "00:02:51,060",
+          "end": "00:02:51,880",
+          "text": {
+            "zh": "亲自感受"
+          }
+        },
+        {
+          "start": "00:02:51,880",
+          "end": "00:02:53,260",
+          "text": {
+            "zh": "厨艺显著提升"
+          }
+        },
+        {
+          "start": "00:02:53,260",
+          "end": "00:02:56,060",
+          "text": {
+            "zh": "而饭后懒人不想面对的"
+          }
+        },
+        {
+          "start": "00:02:56,060",
+          "end": "00:02:57,780",
+          "text": {
+            "zh": "是刚下班的空气炸锅"
+          }
+        },
+        {
+          "start": "00:02:57,780",
+          "end": "00:02:59,020",
+          "text": {
+            "zh": "一勺小苏打"
+          }
+        },
+        {
+          "start": "00:02:59,020",
+          "end": "00:03:00,060",
+          "text": {
+            "zh": "两磅洗洁精"
+          }
+        },
+        {
+          "start": "00:03:00,060",
+          "end": "00:03:00,840",
+          "text": {
+            "zh": "倒入热水"
+          }
+        },
+        {
+          "start": "00:03:00,840",
+          "end": "00:03:02,620",
+          "text": {
+            "zh": "给它加个180度的搬"
+          }
+        },
+        {
+          "start": "00:03:02,620",
+          "end": "00:03:03,340",
+          "text": {
+            "zh": "10分钟"
+          }
+        },
+        {
+          "start": "00:03:03,340",
+          "end": "00:03:03,880",
+          "text": {
+            "zh": "清水"
+          }
+        },
+        {
+          "start": "00:03:03,880",
+          "end": "00:03:04,720",
+          "text": {
+            "zh": "一重几斤"
+          }
+        },
+        {
+          "start": "00:03:04,720",
+          "end": "00:03:06,520",
+          "text": {
+            "zh": "还顺便去除炸锅异味"
+          }
+        },
+        {
+          "start": "00:03:06,520",
+          "end": "00:03:08,240",
+          "text": {
+            "zh": "而每当纸巾见底时"
+          }
+        },
+        {
+          "start": "00:03:08,240",
+          "end": "00:03:09,820",
+          "text": {
+            "zh": "抽纸就变得很叛逆"
+          }
+        },
+        {
+          "start": "00:03:09,820",
+          "end": "00:03:13,220",
+          "text": {
+            "zh": "把它顶在新的抽纸上"
+          }
+        },
+        {
+          "start": "00:03:13,220",
+          "end": "00:03:14,720",
+          "text": {
+            "zh": "就能无缝衔接"
+          }
+        }
+      ]
+    },
+    {
       "platform": "bilibili",
       "video_id": "BV1aDb56iEvu",
       "topic": "bilibili_test",

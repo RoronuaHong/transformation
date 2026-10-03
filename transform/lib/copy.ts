@@ -61,8 +61,10 @@ export type ArticleCopy = {
 export type NavCopy = {
   language: string;
   brand: string;
+  workbench: string;
   feed: string;
   ask: string;
+  hub: string;
   themeLight: string;
   themeDark: string;
   themeToLight: string;
@@ -278,12 +280,93 @@ export type AskCopy = {
   placeholder: string;
 };
 
+export type HubCopy = {
+  kicker: string;
+  headline: string;
+  lede: string;
+  searchPh: string;
+  all: string;
+  kindImages: string;
+  kindVideos: string;
+  kindSilent: string;
+  kindDocs: string;
+  kindAudio: string;
+  kindSubs: string;
+  kindAnim: string;
+  kindOther: string;
+  upload: string;
+  refresh: string;
+  openCrop: string;
+  openAgent: string;
+  agentKicker: string;
+  agentHeadline: string;
+  agentLede: string;
+  agentPh: string;
+  agentSend: string;
+  agentStop: string;
+  agentNew: string;
+  agentAllowWrite: string;
+  agentBack: string;
+  agentRunning: string;
+  agentEmpty: string;
+  agentNoModel: string;
+  agentHint: string;
+  agentAttach: string;
+  agentAttachHint: string;
+  agentAttachFail: string;
+  agentUploading: string;
+  agentDefaultImgAsk: string;
+  agentDefaultVidAsk: string;
+  agentSugCover: string;
+  agentSugDupes: string;
+  agentSugMaintain: string;
+  agentSugSegment: string;
+  agentSugCoverTask: string;
+  agentSugDupesTask: string;
+  agentSugMaintainTask: string;
+  agentSugSegmentTask: string;
+  agentOnline: string;
+  agentOffline: string;
+  agentChats: string;
+  agentUntitled: string;
+  agentDeleteThread: string;
+  agentSaveFail: string;
+  empty: string;
+  emptyHint: string;
+  statTotal: string;
+  tags: string;
+  clear: string;
+  save: string;
+  close: string;
+  del: string;
+  copyPath: string;
+  openFile: string;
+  typeSize: string;
+  path: string;
+  missing: string;
+  prev: string;
+  next: string;
+  pageOf: string;
+  modeAuto: string;
+  modeLex: string;
+  modeSem: string;
+  sortNewest: string;
+  sortName: string;
+  sortSize: string;
+  saved: string;
+  deleted: string;
+  uploaded: string;
+  error: string;
+  backendHint: string;
+};
+
 export type UiCopy = {
   feed: FeedCopy;
   article: ArticleCopy;
   nav: NavCopy;
   try: TryCopy;
   ask: AskCopy;
+  hub: HubCopy;
 };
 
 const en: UiCopy = {
@@ -348,8 +431,10 @@ const en: UiCopy = {
   nav: {
     language: "Language",
     brand: "Vitual",
+    workbench: "Crop",
     feed: "Library",
     ask: "Ask",
+    hub: "Materials",
     themeLight: "Light",
     themeDark: "Dark",
     themeToLight: "Switch to light",
@@ -567,6 +652,85 @@ const en: UiCopy = {
     lede: "Ask questions about the project knowledge base. Answers are grounded in indexed docs with sources cited.",
     placeholder: "Ask anything, e.g. Which workspace packs are available and how much do they cost?",
   },
+  hub: {
+    kicker: "Materials",
+    headline: "Materials hub",
+    lede: "Browse pipeline outputs — videos, silent clips, audio tracks, captions, notes — in one catalog.",
+    searchPh: "Search name, tags, description…",
+    all: "All",
+    kindImages: "Images",
+    kindVideos: "Videos",
+    kindSilent: "Silent",
+    kindDocs: "Docs",
+    kindAudio: "Audio tracks",
+    kindSubs: "Captions",
+    kindAnim: "GIFs",
+    kindOther: "Other",
+    upload: "Upload",
+    refresh: "Refresh",
+    openCrop: "Open crop workbench",
+    openAgent: "AI Agent",
+    agentKicker: "Agent",
+    agentHeadline: "Materials AI Agent",
+    agentLede: "Dedicated agent workspace: search, job checkup, near-dupes, missing covers, shots. Attach images/videos to ingest then image-search or master analysis.",
+    agentPh: "Message the agent… or drop an image/video here",
+    agentSend: "Send",
+    agentStop: "Stop",
+    agentNew: "New chat",
+    agentAllowWrite: "Allow writes",
+    agentBack: "Back to catalog",
+    agentRunning: "Agent is working…",
+    agentEmpty: "What should we do with the materials library?",
+    agentNoModel: "No local chat model. Run: ollama pull qwen2.5:7b",
+    agentHint: "Enter send · Shift+Enter newline · attach image/video",
+    agentAttach: "Attach media",
+    agentAttachHint: "Attach an image for similar-frame search, or a video for master/shot checkup (Skill D / E).",
+    agentAttachFail: "Upload failed",
+    agentUploading: "Uploading…",
+    agentDefaultImgAsk: "Search the library for similar frames to this image",
+    agentDefaultVidAsk: "Analyze this uploaded video (master / shots / missing cover)",
+    agentSugCover: "Missing covers",
+    agentSugDupes: "Near-dupes",
+    agentSugMaintain: "Health check",
+    agentSugSegment: "Find shots",
+    agentSugCoverTask: "List materials missing covers, silent first",
+    agentSugDupesTask: "Report near-duplicate clusters in the library",
+    agentSugMaintainTask: "Run maintain health check and summarize broken or incomplete assets",
+    agentSugSegmentTask: "Find masters with role:master, then get_shots for a useful segment timeline — do not invent clip files",
+    agentOnline: "Model ready",
+    agentOffline: "Model offline",
+    agentChats: "History",
+    agentUntitled: "New chat",
+    agentDeleteThread: "Delete conversation",
+    agentSaveFail: "Failed to save chat",
+    empty: "No matching materials",
+    emptyHint: "Finish a try job, or upload files here.",
+    statTotal: "Items",
+    tags: "Tags",
+    clear: "Clear filters",
+    save: "Save",
+    close: "Close",
+    del: "Delete",
+    copyPath: "Copy path",
+    openFile: "Open file",
+    typeSize: "Type · size",
+    path: "Path",
+    missing: "File missing",
+    prev: "Prev",
+    next: "Next",
+    pageOf: "{p} / {n} · {t} items",
+    modeAuto: "Search: auto",
+    modeLex: "Search: lexical",
+    modeSem: "Search: semantic",
+    sortNewest: "Newest",
+    sortName: "Name",
+    sortSize: "Size",
+    saved: "Saved",
+    deleted: "Deleted",
+    uploaded: "Uploaded {n} file(s)",
+    error: "Materials API unavailable",
+    backendHint: "Start materials_hub: python server.py (:8000)",
+  },
 };
 
 const zh: UiCopy = {
@@ -630,8 +794,10 @@ const zh: UiCopy = {
   nav: {
     language: "语言",
     brand: "Vitual",
+    workbench: "裁剪",
     feed: "列表",
     ask: "问问一桌",
+    hub: "素材中心",
     themeLight: "浅色",
     themeDark: "深色",
     themeToLight: "切换到浅色",
@@ -848,6 +1014,85 @@ const zh: UiCopy = {
     lede: "基于项目知识库（Milvus 向量库 + 本地大模型）回答问题，答案附引用来源。",
     placeholder: "向知识库提问，例如：有哪些职场资产包？分别多少钱？",
   },
+  hub: {
+    kicker: "素材",
+    headline: "素材中心",
+    lede: "流水线产物与上传文件统一编目：有声视频、无声画面、音轨、字幕、笔记。",
+    searchPh: "搜索文件名、标签、描述…",
+    all: "全部",
+    kindImages: "图片",
+    kindVideos: "视频",
+    kindSilent: "无声",
+    kindDocs: "文档",
+    kindAudio: "音轨",
+    kindSubs: "字幕",
+    kindAnim: "动图",
+    kindOther: "其他",
+    upload: "上传",
+    refresh: "刷新",
+    openCrop: "打开裁剪工作台",
+    openAgent: "AI Agent",
+    agentKicker: "Agent",
+    agentHeadline: "素材 AI Agent",
+    agentLede: "独立 Agent 工作台：检索、job 体检、近重复、缺封面、镜头。可上传图片/视频入库，再以图搜图或按母版方案 A 分析。",
+    agentPh: "给 Agent 发消息… 也可拖入图片/视频",
+    agentSend: "发送",
+    agentStop: "停止",
+    agentNew: "新对话",
+    agentAllowWrite: "允许写入",
+    agentBack: "返回素材目录",
+    agentRunning: "Agent 执行中…",
+    agentEmpty: "想让我对素材库做什么？",
+    agentNoModel: "未检测到本地对话模型。请执行：ollama pull qwen2.5:7b",
+    agentHint: "Enter 发送 · Shift+Enter 换行 · 可附图片/视频",
+    agentAttach: "上传媒体",
+    agentAttachHint: "上传图片做以图搜图；上传视频按母版/镜头体检（对齐 Skill D / E）。",
+    agentAttachFail: "上传失败",
+    agentUploading: "上传中…",
+    agentDefaultImgAsk: "以图搜图：找出库里相似画面",
+    agentDefaultVidAsk: "分析这段上传视频（母版 / 镜头 / 缺封面）",
+    agentSugCover: "缺封面盘点",
+    agentSugDupes: "近重复",
+    agentSugMaintain: "健康巡检",
+    agentSugSegment: "找片段",
+    agentSugCoverTask: "列出缺封面的素材，优先 silent",
+    agentSugDupesTask: "汇报素材库近重复聚类",
+    agentSugMaintainTask: "跑 maintain 健康巡检，汇总损坏或不完整素材",
+    agentSugSegmentTask: "检索 role:master 母版，再 get_shots 给出可用镜头时间轴——不要编造物理 clip 文件",
+    agentOnline: "模型就绪",
+    agentOffline: "模型未就绪",
+    agentChats: "历史对话",
+    agentUntitled: "新对话",
+    agentDeleteThread: "删除对话",
+    agentSaveFail: "对话保存失败",
+    empty: "没有匹配的素材",
+    emptyHint: "先跑完试一试，或在此上传文件。",
+    statTotal: "共",
+    tags: "标签",
+    clear: "清除筛选",
+    save: "保存",
+    close: "关闭",
+    del: "删除",
+    copyPath: "复制路径",
+    openFile: "打开文件",
+    typeSize: "类型 · 大小",
+    path: "路径",
+    missing: "原文件缺失",
+    prev: "上一页",
+    next: "下一页",
+    pageOf: "{p} / {n} 页 · 共 {t} 条",
+    modeAuto: "检索：自动",
+    modeLex: "检索：词法",
+    modeSem: "检索：语义",
+    sortNewest: "最新",
+    sortName: "名称",
+    sortSize: "大小",
+    saved: "已保存",
+    deleted: "已删除",
+    uploaded: "已上传 {n} 个文件",
+    error: "素材中心 API 不可用",
+    backendHint: "请先启动 materials_hub：python server.py（:8000）",
+  },
 };
 
 const zhHant: UiCopy = {
@@ -911,8 +1156,10 @@ const zhHant: UiCopy = {
   nav: {
     language: "語言",
     brand: "Vitual",
+    workbench: "裁剪",
     feed: "列表",
     ask: "問問一桌",
+    hub: "素材中心",
     themeLight: "淺色",
     themeDark: "深色",
     themeToLight: "切換到淺色",
@@ -969,6 +1216,80 @@ const zhHant: UiCopy = {
     lede: "基於專案知識庫（Milvus 向量庫 + 本地大模型）回答問題，答案附引用來源。",
     placeholder: "向知識庫提問，例如：有哪些職場資產包？分別多少錢？",
   },
+  hub: {
+    ...zh.hub,
+    kicker: "素材",
+    headline: "素材中心",
+    lede: "流水線產物與上傳檔案統一編目：有聲影片、無聲畫面、音軌、字幕、筆記。",
+    searchPh: "搜尋檔名、標籤、描述…",
+    kindVideos: "影片",
+    kindSilent: "無聲",
+    kindAudio: "音軌",
+    kindAnim: "動圖",
+    kindOther: "其他",
+    upload: "上傳",
+    refresh: "重新整理",
+    openCrop: "開啟裁剪工作台",
+    openAgent: "AI Agent",
+    agentKicker: "Agent",
+    agentHeadline: "素材 AI Agent",
+    agentLede: "獨立 Agent 工作台：檢索、job 體檢、近重複、缺封面、鏡頭。可上傳圖片/影片入庫，再以圖搜圖或按母版方案 A 分析。",
+    agentPh: "給 Agent 發訊息… 也可拖入圖片/影片",
+    agentSend: "傳送",
+    agentStop: "停止",
+    agentNew: "新對話",
+    agentAllowWrite: "允許寫入",
+    agentBack: "返回素材目錄",
+    agentRunning: "Agent 執行中…",
+    agentEmpty: "想讓我對素材庫做什麼？",
+    agentNoModel: "未偵測到本機對話模型。請執行：ollama pull qwen2.5:7b",
+    agentHint: "Enter 傳送 · Shift+Enter 換行 · 可附圖片/影片",
+    agentAttach: "上傳媒體",
+    agentAttachHint: "上傳圖片做以圖搜圖；上傳影片按母版/鏡頭體檢（對齊 Skill D / E）。",
+    agentAttachFail: "上傳失敗",
+    agentUploading: "上傳中…",
+    agentDefaultImgAsk: "以圖搜圖：找出庫裡相似畫面",
+    agentDefaultVidAsk: "分析這段上傳影片（母版 / 鏡頭 / 缺封面）",
+    agentSugCover: "缺封面盤點",
+    agentSugDupes: "近重複",
+    agentSugMaintain: "健康巡檢",
+    agentSugSegment: "找片段",
+    agentSugCoverTask: "列出缺封面的素材，優先 silent",
+    agentSugDupesTask: "彙報素材庫近重複聚類",
+    agentSugMaintainTask: "跑 maintain 健康巡檢，彙總損壞或不完整素材",
+    agentSugSegmentTask: "檢索 role:master 母版，再 get_shots 給出可用鏡頭時間軸——不要編造物理 clip 檔",
+    agentOnline: "模型就緒",
+    agentOffline: "模型未就緒",
+    agentChats: "歷史對話",
+    agentUntitled: "新對話",
+    agentDeleteThread: "刪除對話",
+    agentSaveFail: "對話儲存失敗",
+    empty: "沒有符合的素材",
+    emptyHint: "先跑完試一試，或在此上傳檔案。",
+    clear: "清除篩選",
+    save: "儲存",
+    close: "關閉",
+    del: "刪除",
+    copyPath: "複製路徑",
+    openFile: "開啟檔案",
+    typeSize: "類型 · 大小",
+    path: "路徑",
+    missing: "原檔缺失",
+    prev: "上一頁",
+    next: "下一頁",
+    pageOf: "{p} / {n} 頁 · 共 {t} 筆",
+    modeAuto: "檢索：自動",
+    modeLex: "檢索：詞法",
+    modeSem: "檢索：語意",
+    sortNewest: "最新",
+    sortName: "名稱",
+    sortSize: "大小",
+    saved: "已儲存",
+    deleted: "已刪除",
+    uploaded: "已上傳 {n} 個檔案",
+    error: "素材中心 API 不可用",
+    backendHint: "請先啟動 materials_hub：python server.py（:8000）",
+  },
 };
 
 function overlay(partial: {
@@ -977,6 +1298,7 @@ function overlay(partial: {
   nav?: Partial<NavCopy>;
   try?: Partial<TryCopy>;
   ask?: Partial<AskCopy>;
+  hub?: Partial<HubCopy>;
 }): UiCopy {
   return {
     feed: { ...en.feed, ...partial.feed },
@@ -984,6 +1306,7 @@ function overlay(partial: {
     nav: { ...en.nav, ...partial.nav },
     try: { ...en.try, ...partial.try },
     ask: { ...en.ask, ...partial.ask },
+    hub: { ...en.hub, ...partial.hub },
   };
 }
 
