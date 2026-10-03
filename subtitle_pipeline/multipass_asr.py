@@ -36,6 +36,30 @@ DEFAULT_RULE_FIXES: list[tuple[str, str]] = [
     ("端点嘉宾", "端茶倒水"),
     ("端饭加冰", "端茶倒水"),
     ("烘配", "烘焙"),
+    # kitchen / short-video ASR near-misses
+    ("洗一次烧", "洗一次勺"),
+    ("不用洗烧", "不用洗勺"),
+    ("还不用洗烧", "还不用洗勺"),
+    ("还不用洗烧勺", "还不用洗勺"),
+    ("水龙头已离结", "水龙头已拧结"),
+    ("水龙头与李杰", "水龙头已拧结"),
+    ("水龙头已李杰", "水龙头已拧结"),
+    ("既不穿位", "既不串味"),
+    ("不穿位", "不串味"),
+    ("既不串位", "既不串味"),
+    ("要好了岗位", "要好了感慨"),
+    ("安装要好了岗位", "安装要好了感慨"),
+    ("蒜皮煮动", "蒜皮自动"),
+    ("顺其主动脱离", "蒜皮自动脱离"),
+    ("隔下金盔", "阁下金贵"),
+    ("隔下金贵", "阁下金贵"),
+    ("不惜牛市", "不行牛屎"),
+    ("不幸牛市", "不行牛屎"),
+    ("大大提升企业指数", "大大提升幸福指数"),
+    ("效率直超留学线", "效率直超流水线"),
+    ("是为了好宰", "是为了好摘"),
+    ("人尽其难", "人尽其才"),
+    ("而经常切朋友的辣椒", "而经常切到手的辣椒"),
 ]
 
 PREFERRED_TOKENS = (
@@ -46,6 +70,10 @@ PREFERRED_TOKENS = (
     "助助兴",
     "踏踏实实走",
     "跑路了兄弟",
+    "洗勺",
+    "拧结",
+    "串味",
+    "感慨",
 )
 
 BAD_TOKENS = (
@@ -58,6 +86,10 @@ BAD_TOKENS = (
     "端饭加冰",
     "光还打",
     "油辣",
+    "洗一次烧",
+    "不穿位",
+    "离结",
+    "岗位",
 )
 
 REPEAT_MIN = 3  # same normalized text ≥ N → chorus / meme → re-listen
@@ -335,6 +367,14 @@ def _run_one_pass(model, wav: Path, name: str, language: str | None, **kwargs) -
     return out
 
 
+# Silero VAD defaults aligned with faster-whisper production guides.
+VAD_PARAMS_DEFAULT = {
+    "min_silence_duration_ms": 500,
+    "speech_pad_ms": 400,
+    "threshold": 0.5,
+}
+
+
 def transcribe_multipass(
     wav: Path,
     model_id: str,
@@ -365,16 +405,30 @@ def transcribe_multipass(
             "A_baseline",
             language,
             vad_filter=True,
+            vad_parameters=dict(VAD_PARAMS_DEFAULT),
             beam_size=5,
+            best_of=5,
+            temperature=0.0,
             condition_on_previous_text=False,
+            compression_ratio_threshold=2.4,
+            log_prob_threshold=-1.0,
+            no_speech_threshold=0.6,
         )
         b_kw: dict = {
             "vad_filter": True,
+            "vad_parameters": dict(VAD_PARAMS_DEFAULT),
             "beam_size": 8,
+            "best_of": 5,
+            "temperature": 0.0,
             "condition_on_previous_text": True,
+            "compression_ratio_threshold": 2.4,
+            "log_prob_threshold": -1.0,
+            "no_speech_threshold": 0.6,
         }
         if hotwords:
-            b_kw["initial_prompt"] = hotwords.strip()
+            # Vocabulary seed only (not instructions) — faster-whisper best practice.
+            b_kw["initial_prompt"] = hotwords.strip()[:224]
+            b_kw["hotwords"] = hotwords.strip()[:64]
         pass_b = _run_one_pass(model, wav, "B_hotwords", language, **b_kw)
         pass_c = _run_one_pass(
             model,
@@ -383,8 +437,12 @@ def transcribe_multipass(
             language,
             vad_filter=False,
             beam_size=5,
+            best_of=5,
             condition_on_previous_text=True,
             temperature=0.0,
+            compression_ratio_threshold=2.4,
+            log_prob_threshold=-1.0,
+            no_speech_threshold=0.6,
         )
 
         raw = {"A": pass_a, "B": pass_b, "C": pass_c}
@@ -431,9 +489,8 @@ def llm_correct_segments(
         sus = s.get("suspicious") or []
         # skip if only_suspicious and nothing left to fix
         if only_suspicious:
-            # after relisten_done, skip unless still bad_token / A≠B / A≠C / repeat
-            active = [r for r in sus if r not in ("relisten_done",)]
-            if not active and not any(x in a for x in BAD_TOKENS):
+            # 无剩余可疑原因且无非预期 token → 直接保留原句
+            if not sus and not any(x in a for x in BAD_TOKENS):
                 out.append({"start": s["start"], "end": s["end"], "text": a})
                 continue
 
@@ -447,8 +504,12 @@ def llm_correct_segments(
 
         hint = f"\n弹幕/热词参考: {danmaku_hints[:300]}\n" if danmaku_hints else "\n"
         prompt = (
-            "你是中文字幕校对员。综合三次听写，只输出一句正确口语中文，不要解释。\n"
-            "若是重复配乐/梗，优先合理歌词（如「跑路了兄弟 跑路了」）。\n"
+            "你是中文字幕校对员。综合 A/B/C 三次听写，只输出【这一条】正确口语中文。\n"
+            "硬性规则：\n"
+            "1. 禁止合并、拼接邻句；禁止补上下句内容。\n"
+            "2. 只改明显错词/同音误听，不要改写风格。\n"
+            "3. 输出长度必须接近 A（±4 字以内），不要解释、不要标点说明。\n"
+            "4. 若是重复配乐/梗，优先合理歌词（如「跑路了兄弟 跑路了」）。\n"
             f"{hint}"
             f"可疑原因: {', '.join(sus) or '无'}\n"
             f"A: {a}\nB: {b}\nC: {c}\n校对:"
@@ -457,7 +518,7 @@ def llm_correct_segments(
             raw = ollama_generate(host, model, prompt)
         except Exception as e:
             print(f"  [correct] #{i} keep ({e})")
-            out.append({"start": s["start"], "end": s["end"], "text": a})
+            out.append({"start": s["start"], "end": s["end"], "text": rule_fix(a)})
             continue
         line = ""
         for ln in raw.splitlines():
@@ -466,11 +527,43 @@ def llm_correct_segments(
             if ln:
                 line = ln
                 break
-        if not line or len(line) > max(len(a), 8) * 2.5:
+        # Reject merges / hallucinations that balloon past the source cue.
+        max_len = max(len(a) + 4, int(len(a) * 1.3) + 1)
+        if not line or len(line) > max_len:
+            if line and len(line) > max_len:
+                print(f"  [correct] #{i} reject long ({len(line)}>{max_len}) keep A")
             line = a
         fixed = rule_fix(line)
+        # Reject over-truncation that drops domain nouns still present in A.
+        if a and len(fixed) + 4 < len(a):
+            keepers = ("空气炸锅", "蒜皮", "只需", "手套", "月饼", "豆干", "洗勺", "拧结")
+            if any(k in a for k in keepers) and not any(k in fixed for k in keepers):
+                print(f"  [correct] #{i} reject short drop-token keep A")
+                fixed = rule_fix(a)
         out.append({"start": s["start"], "end": s["end"], "text": fixed})
-        print(f"  [correct] #{i} {a} => {fixed}")
+        if fixed != rule_fix(a) and fixed != a:
+            print(f"  [correct] #{i} {a} => {fixed}")
+        else:
+            print(f"  [correct] #{i} keep {fixed}")
+    return out
+
+
+def restore_truncated_from_baseline(
+    segs: list[dict],
+    baseline: list[dict],
+) -> list[dict]:
+    """If LLM left a proper prefix of baseline A, restore the full A cue."""
+    out: list[dict] = []
+    for s in segs:
+        cur = rule_fix(s.get("text") or "")
+        a = rule_fix(nearest_text(baseline, float(s["start"]), float(s["end"])))
+        na = re.sub(r"\s+", "", a)
+        nc = re.sub(r"\s+", "", cur)
+        if a and nc and na != nc and na.startswith(nc) and len(na) >= len(nc) + 2:
+            cur = a
+        elif a and any(k in a and k not in cur for k in ("蒜皮", "空气炸锅", "只需", "油脆脆")):
+            cur = a
+        out.append({"start": s["start"], "end": s["end"], "text": cur})
     return out
 
 

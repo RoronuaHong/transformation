@@ -37,9 +37,12 @@ from langs import (
     whisper_lang,
 )
 from multipass_asr import (
+    VAD_PARAMS_DEFAULT,
     llm_correct_segments,
     load_hotwords,
     nearest_text,
+    restore_truncated_from_baseline,
+    rule_fix,
     save_raw,
     strip_internal_fields,
     transcribe_multipass,
@@ -207,6 +210,56 @@ def write_srt(segments: list[dict], path: Path) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def qa_srt_readability(
+    segments: list[dict],
+    *,
+    max_cps: float = 24.0,
+    min_dur: float = 0.4,
+    max_dur: float = 7.0,
+    max_chars: int = 42,
+) -> dict:
+    """Soft Netflix/BBC-inspired checks. Never mutates timings (PIPELINE_BEST_PRACTICES §5)."""
+    warns: list[str] = []
+    cps_hi = short = long_cues = long_text = 0
+    for i, s in enumerate(segments, 1):
+        text = (s.get("text") or "").strip()
+        dur = max(0.001, float(s["end"]) - float(s["start"]))
+        cps = len(text) / dur
+        if cps > max_cps:
+            cps_hi += 1
+            if len(warns) < 12:
+                warns.append(f"#{i} cps={cps:.1f}>{max_cps}")
+        if dur < min_dur:
+            short += 1
+            if len(warns) < 12:
+                warns.append(f"#{i} dur={dur:.2f}s<{min_dur}")
+        if dur > max_dur:
+            long_cues += 1
+            if len(warns) < 12:
+                warns.append(f"#{i} dur={dur:.2f}s>{max_dur}")
+        if len(text) > max_chars:
+            long_text += 1
+            if len(warns) < 12:
+                warns.append(f"#{i} chars={len(text)}>{max_chars}")
+    report = {
+        "cues": len(segments),
+        "cps_over": cps_hi,
+        "too_short": short,
+        "too_long": long_cues,
+        "chars_over": long_text,
+        "warns": warns,
+        "ok": cps_hi + short + long_cues + long_text == 0,
+    }
+    if not report["ok"]:
+        print(
+            f"[qa-srt] soft warns cps_over={cps_hi} short={short} "
+            f"long={long_cues} chars_over={long_text}"
+        )
+    else:
+        print("[qa-srt] readability ok")
+    return report
+
+
 def write_txt(segments: list[dict], path: Path) -> None:
     """Time on top, text below (delivery format)."""
     blocks = []
@@ -219,21 +272,10 @@ def write_txt(segments: list[dict], path: Path) -> None:
 
 
 def extract_audio(ffmpeg: str, video: Path, wav: Path) -> None:
-    cmd = [
-        ffmpeg,
-        "-y",
-        "-i",
-        str(video),
-        "-vn",
-        "-acodec",
-        "pcm_s16le",
-        "-ar",
-        "16000",
-        "-ac",
-        "1",
-        str(wav),
-    ]
-    subprocess.run(cmd, check=True, capture_output=True)
+    """Whisper ingest: 16 kHz mono PCM s16le. No silenceremove (keeps timeline)."""
+    from audio_prep import whisper_wav_cmd
+
+    subprocess.run(whisper_wav_cmd(ffmpeg, video, wav), check=True, capture_output=True)
 
 
 def release_cuda() -> None:
@@ -256,7 +298,19 @@ def transcribe(wav: Path, model_size: str, device: str, language: str) -> tuple[
     print(f"[whisper] loading {model_id} device={device} compute={compute}")
     model = WhisperModel(model_id, device=device, compute_type=compute)
     try:
-        kwargs = dict(vad_filter=True, beam_size=5)
+        # Best practice (faster-whisper / Silero VAD): pin language, beam≥5,
+        # trim short silences, reset context to reduce ZH hallucination loops.
+        kwargs = dict(
+            vad_filter=True,
+            vad_parameters=dict(VAD_PARAMS_DEFAULT),
+            beam_size=5,
+            best_of=5,
+            temperature=0.0,
+            condition_on_previous_text=False,
+            compression_ratio_threshold=2.4,
+            log_prob_threshold=-1.0,
+            no_speech_threshold=0.6,
+        )
         if asr_lang:
             kwargs["language"] = asr_lang
         segments_iter, info = model.transcribe(str(wav), **kwargs)
@@ -269,6 +323,11 @@ def transcribe(wav: Path, model_size: str, device: str, language: str) -> tuple[
         for s in segments_iter:
             text = (s.text or "").strip()
             if not text:
+                continue
+            # Drop near-silence / low-confidence phantoms (whisper-guard style).
+            no_speech = float(getattr(s, "no_speech_prob", 0.0) or 0.0)
+            avg_lp = float(getattr(s, "avg_logprob", 0.0) or 0.0)
+            if no_speech > 0.8 and avg_lp < -1.5:
                 continue
             out.append({"start": float(s.start), "end": float(s.end), "text": text})
         return out, detected
@@ -441,11 +500,52 @@ def auto_build_glossary(
         "terms": {str(k): str(v) for k, v in (data.get("terms") or {}).items()},
         "asr_fix": {str(k): str(v) for k, v in (data.get("asr_fix") or {}).items()},
     }
+    # Seed domain near-misses so batch correct always sees them.
+    for wrong, right in (
+        ("洗一次烧", "洗一次勺"),
+        ("水龙头已离结", "水龙头已拧结"),
+        ("不穿位", "不串味"),
+        ("既不穿位", "既不串味"),
+        ("要好了岗位", "要好了感慨"),
+    ):
+        glossary["asr_fix"].setdefault(wrong, right)
+    # Bilingual term hints for MTPE glossary injection (src → preferred EN gloss).
+    for src_term, en_term in (
+        ("洗勺", "wash the spoon"),
+        ("串味", "flavor transfer"),
+        ("手套纸", "glove tissue"),
+        ("拧结", "tightened"),
+        ("空气炸锅", "air fryer"),
+        ("蒜皮", "garlic skin"),
+    ):
+        glossary["terms"].setdefault(src_term, en_term)
     print(
         f"[auto] glossary names={len(glossary['names'])} "
         f"terms={len(glossary['terms'])} asr_fix={len(glossary['asr_fix'])}"
     )
     return glossary
+
+
+def polish_source_with_glossary(
+    ollama: str,
+    model: str,
+    segments: list[dict],
+    source_lang: str,
+    out_dir: Path,
+) -> tuple[list[dict], dict]:
+    """LLM-2: build glossary + batch-correct all cues (after Whisper / LLM-1)."""
+    glossary = auto_build_glossary(ollama, model, segments, source_lang)
+    gloss_path = job_media_dir(out_dir) / "glossary.json"
+    gloss_path.write_text(
+        json.dumps(glossary, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(f"[out] {gloss_path}")
+    fixed = correct_segments(ollama, model, segments, glossary, source_lang)
+    fixed = [
+        {"start": s["start"], "end": s["end"], "text": rule_fix(s["text"])}
+        for s in fixed
+    ]
+    return fixed, glossary
 
 
 def correct_segments(
@@ -454,7 +554,7 @@ def correct_segments(
     segments: list[dict],
     glossary: dict,
     source_lang: str,
-    batch_size: int = 8,
+    batch_size: int = 24,
 ) -> list[dict]:
     src_name = lang_name(source_lang)
     fixed: list[dict] = []
@@ -467,6 +567,8 @@ def correct_segments(
         prompt = (
             f"Correct obvious speech-to-text errors in these {src_name} subtitle lines.\n"
             "Keep spoken style. Do not translate. Do not merge/split lines.\n"
+            "Keep each line length close to the input (±4 chars). "
+            "Only fix clear ASR mishearings.\n"
             "Use this glossary when relevant:\n"
             f"{format_glossary(glossary)}\n"
             "Return ONLY JSON array of strings, same length and order.\n\n"
@@ -478,7 +580,12 @@ def correct_segments(
         for i, seg in enumerate(chunk):
             text = arr[i] if i < len(arr) and arr[i] else apply_asr_fix(seg["text"], glossary)
             text = re.sub(r'^["“]|["”]$', "", text).strip()
-            fixed.append({"start": seg["start"], "end": seg["end"], "text": text or seg["text"]})
+            base = apply_asr_fix(seg["text"], glossary)
+            # Reject merge/hallucination: keep glossary-only fix if ballooned.
+            if text and len(text) > max(len(base) + 4, int(len(base) * 1.3) + 1):
+                text = base
+            text = rule_fix(text or base or seg["text"])
+            fixed.append({"start": seg["start"], "end": seg["end"], "text": text})
     return fixed
 
 
@@ -489,7 +596,7 @@ def translate_segments(
     target_lang: str,
     source_lang: str,
     glossary: dict | None = None,
-    batch_size: int = 8,
+    batch_size: int = 24,
 ) -> list[dict]:
     src_name = lang_name(source_lang)
     tgt_name = lang_name(target_lang)
@@ -502,10 +609,12 @@ def translate_segments(
         prompt = (
             f"Translate these {src_name} subtitle lines into {tgt_name}.\n"
             "Rules:\n"
-            "- Natural spoken subtitles.\n"
+            "- Natural spoken subtitles (MTPE-ready: concise, not padded).\n"
             "- One output line per input line, same order.\n"
             "- Do not merge, split, explain, or add notes.\n"
             "- Prefer Simplified Chinese if target is Simplified Chinese.\n"
+            "- Keep length close to the source; for short-video Chinese→English "
+            "prefer condensation under ~42 Latin characters when meaning allows.\n"
             "- Use the glossary for names/terms when present; "
             "otherwise keep names consistent across lines.\n"
             f"{gloss}\n"
@@ -528,8 +637,56 @@ def translate_segments(
                 )
                 text = text.splitlines()[0].strip() if text else seg["text"]
             text = re.sub(r'^["“]|["”]$', "", text).strip()
+            src_t = (seg.get("text") or "").strip()
+            # Reject empty / extreme padding (MTPE: keep cue count & timing locked).
+            if not text:
+                text = src_t
+            elif src_t and len(text) > max(len(src_t) * 4, len(src_t) + 48):
+                text = text[: max(12, int(len(src_t) * 2.5))].rstrip()
             translated.append({"start": seg["start"], "end": seg["end"], "text": text})
     return translated
+
+
+def qa_bilingual_alignment(
+    source: list[dict],
+    target: list[dict],
+    *,
+    target_lang: str = "en",
+) -> dict:
+    """Soft bilingual QA: cue count, empty lines, timing lock (PIPELINE §4–5)."""
+    warns: list[str] = []
+    if len(source) != len(target):
+        warns.append(f"cue_count {len(source)}!={len(target)}")
+    n = min(len(source), len(target))
+    empty = drift = 0
+    for i in range(n):
+        if not (target[i].get("text") or "").strip():
+            empty += 1
+            if len(warns) < 12:
+                warns.append(f"#{i+1} empty target")
+        if abs(float(source[i]["start"]) - float(target[i]["start"])) > 0.05 or abs(
+            float(source[i]["end"]) - float(target[i]["end"])
+        ) > 0.05:
+            drift += 1
+            if len(warns) < 12:
+                warns.append(f"#{i+1} timing drift")
+    report = {
+        "source_cues": len(source),
+        "target_cues": len(target),
+        "target_lang": target_lang,
+        "empty": empty,
+        "timing_drift": drift,
+        "warns": warns,
+        "ok": len(source) == len(target) and empty == 0 and drift == 0,
+    }
+    if report["ok"]:
+        print(f"[qa-bi] {target_lang} aligned ok")
+    else:
+        print(
+            f"[qa-bi] {target_lang} warns empty={empty} drift={drift} "
+            f"count={len(source)}/{len(target)}"
+        )
+    return report
 
 
 def parse_srt(path: Path) -> list[dict]:
@@ -1509,8 +1666,20 @@ def do_translate(
         warns = validate_srt_monotonic(xx)
         for w in warns:
             locked_print(f"[sync-warn] {tag}: {w}")
+        bi = qa_bilingual_alignment(segs, xx, target_lang=lang)
+        read = qa_srt_readability(
+            xx,
+            max_cps=20.0 if lang.startswith("en") else 24.0,
+            max_chars=42,
+        )
         write_srt(xx, out_srt)
+        qa_path = job_media_dir(out_dir) / f"translate_qa_{tag}.json"
+        qa_path.write_text(
+            json.dumps({"bilingual": bi, "readability": read}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         locked_print(f"[out] {out_srt}")
+        locked_print(f"[out] {qa_path}")
 
     if workers <= 1 or len(targets) <= 1:
         for lang in targets:
@@ -1768,8 +1937,42 @@ def transcribe_video(args: argparse.Namespace) -> tuple[list[dict], Path, str, P
                 only_suspicious=not bool(getattr(args, "llm_all", False)),
                 danmaku_hints=dm_hint,
             )
+            segs = restore_truncated_from_baseline(segs, raw["A"])
 
     segs = strip_internal_fields(segs)
+    # Deterministic near-miss cleanup on every cue (before / after LLM polish).
+    segs = [
+        {"start": s["start"], "end": s["end"], "text": rule_fix(s.get("text") or "")}
+        for s in segs
+        if (s.get("text") or "").strip()
+    ]
+
+    # LLM-2: glossary extract + full-pass correct (gemma chat). Skip if already done
+    # by caller; CLI `transcribe` and batch both land here when --llm-correct.
+    if args.llm_correct and not getattr(args, "_skip_glossary_polish", False):
+        try:
+            ollama_bin = find_ollama()
+            ensure_ollama_model(args.correct_model or chat_model(args), role="chat")
+            src_for_gloss = (
+                coalesce_source_lang(detected_lang)
+                if args.source_lang == "auto"
+                else normalize_lang(args.source_lang)
+            )
+            print(
+                f"[correct] glossary + full-pass via "
+                f"{args.correct_model or chat_model(args)}"
+            )
+            segs, _gloss = polish_source_with_glossary(
+                ollama_bin,
+                args.correct_model or chat_model(args),
+                segs,
+                src_for_gloss,
+                out_dir,
+            )
+            # Mark so run_batch does not double-polish.
+            setattr(args, "_glossary_polished", True)
+        except Exception as e:
+            print(f"[auto] glossary/correct skipped ({type(e).__name__}: {e})")
 
     slice_start = float(getattr(args, "slice_start_sec", 0.0) or 0.0)
     sync_shift_ms = int(getattr(args, "sync_shift_ms", 0) or 0)
@@ -1791,6 +1994,7 @@ def transcribe_video(args: argparse.Namespace) -> tuple[list[dict], Path, str, P
 
     srt = locale_srt_path(out_dir, args.source_lang, stem)
     write_srt(segs, srt)
+    qa = qa_srt_readability(segs)
     sync_path = media / "sync_meta.json"
     sync_payload = {
         "canonical_source": str(video),
@@ -1800,6 +2004,9 @@ def transcribe_video(args: argparse.Namespace) -> tuple[list[dict], Path, str, P
         "sync_shift_ms": sync_shift_ms,
         "cue_count": len(segs),
         "multipass": bool(args.multipass),
+        "llm_correct": bool(args.llm_correct),
+        "glossary_polish": bool(getattr(args, "_glossary_polished", False)),
+        "qa": qa,
     }
     if sync_shift_ms:
         sync_payload["embed_shift_ms"] = sync_shift_ms

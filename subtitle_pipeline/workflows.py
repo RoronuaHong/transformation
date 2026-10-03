@@ -360,11 +360,12 @@ def workflow_products(work_dir: Path, workflow: str) -> list[dict[str, Any]]:
             return
         out.append(
             {
-                "name": path.name,
+                "name": path.name,  # keep suffix (.srt / .md / …)
                 "kind": kind,
                 "path": str(path),
                 "bytes": size,
                 "rel": str(path.relative_to(root)).replace("\\", "/"),
+                "ext": path.suffix.lower(),
             }
         )
 

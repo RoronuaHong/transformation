@@ -14,7 +14,7 @@ from discover.export_site import main as export_main
 from discover.models import Candidate
 from discover.queue_db import QueueDB
 from discover.run_inbox import canonical_url, parse_url
-from fetch_media import ensure_source_video, find_ffmpeg
+from fetch_media import ensure_source_video, find_ffmpeg, _looks_like_netscape
 from job_layout import existing_wav, job_media_dir, list_locale_srts
 from langs import PACKS, coalesce_source_lang, normalize_lang, resolve_targets
 from workflows import (
@@ -35,17 +35,6 @@ COOKIE_POLICY: dict[str, dict] = {
     "youtube": {"required": False, "soft": True, "label": "YouTube"},
     "hls": {"required": False, "soft": True, "label": "HLS/m3u8"},
 }
-
-
-def _looks_like_netscape(text: str) -> bool:
-    low = text.lower()
-    if "# netscape" in low or "http cookie file" in low:
-        return True
-    for ln in text.splitlines():
-        parts = ln.split("\t")
-        if len(parts) >= 7 and parts[1] in ("TRUE", "FALSE"):
-            return True
-    return False
 
 
 def _cookies_file_covers_platform(platform: str) -> bool:
@@ -2040,21 +2029,10 @@ def _prepare_upload(file_bytes: bytes, filename: str) -> tuple[Path, str]:
     # the whole upload crash. ASR downstream tolerates a missing wav.
     if has_audio_stream(src):
         try:
+            from audio_prep import whisper_wav_cmd
+
             subprocess.run(
-                [
-                    ffmpeg,
-                    "-y",
-                    "-i",
-                    str(src),
-                    "-vn",
-                    "-acodec",
-                    "pcm_s16le",
-                    "-ar",
-                    "16000",
-                    "-ac",
-                    "1",
-                    str(wav),
-                ],
+                whisper_wav_cmd(ffmpeg, src, wav),
                 check=True,
                 capture_output=True,
             )
@@ -2490,8 +2468,9 @@ def run_try_job(job_id: int) -> dict:
                     source_lang="auto",
                     chat_model="gemma4:e2b",
                     translate_model="translategemma:4b",
-                    device="cpu",
-                    multipass=False,
+                    # Publish-quality ASR: multipass + GPU when available (RTX 2060 → int8).
+                    device="cuda",
+                    multipass=True,
                     llm_correct=True,
                     skip_translate=not want_translate,
                     skip_summary=not want_notes,

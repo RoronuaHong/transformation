@@ -310,21 +310,9 @@ def _fetch_hls_to_wav(
     _fetch_hls_source(url, src, cookies_file=cookies_file, copy=True)
     dur = probe_hls_duration(url, cookies_file=cookies_file, timeout=60)
     ffmpeg = find_ffmpeg()
-    cmd = [
-        ffmpeg,
-        "-y",
-        "-i",
-        str(src),
-        "-vn",
-        "-acodec",
-        "pcm_s16le",
-        "-ar",
-        "16000",
-        "-ac",
-        "1",
-        str(wav),
-    ]
-    subprocess.run(cmd, check=True, capture_output=True)
+    from audio_prep import whisper_wav_cmd
+
+    subprocess.run(whisper_wav_cmd(ffmpeg, src, wav), check=True, capture_output=True)
     print(f"[fetch-hls] wav -> {wav}")
     return src, dur
 
@@ -758,21 +746,9 @@ def _ffmpeg_to_wav(src: Path, wav: Path) -> None:
     ffmpeg = find_ffmpeg()
     if wav.is_file():
         wav.unlink()
-    cmd = [
-        ffmpeg,
-        "-y",
-        "-i",
-        str(src),
-        "-vn",
-        "-acodec",
-        "pcm_s16le",
-        "-ar",
-        "16000",
-        "-ac",
-        "1",
-        str(wav),
-    ]
-    subprocess.run(cmd, check=True, capture_output=True)
+    from audio_prep import whisper_wav_cmd
+
+    subprocess.run(whisper_wav_cmd(ffmpeg, src, wav), check=True, capture_output=True)
     if not is_usable_wav(wav):
         raise RuntimeError(
             f"ffmpeg produced invalid wav ({wav.stat().st_size if wav.is_file() else 0} bytes) from {src}"
@@ -1265,22 +1241,10 @@ def fetch_to_wav(
     src = sources[0]
     print(f"[fetch] source -> {src.name} ({src.stat().st_size} bytes)")
 
-    # Convert to 16 kHz mono wav
-    cmd = [
-        ffmpeg,
-        "-y",
-        "-i",
-        str(src),
-        "-vn",
-        "-acodec",
-        "pcm_s16le",
-        "-ar",
-        "16000",
-        "-ac",
-        "1",
-        str(wav),
-    ]
-    subprocess.run(cmd, check=True, capture_output=True)
+    # Convert to 16 kHz mono wav (Whisper ingest; no silenceremove).
+    from audio_prep import whisper_wav_cmd
+
+    subprocess.run(whisper_wav_cmd(ffmpeg, src, wav), check=True, capture_output=True)
     from job_layout import is_usable_wav
 
     if not is_usable_wav(wav):

@@ -784,6 +784,14 @@ def _process_media_only(
         canonical_url=url,
     )
     print(f"[batch] done job#{job_id} article_id={article_id} (media-only)")
+    from discover.hub_push import push_work_dir_to_hub
+
+    push_work_dir_to_hub(
+        out_dir,
+        platform=platform,
+        video_id=video_id,
+        title=str(job["title"] or ""),
+    )
 
 
 def process_job(
@@ -923,7 +931,7 @@ def process_job(
         auto=False,
         from_srt=None,
         from_txt=None,
-        hotwords=None,
+        hotwords=(str(job["title"] or "").strip() or None),
         hotwords_file=None,
         bvid=detect_bvid(url) if platform == "bilibili" else None,
         slice_start_sec=0.0,
@@ -961,7 +969,7 @@ def process_job(
         if src_srt:
             src_lang = _detect_source_lang(args.source_lang, src_srt)
 
-        if ollama and llm_correct:
+        if ollama and llm_correct and not getattr(args, "_glossary_polished", False):
             try:
                 ensure_ollama_model(chat_model, role="chat")
                 glossary = auto_build_glossary(ollama, chat_model, segs, src_lang)
@@ -977,6 +985,13 @@ def process_job(
             except Exception as e:
                 print(f"[auto] glossary/correct skipped ({type(e).__name__}: {e})")
                 glossary = {}
+        else:
+            glossary = _load_existing_glossary(out_dir)
+            if glossary:
+                print(
+                    f"[glossary] reuse {len(glossary.get('asr_fix') or {})} asr_fix "
+                    f"(already polished in ASR stage)"
+                )
     elif need_segs:
         segs, out_dir, stem, src_lang, _src_srt = _load_existing_job_segments(
             work_dir, source_lang=source_lang
@@ -1146,6 +1161,14 @@ def process_job(
         canonical_url=url,
     )
     print(f"[batch] done job#{job_id} article_id={article_id}")
+    from discover.hub_push import push_work_dir_to_hub
+
+    push_work_dir_to_hub(
+        out_dir,
+        platform=platform,
+        video_id=video_id,
+        title=str(job["title"] or ""),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
