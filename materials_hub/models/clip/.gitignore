@@ -1,0 +1,4 @@
+# Large local model weights (CLIP etc.) — do not commit
+*
+!.gitignore
+!README.md

@@ -1,0 +1,6 @@
+# CLIP / 本地模型权重(体积大,勿入库)
+models/
+*.pt
+*.bin
+*.onnx
+!.gitkeep
