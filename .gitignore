@@ -93,6 +93,7 @@ __pycache__/
 
 # ── 根目录杂项数据 / 临时文件 ──
 v2ray_*.txt
+cm_*.txt
 _raw_*
 top5_urls.txt
 findings.md
