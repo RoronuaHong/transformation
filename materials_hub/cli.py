@@ -374,6 +374,28 @@ def main():
         print("embed done: %s | %.1fs" % (r, __import__("time").time() - t0))
         print("embed status:", embed_status())
 
+    elif cmd == "metrics":
+        # 指标埋点(§8 G 维度):检索/HTTP/MCP 调用数、失败率、零命中率、耗时分位。
+        # 内存快照只反映当前进程(独立 CLI 进程必空),故这里从**落盘日志**聚合(跨进程可见)。
+        import obs as _obs
+        days = int(args[args.index("--days") + 1]) if "--days" in args else 1
+        snap = _obs.aggregate_from_logs(days=days)
+        src = "logs(last %d day(s))" % days
+        if not snap:
+            snap = _obs.snapshot()          # 回退:本进程内存指标
+            src = "memory(this process)"
+        if not snap:
+            print("(暂无埋点数据:日志为空且本进程未产生请求。"
+                  "服务跑过请求或本进程跑过检索后即可见)")
+            return
+        print("source: %s" % src)
+        print("%-10s %7s %8s %10s %10s %10s" % (
+            "kind", "count", "errors", "zero_hits", "ms_p50", "ms_p95"))
+        for k, v in sorted(snap.items()):
+            print("%-10s %7d %8d %10d %10.2f %10.2f" % (
+                k, v["count"], v["errors"], v["zero_hits"],
+                v["ms_p50"], v["ms_p95"]))
+
     elif cmd == "autotag":
         if "--rule" in args:
             if "--undo" in args:

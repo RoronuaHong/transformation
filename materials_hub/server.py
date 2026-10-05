@@ -5,11 +5,14 @@
 """
 import os
 import re
+import sys
 import json
+import time
 import mimetypes
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import obs                      # 可观测:结构化日志 + 指标埋点(§8 G 维度)
 
 from core import (
     init_hub, HUB, MATERIALS, get_material, all_materials, search,
@@ -417,7 +420,24 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(dict(_AUTOPROC_JOB))
 
         if p == "/api/health":
-            return self._json(health())
+            h = health()
+            # 告警(P1-7):失效外链超阈值时附 alerts,便于监控轮询告警。
+            # 阈值用 VITUAL_ALERT_BROKEN 设(0=不告警);默认不改动 health() 本身结构。
+            try:
+                thr = int(os.environ.get("VITUAL_ALERT_BROKEN", "0") or 0)
+                if thr > 0:
+                    n_broken = len(broken_externals())
+                    if n_broken > thr:
+                        h["alerts"] = [{"level": "warn", "code": "broken_externals",
+                                        "count": n_broken, "threshold": thr}]
+            except Exception:  # noqa: BLE001
+                pass
+            return self._json(h)
+        if p == "/api/metrics":
+            # 指标埋点(§8 G 维度):检索/HTTP/MCP 的调用数、失败率、零命中率、耗时分位。
+            # live = 本进程内存(实时);logs_today = 今日落盘日志聚合(跨进程,首个请求也有数据)。
+            return self._json({"metrics": obs.snapshot(),
+                               "logs_today": obs.aggregate_from_logs(days=1)})
         if p == "/api/broken":
             return self._json([{"id": m["id"], "name": m["name"], "kind": m["kind"],
                                 "source": m.get("source", ""),
@@ -741,8 +761,36 @@ class Handler(BaseHTTPRequestHandler):
             return
         return self._send(404, b"not found")
 
-    def log_message(self, *a):
-        pass
+    def setup(self):
+        """为每个连接打上 request id 与起始时间(供结构化日志算耗时)。"""
+        super().setup()
+        self._t0 = time.perf_counter()
+        self._rid = obs.new_id()
+
+    def log_message(self, fmt, *a):
+        """改成结构化日志:带 rid / 方法 / 路径 / 状态码 / 耗时。
+
+        基类在每请求处理后调用本方法,args 形如 ('"GET /api/x HTTP/1.1"', '200', '-')。
+        默认静默(不刷 stderr),设 VITUAL_LOG_STDERR=1 才回显,避免污染 MCP/管道输出。
+        """
+        try:
+            status = 0
+            if len(a) >= 2:
+                try:
+                    status = int(str(a[1]).split()[0])
+                except (ValueError, IndexError):
+                    status = 0
+            ms = (time.perf_counter() - getattr(self, "_t0", time.perf_counter())) * 1000.0
+            path = (self.path or "").split("?")[0]
+            obs.record("http", duration_ms=ms, ok=(status < 400),
+                       rid=getattr(self, "_rid", "-"), method=self.command,
+                       path=path, status=status)
+            if os.environ.get("VITUAL_LOG_STDERR"):
+                sys.stderr.write("[hub] %s %s %s %.1fms rid=%s\n"
+                                 % (self.command, path, status, ms,
+                                    getattr(self, "_rid", "-")))
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def main():

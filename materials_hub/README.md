@@ -163,6 +163,7 @@ python cli.py search --stdin       # 或从标准输入读查询
 python eval_search.py --baseline  # 检索质量评估(16 查询人工标注 ground truth,P@5/R@20/MRR/NDCG@10,lexical↔auto 对比)
 python eval_search.py --mode lexical --gate  # 回归门禁:均值掉出基线(容差 0.02)→ GATE: FAIL 且退出码 1
 python eval_gt_candidates.py  # GT 补全候选(证据驱动,**不改权威 GT**,产出供人工核对的清单)
+python cli.py metrics [--days N]  # 指标埋点(从落盘日志聚合,跨进程):调用数/失败率/零命中率/耗时分位
 python cli.py ocr <id> [--force]  # 视频画面 OCR(离线 rapidocr,文本入检索;--all 批量)
 python cli.py facets [--limit N] [--link-clips|--link-parents] [--scrub]   # 补 DAM 面标签 + 回填 parent:/去旧别名
 python cli.py auto [--limit N] [--autotag]   # 自动处理链:封面→OCR→镜头→pHash→(打标)→语义索引(幂等)
@@ -275,6 +276,19 @@ core.health()                       # 健康快照(总量/种类/重复/引用/�
   `index/thumbs/`(封面缓存)与 `embeddings` 表(语义向量)同样是派生的:删掉后重新「生成封面」/`python cli.py embed` 即可。
 - **迁移**:把 `materials/` 与原项目一起拷贝,重跑上面的重建命令即可,无需迁移数据库。
 > 这条"索引可丢弃、可重建"的原则,是本地素材库能长期稳定运维的关键。
+
+### 可观测:结构化日志 + 指标埋点(§8 G 维度)
+零依赖 `obs.py`,补齐「排障靠猜 / 指标未量化」两个历史缺口:
+
+- **结构化日志**:HTTP / MCP / 检索三类事件各写一条 JSON 行,带 `rid`(请求 id)、`ms`(耗时)、`ok`
+  及 `method`/`path`/`status`/`mode` 等字段,落 `index/logs/hub-YYYYMMDD.jsonl`(派生数据,可删)。
+  设 `VITUAL_LOG_STDERR=1` 才回显 stderr(默认静默,避免污染 MCP 管道)。
+- **指标埋点**:按 kind 统计调用数 / 失败率 / 零命中率 / 耗时分位(p50/p95/max)。
+  - `/api/metrics` —— `metrics`=本进程实时,`logs_today`=今日日志聚合(**首个请求即有数据**)。
+  - `python cli.py metrics [--days N]` —— 从**落盘日志反算**,跨进程可见(内存指标只反映当前进程,
+    独立 CLI 进程必空,故走日志聚合)。
+- **失效告警**:设 `VITUAL_ALERT_BROKEN=<阈值>` 后,失效外链超阈值时 `/api/health` 附 `alerts` 字段,便于监控轮询。
+- 埋点全部 try/except 兜底,**失败绝不影响主流程**。
 
 ## 语义检索(本地 embedding)
 **前提**:本机有 ollama 且装了 embedding 模型(离线即可)。默认自动发现带 `embedding` 能力的模型,
@@ -423,6 +437,8 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 |---|---|---|
 | `VITUAL_HUB_TOKEN` | 空 | 设了即开启令牌鉴权(Web + API + MCP 共用) |
 | `VITUAL_HUB_HOST` | `127.0.0.1` | 监听地址;跨机才改 `0.0.0.0`(且仅配合 token) |
+| `VITUAL_LOG_STDERR` | 空(静默) | 设 `1` 时把结构化请求日志回显到 stderr(排障用;默认不污染 MCP 管道) |
+| `VITUAL_ALERT_BROKEN` | `0`(不告警) | 失效外链数超过该阈值时,`/api/health` 附 `alerts` 字段 |
 | `VITUAL_HUB_EXT_ROOTS` | 工作区根 | 允许登记/读取外部引用的额外根目录(分号分隔) |
 
 **后续可扩展**
@@ -517,7 +533,7 @@ LLM 先把任务拆成待办,再逐步调用素材工具完成,长观察落盘�
 - **MCP 工具(agent 类 5 个:agent_run / agent_status / agent_cancel / agent_list / agent_resume;完整 29 个 MCP 工具见上方「MCP 接入」)**:`agent_run(task, confirm?, max_steps?)` 默认只读,写任务需 `confirm=true`;`agent_status(task_id)` 查待办/步骤/总结;`agent_cancel(task_id)` **协作式取消**——写 `cancel.flag`,主循环下一步边界终止,已执行进度保留落盘(长任务 1–3 分钟不必干等);`agent_list(limit?)` 盘点历史任务(状态/步数/创建时间);`agent_resume(task_id, extra_steps?)` **续跑步数耗尽的任务**——复用待办/历史步骤/滚动摘要,接续步号不重做(真实库历史任务约半数 max_steps_reached,7B 常来不及 finish)。
 - **CLI**:`python cli.py agent --task "..." [--write] [--max-steps 12]` / `--status <id>` / `--cancel <id>` / `--resume <id> [--extra-steps 6]` / `--list` / `--cleanup [--max-age 72]` / `--file task.txt`(中文规避终端 GBK)。
 - **为什么是"路线 C"**:官方 `deepagents` 库依赖 langchain/langgraph,与零依赖哲学冲突;故编排自实现、协议走既有 MCP——未来可无缝切官方库或接入 CodeBuddy/Claude 等宿主。
-- **离线测试**:`tests/test_agent.py`(单元 + mock LLM 脚本回放)、`tests/test_agent_skills.py`(MCP 工具/资源/技能冒烟)、`tests/test_agent_eval.py`(真实任务模板回归,断言无编造 id/引用合法/记忆沉淀/长任务压缩)、`tests/test_deliver.py`(按需交付 dry-run/confirm/缺失 id/命令构造/技能路由 + 一键出片串联);全套件 `pytest` 当前 **126 passed**(均 mock 驱动,不连 ollama;含 `tests/test_eval_gate.py` 5 例门禁纯函数测试)。
+- **离线测试**:`tests/test_agent.py`(单元 + mock LLM 脚本回放)、`tests/test_agent_skills.py`(MCP 工具/资源/技能冒烟)、`tests/test_agent_eval.py`(真实任务模板回归,断言无编造 id/引用合法/记忆沉淀/长任务压缩)、`tests/test_deliver.py`(按需交付 dry-run/confirm/缺失 id/命令构造/技能路由 + 一键出片串联)、`tests/test_obs.py`(结构化日志/指标分位/Timer 失败判定/日志聚合跨进程);全套件 `pytest` 当前 **138 passed**(均 mock 驱动,不连 ollama;含 `tests/test_eval_gate.py` 门禁纯函数与 `tests/test_eval_gt_candidates.py` GT 候选)。
 
 ### 入口与调用链(2026-09-30 补)
 

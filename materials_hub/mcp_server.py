@@ -11,9 +11,10 @@
 协议:MCP stdio 传输 = 按行分隔的 JSON-RPC 2.0(每行一条,行内不得有换行)。
 stdout 只走协议;日志一律 stderr。语义后端(ollama)没起会顺手自动拉起。
 """
-import sys, os, json
+import sys, os, json, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import core
+import obs                      # 可观测:结构化日志 + 指标埋点(§8 G 维度)
 
 # 鉴权(与 HTTP server 共用 VITUAL_HUB_TOKEN):若环境变量设了 token,MCP 客户端必须在启动参数里
 # 传一致的 --token,否则拒绝启动 —— 防止本机任何进程都能无鉴权调起素材中心 Agent 接口。
@@ -689,15 +690,23 @@ def main():
         line = line.strip()
         if not line or line.startswith("Content-"):   # 兼容带 LSP 头的客户端
             continue
+        _t0 = time.perf_counter()
         try:
             req = json.loads(line)
             res = _dispatch(req)
             if res is None:
+                # notification(如 initialized):不计入指标,也不回包
                 continue
             out = {"jsonrpc": "2.0", "id": req.get("id"), "result": res}
+            obs.record("mcp", duration_ms=(time.perf_counter() - _t0) * 1000.0,
+                       ok=True, method=req.get("method", ""),
+                       tool=(req.get("params") or {}).get("name", ""))
         except Exception as e:
             out = {"jsonrpc": "2.0", "id": req.get("id") if isinstance(req, dict) else None,
                    "error": {"code": -32603, "message": str(e)}}
+            obs.record("mcp", duration_ms=(time.perf_counter() - _t0) * 1000.0,
+                       ok=False, method=(req.get("method", "") if isinstance(req, dict) else ""),
+                       err=str(e)[:120])
         sys.stdout.write(json.dumps(out, ensure_ascii=False) + "\n")
         sys.stdout.flush()
 

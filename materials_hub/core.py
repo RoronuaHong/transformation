@@ -7,6 +7,7 @@ import os
 import re
 import json
 import time
+import obs                                   # 可观测:结构化日志 + 指标埋点(§8 G 维度)
 import pickle
 import sqlite3
 import shutil
@@ -831,10 +832,14 @@ def search(q="", kind="", tag="", limit=None, offset=0, mode="auto", sort=""):
     sort=""         默认相关性/时间序;q 存在时=相关性,无 q=时间倒序。
                     显式指定 "newest"/"oldest"/"name"/"size" 时覆盖相关性排序
                     (DAM 面板的排序控件;在分页之前生效,全库级排序)。"""
+    _t0 = time.perf_counter()
     ck = (q, kind, tag, limit, offset, mode, sort)
     if os.environ.get("VITUAL_CACHE_SEARCH"):
         if ck in _SEARCH_CACHE:
-            return _SEARCH_CACHE[ck]
+            _hit = _SEARCH_CACHE[ck]
+            obs.record("search", duration_ms=0.0, ok=True,
+                       zero_hit=not _hit, mode=mode, cached=True)
+            return _hit
     rows, _ = _ranked(q, kind, tag, mode)
     if sort in ("newest", "oldest", "name", "size"):
         if sort == "name":
@@ -851,6 +856,9 @@ def search(q="", kind="", tag="", limit=None, offset=0, mode="auto", sort=""):
         if len(_SEARCH_CACHE) < 2000:        # 简易内存缓存(同查询重复率不低,省重算)
             _SEARCH_CACHE[ck] = rows
             _cache_persist()                 # 开启持久化时落盘
+    # 指标埋点:检索延迟 + 零命中率(§8 G 维度)。埋点失败绝不影响检索本身。
+    obs.record("search", duration_ms=(time.perf_counter() - _t0) * 1000.0,
+               ok=True, zero_hit=not rows, mode=mode, cached=False)
     return rows
 
 
