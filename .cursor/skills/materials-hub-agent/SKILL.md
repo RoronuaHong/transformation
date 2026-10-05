@@ -5,7 +5,7 @@ description: Materials hub Agent skills — missing covers, job checkup, near-du
 
 # Materials Hub Agent skills
 
-Docs: `materials_hub/素材中心最佳实践与优化分析.md` §18–§19、`materials_hub/INTEGRATION.md` §3 / §5.0。
+Docs: `materials_hub/素材中心最佳实践与优化分析.md` §18–§22、`materials_hub/INTEGRATION.md` §3 / §5.0。
 
 Write ops always need `confirm=true` (MCP) / `--write` (CLI agent). Prefer read-only first.
 
@@ -95,7 +95,7 @@ Backfill tags: `python cli.py facets --link-parents`（补 role:master + clip/�
 | 「帮我看看」「检查一下」、没有上文的「继续」 | 追问技能，禁止默认 search+maintain+job_checkup |
 | 有上文的「继续」 | 开放循环 |
 | 规划结果只是未请求的工具名 | 丢弃，改为追问 |
-| 技能 A–E / 上传视频 | 确定性工作流，见上文 |
+| 技能 A–H / 上传视频 | 确定性工作流，见上文 |
 | 治理/合规/占位/未分类盘点 | 技能 F:`governance_report` |
 | 某 job 能否发布 / 分发就绪 | 技能 G:`distribution_readiness` |
 | 记录采纳/否决 / 看学习概览 | 技能 H:`agent_feedback` / `learning_summary` |

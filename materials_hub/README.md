@@ -162,6 +162,19 @@ python cli.py search --file q.txt  # 中文查询建议走文件(Windows 终端 
 python cli.py search --stdin       # 或从标准输入读查询
 python eval_search.py --baseline  # 检索质量评估(16 查询人工标注 ground truth,P@5/R@20/MRR/NDCG@10,lexical↔auto 对比,回归门禁)
 python cli.py ocr <id> [--force]  # 视频画面 OCR(离线 rapidocr,文本入检索;--all 批量)
+python cli.py facets [--limit N] [--link-clips|--link-parents] [--scrub]   # 补 DAM 面标签 + 回填 parent:/去旧别名
+python cli.py auto [--limit N] [--autotag]   # 自动处理链:封面→OCR→镜头→pHash→(打标)→语义索引(幂等)
+python cli.py shots <id> [--force] | shots --all [--limit N]   # 镜头索引(ffmpeg 场景检测)
+python cli.py phash <id> [--force] | phash --all [--limit N]   # dHash 感知哈希
+python cli.py similar <id> [--max-dist N]   # 画面级近重复检测(汉明距离升序)
+python cli.py near-dupes [--max-dist N] [--limit N]   # 全库近重复报告(对+簇)
+python cli.py imgsearch <id|path> [--max-dist N] [--mode phash|clip] | imgsearch --text "厨房"   # 以图/以文搜图
+python cli.py imgembed [--force] [--limit N] [--status]   # CLIP 图像向量索引
+python cli.py govern [--limit N]   # 治理/合规扫描(占位/缺描述/未分类/无标签)
+python cli.py readiness --job <id>   # 某 job 分发渠道就绪度
+python cli.py feedback --action X [--reject] [--note Y]   # 记录 Agent 动作采纳/否决(学习闭环)
+python cli.py learning [--limit N]   # 汇总反馈学习日志(各动作采纳率)
+python cli.py agent --task "..." [--write] [--max-steps 12] | --status <id> | --cancel <id> | --resume <id> [--extra-steps 6] | --list | --cleanup [--max-age 72]   # Deep Agent 多步任务
 ```
 
 ## 联动 subtitle_pipeline(快速上手)
@@ -422,7 +435,8 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 ```
 > **鉴权**:一旦设了 `VITUAL_HUB_TOKEN`,MCP 客户端必须在 `--token` 里传一致的令牌,否则 server 启动即拒绝(`sys.exit(2)`)——防止本机任意进程无鉴权调起素材中心 Agent 接口。
 
-工具:`search_materials(q,kind?,tag?,mode?,limit?)` 中文自然语言检索 /
+工具(基础 22 个 + Deep Agent 类 5 个 = **27 个**,完整签名见 `mcp_server.py`):
+`search_materials(q,kind?,tag?,mode?,limit?)` 中文自然语言检索 /
 `get_material(id)` / `list_tags(limit?)` / `hub_stats()` /
 `chunk_search_materials(q,limit?)` 长文档父子分块检索(覆盖 .md/.txt/.srt 关联文本全文)/
 `read_text_preview(id,limit?)` 只读预览描述与关联文本前 N 字符(省 token)/
@@ -432,8 +446,15 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 `find_similar(id)` 画面近重复(dHash) /
 `near_duplicate_report(max_dist?,limit?)` 全库近重复对+簇 /
 `search_by_image(query|id|path)` 以图搜图(dHash;CLIP 待权重) /
+`related(id,rel?)` 关系反查(沿 parent:/role:/job: 面标签一跳遍历,rel=all/parent/children/job/role/kind) /
+`build_image_embeddings(force?,limit?,status?)` CLIP 图像向量索引(以文/以图搜图) /
 `list_missing_covers` / `job_checkup` 运维只读技能 /
+`governance_report(limit?)` 全库治理/合规扫描(占位/缺描述/未分类/无标签) /
+`distribution_readiness(job_id?)` 某 job 分发渠道就绪度(channel_ready + blocking) /
+`agent_feedback(action,accepted[,note?,by?])` 记录 Agent 动作采纳/否决(学习闭环,追加写) /
+`learning_summary(limit?)` 汇总反馈学习日志(各动作采纳率) /
 `update_tags(id,tags,confirm[,remove])` 与 `register_asset(path,...,confirm)` **写工具(强制 `confirm=true`)**；`update_tags` 为**合并语义**(只增不删，系统面标签永不动，删须 `remove`)。
+Deep Agent 类(另见下节):`agent_run` / `agent_status` / `agent_cancel` / `agent_list` / `agent_resume`。
 
 Resources(订阅式只读,比 tool 更省 token):`hub://recent/{n}` 最新素材、`hub://job/{jobid}` 某 subtitle_pipeline job 全套、
 `hub://history/{n}` **写操作审计日志**、`hub://shots/{id}` **镜头索引**(未建则 `{status:missing}`)、
@@ -464,10 +485,10 @@ LLM 先把任务拆成待办,再逐步调用素材工具完成,长观察落盘�
 | **详细系统提示** | 角色+工具表+规则齐备;**写工具默认不存在**,仅 `allow_write=True` 才注册(MCP 侧再叠 `confirm=true` 人工复核,双重护栏) |
 
 - **LLM 后端**:本机 ollama chat 模型(与 auto_tag 同一发现逻辑);无 chat 模型 → `skipped` 优雅降级。
-- **MCP 工具**(共 13 个):`agent_run(task, confirm?, max_steps?)` 默认只读,写任务需 `confirm=true`;`agent_status(task_id)` 查待办/步骤/总结;`agent_cancel(task_id)` **协作式取消**——写 `cancel.flag`,主循环下一步边界终止,已执行进度保留落盘(长任务 1–3 分钟不必干等);`agent_resume(task_id, extra_steps?)` **续跑步数耗尽的任务**——复用待办/历史步骤/滚动摘要,接续步号不重做(真实库历史任务约半数 max_steps_reached,7B 常来不及 finish)。
+- **MCP 工具(agent 类 5 个:agent_run / agent_status / agent_cancel / agent_list / agent_resume;完整 27 个 MCP 工具见上方「MCP 接入」)**:`agent_run(task, confirm?, max_steps?)` 默认只读,写任务需 `confirm=true`;`agent_status(task_id)` 查待办/步骤/总结;`agent_cancel(task_id)` **协作式取消**——写 `cancel.flag`,主循环下一步边界终止,已执行进度保留落盘(长任务 1–3 分钟不必干等);`agent_list(limit?)` 盘点历史任务(状态/步数/创建时间);`agent_resume(task_id, extra_steps?)` **续跑步数耗尽的任务**——复用待办/历史步骤/滚动摘要,接续步号不重做(真实库历史任务约半数 max_steps_reached,7B 常来不及 finish)。
 - **CLI**:`python cli.py agent --task "..." [--write] [--max-steps 12]` / `--status <id>` / `--cancel <id>` / `--resume <id> [--extra-steps 6]` / `--list` / `--cleanup [--max-age 72]` / `--file task.txt`(中文规避终端 GBK)。
 - **为什么是"路线 C"**:官方 `deepagents` 库依赖 langchain/langgraph,与零依赖哲学冲突;故编排自实现、协议走既有 MCP——未来可无缝切官方库或接入 CodeBuddy/Claude 等宿主。
-- **离线测试**:`tests/test_agent.py`(15 例,单元/mock LLM 脚本回放,不连 ollama);`tests/test_agent_skills.py`(6 例,MCP 工具/资源/技能冒烟);`tests/test_agent_eval.py`(3 例真实任务模板回归,断言无编造 id/引用合法/记忆沉淀/长任务压缩)。
+- **离线测试**:`tests/test_agent.py`(单元 + mock LLM 脚本回放)、`tests/test_agent_skills.py`(MCP 工具/资源/技能冒烟)、`tests/test_agent_eval.py`(真实任务模板回归,断言无编造 id/引用合法/记忆沉淀/长任务压缩);全套件 `pytest` 当前 **100 passed**(均 mock 驱动,不连 ollama)。
 
 ### 入口与调用链(2026-09-30 补)
 
@@ -491,4 +512,4 @@ LLM 先把任务拆成待办,再逐步调用素材工具完成,长观察落盘�
 | 5 关系反查工具 | `related(id, rel)` 沿 `parent:/role:/job:` 面标签一跳遍历(确定性) |
 | 6 动态上下文压缩 | 尾窗口外步骤压入滚动摘要 `context_digest` 回灌 prompt,防本地 7B 长任务遗忘/context-rot |
 
-测试:`tests/test_agent.py` **15/15 绿**、`tests/test_agent_skills.py` **5/5 绿**(均为 mock LLM 回放,不连 ollama)。
+测试:`tests/test_agent*.py` 全套件 `pytest` **100 passed**(mock LLM 回放,不连 ollama)。
