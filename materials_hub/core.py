@@ -1822,6 +1822,14 @@ QUERY_SYNONYMS = {
     "合并": ["merge", "combine"],
     "水印": ["watermark", "logo", "delogo"],
     "台标": ["logo", "watermark", "delogo"],
+    # ↓ 2026-10-06 第四轮实例测试暴露的跨语缺口(数据驱动:对齐语料真实 token)
+    "标志": ["logo", "watermark", "delogo"],            # remove the logo → 去台标成品
+    "语音转文本": ["subs", "srt", "asr", "transcribe"], # speech to text(无 subtitle 词时)
+    "转录": ["subs", "srt", "asr", "transcribe"],
+    "精简": ["trim", "cut", "clip", "segment"],         # trim intro/outro → 片段
+    "上色": ["colorize", "color", "codeformer", "fixed"], # 中文手写 上色
+    "彩色": ["color", "colorize", "codeformer", "fixed"], # grayscale to color(译中:彩色)
+    "灰度": ["grayscale", "gray", "colorize", "codeformer", "fixed"],
     "效果": ["result", "out", "cmp"],
     "对比图": ["cmp", "compare"],
     # 「画面→frame/scene」已删(2026-09-28):泛场景词展开让 name 含 frame 的条目
