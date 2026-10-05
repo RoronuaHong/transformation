@@ -816,6 +816,16 @@ def _tool_get_shots(a):
     }
 
 
+def _tool_assemble_package(a):
+    """只读:把高层目标落成可交付素材包(Librarian→Critic→Executor);只写 manifest,不改资产。"""
+    return _assemble_package(
+        str(a.get("goal") or a.get("task") or "").strip(),
+        kind=str(a.get("kind") or "").strip(),
+        limit=int(a.get("limit") or 12),
+        scope=str(a.get("scope") or "all").strip().lower(),
+        queries=a.get("queries") or None)
+
+
 def _seed_ids_from_task(task, ctx):
     """从任务正文预填 seen_ids/last_id(上传附带的 id=xxxxxxxx 真源)。"""
     for mid in _TASK_ID_RE.findall(task or ""):
@@ -1165,6 +1175,10 @@ def _build_tools(allow_write, ctx=None):
         "related": (_tool_related,
                     "按关系反查(父/子/job/role/kind);同一 id+rel 只调一次;"
                     "args: id, rel?(parent|children|job|role|kind|all), limit?"),
+        "assemble_package": (_tool_assemble_package,
+                             "只读:把高层目标落成可交付素材包(Librarian 拆解检索→Critic 核验"
+                             "→Executor 写 manifest 到 agent_workspace/packages/);绝不改动资产;"
+                             "args: goal, kind?, scope?(all|master|clips), limit?, queries?"),
     }
     if allow_write:
         tools["update_tags"] = (_tool_update_tags,
@@ -1242,6 +1256,171 @@ def _sub_maintain():
             "hint": "清理失效引用请走 MCP prune 或 bridge --prune;"
                     "补封面用 list_missing_covers + auto_process(confirm);"
                     "近重复详单用 near_duplicate_report / cli near-dupes"}
+
+
+# ---------------------------------------------------------------- 目标→素材包组装(#5) + 多智能体编排(#10)
+_GOAL_DECOMPOSE_SYS = (
+    "你是素材包的检索规划器。把用户的高层目标拆成最多 %d 个互补的中文/英文检索查询词"
+    '(输出 {"queries":["..."]});只输出 JSON。' % _SUB_QUERIES
+)
+
+
+def _decompose_goal(goal, model):
+    """Librarian 子代理:目标拆解。有模型走 LLM 多查询;否则确定性兜底(目标+同义词扩展)。"""
+    if model:
+        try:
+            r = _chat([{"role": "system", "content": _GOAL_DECOMPOSE_SYS},
+                       {"role": "user", "content": "目标:%s" % goal}], model)
+            qs = [q for q in (r.get("queries") or [])
+                  if isinstance(q, str) and q.strip()][:_SUB_QUERIES]
+            if qs:
+                return qs
+        except Exception:                                 # noqa: BLE001
+            pass
+    base = (goal or "").strip()
+    qs = [base]
+    try:
+        exp = core.expand_query(base)
+        if exp and exp != base:
+            qs.append(exp)
+    except Exception:                                     # noqa: BLE001
+        pass
+    return qs[:_SUB_QUERIES] or [base or "素材"]
+
+
+def _brief_pkg(rec):
+    """素材包资产精简视图(含 role/has_cover,供下游工作台消费)。"""
+    tags = rec.get("tags") or ""
+    role = ""
+    for t in tags.split(","):
+        if t.startswith("role:"):
+            role = t.split(":", 1)[1]
+            break
+    return {
+        "id": rec.get("id"), "kind": rec.get("kind"),
+        "name": rec.get("name", ""), "role": role,
+        "has_cover": bool(rec.get("thumb")),
+        "tags": tags,
+        "description": (rec.get("description") or "")[:200],
+    }
+
+
+def _write_package_manifest(goal, manifest):
+    d = os.path.join(WORKSPACE, "packages")
+    os.makedirs(d, exist_ok=True)
+    safe = re.sub(r"\W+", "_", (goal or "goal"))[:40].strip("_") or "goal"
+    fname = "%s_%s.json" % (safe, time.strftime("%Y%m%d_%H%M%S"))
+    path = os.path.join(d, fname)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+    return path
+
+
+def _assemble_package(goal, model=None, kind="", limit=12, scope="all",
+                      queries=None, ws=None):
+    """#5 目标→素材包组装 + #10 多智能体编排(进程内 Supervisor→Librarian→Critic→Executor)。
+
+    只读资产:绝不调用任何写工具;仅把交付 manifest 写到 agent_workspace/packages/。
+    角色链:
+      Librarian —— 目标拆解 + 多查询检索,只收真实命中;
+      Critic    —— 确定性核验(真实存在 + scope 过滤),丢弃编造/不符的 id;
+      Executor  —— 组装 manifest JSON 并落盘,给出下一步建议。
+    """
+    if scope not in ("all", "master", "clips"):
+        scope = "all"
+    qs = ([str(q) for q in queries if str(q).strip()][:_SUB_QUERIES]
+          if queries else _decompose_goal(goal, model))
+    if not qs:
+        qs = [(goal or "素材").strip()]
+
+    # Librarian: 多查询检索,只收真实命中
+    seen, candidates = set(), []
+    per = max(4, (limit // max(1, len(qs))) + 4)
+    for q in qs:
+        try:
+            for m in core.search(q, kind=kind, limit=per):
+                mid = m.get("id")
+                if mid and mid not in seen:
+                    seen.add(mid)
+                    candidates.append(m)
+        except Exception:                                 # noqa: BLE001
+            continue
+
+    # Critic: 确定性核验(真实存在 + scope 过滤)
+    verified, dropped = [], []
+    for m in candidates:
+        mid = m.get("id")
+        rec = core.get_material(mid) if mid else None
+        if not rec:
+            dropped.append(mid); continue
+        tags = rec.get("tags") or ""
+        if scope == "master" and "role:master" not in tags:
+            dropped.append(mid); continue
+        if scope == "clips" and "role:clip" not in tags:
+            dropped.append(mid); continue
+        verified.append(rec)
+    verified = verified[:limit]
+
+    # Executor: 组装 manifest 并落盘
+    manifest = {
+        "goal": goal, "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "schema": "materials-hub/package@1",
+        "queries": qs, "scope": scope, "kind": kind or "all",
+        "asset_count": len(verified),
+        "assets": [_brief_pkg(r) for r in verified],
+        "dropped_ids": dropped, "source": "assemble_package",
+        "roles": ["Librarian", "Critic", "Executor"],
+        "suggested_next": ("素材包为只读交付物;物理切片/导出请把 assets[].id 与时间轴交给工作台"
+                           "逐条裁剪并登记 role:clip;补封面/打标走 auto_process / autotag。"),
+    }
+    path = _write_package_manifest(goal, manifest)
+    summary = ("[素材包组装] 角色链 Librarian→Critic→Executor 完成。目标:%s · 检索查询 %d · "
+               "候选 %d · 核验通过 %d(丢弃 %d) · 已写出 %s"
+               % (goal[:40], len(qs), len(candidates), len(verified),
+                  len(dropped), os.path.basename(path)))
+    return {"path": path, "summary": summary,
+            "asset_count": len(verified),
+            "ids": [r.get("id") for r in verified[:8]],
+            "dropped_ids": dropped, "queries": qs,
+            "manifest": manifest, "roles": manifest["roles"]}
+
+
+_PKG_PREFIX_RE = re.compile(
+    r"^(?:帮我|请|麻烦|能不能|可以)?\s*(?:把|将)?\s*(?:这些|这个|关于)?\s*"
+    r"(?:素材|视频|内容)?\s*(?:组装|打包|整理|生成|做一个|做一份|产出)\s*"
+    r"(?:一个|一份|一下)?\s*(?:关于)?", re.I)
+
+
+def _extract_package_goal(task):
+    t = (task or "").strip()
+    g = _PKG_PREFIX_RE.sub("", t).strip(" ：:，,。.、")
+    return g or t
+
+
+def _run_package_skill(state, ws, ctx, call):
+    """Skill:目标→素材包组装(确定性工作流,内部跑 Librarian→Critic→Executor 角色链)。"""
+    task = state.get("task") or ""
+    goal = _extract_package_goal(task)
+    model = state.get("model")
+    res = _assemble_package(goal, model=model, ws=ws)
+    for i in res.get("ids", []):
+        ctx["seen_ids"].add(str(i))
+    n = len(state.get("steps") or []) + 1
+    ptr = _observe(state, ws, {
+        "package": os.path.basename(res.get("path", "")),
+        "asset_count": res.get("asset_count"),
+        "roles": res.get("roles"),
+    })
+    state["steps"].append({
+        "n": n, "action": "assemble_package", "ok": True,
+        "args": {"goal": goal[:80]}, "obs": ptr,
+        "_sig": _tool_sig("assemble_package", {"goal": goal[:80]}),
+        "skill": "package",
+    })
+    if res.get("dropped_ids"):
+        res["summary"] += "\n丢弃(id 不存在或不符 scope): " + ", ".join(
+            str(x) for x in res["dropped_ids"][:8])
+    return res.get("summary")
 
 
 # ---------------------------------------------------------------- 规划与主循环(支柱 1/4)
@@ -1500,6 +1679,8 @@ def _match_named_skill(task):
     按钮文案有简体/繁体/英文三套,必须都能命中同一条技能。
     """
     t = task or ""
+    if re.search(r"素材包|打包|组装|混剪|分发包|交付包|素材集合|package|deliverable", t, re.I):
+        return "package"
     if re.search(r"缺封面|无封面|無封面|missing\s+covers?", t, re.I):
         return "covers"
     if re.search(r"近重复|近重複|near-?\s?dup", t, re.I):
@@ -1529,6 +1710,8 @@ def _named_skill_todos(skill):
         "segment": ["检索母版", "读取镜头时间轴", "汇总"],
         "job": ["job 体检", "汇总"],
         "crop": ["读取母版", "反查子组件", "读取镜头时间轴", "给出裁剪窗"],
+        "package": ["拆解目标为检索查询", "Librarian 检索候选素材",
+                    "Critic 核验候选", "Executor 组装素材包", "汇总"],
     }
     return [{"id": i, "text": text, "status": "pending"}
             for i, text in enumerate(labels.get(skill) or ["执行", "汇总"], 1)]
@@ -1720,6 +1903,9 @@ def _run_named_skill(state, ws, tools, ctx, skill):
 
     if skill == "crop":
         return _run_crop_skill(state, ws, ctx, call)
+
+    if skill == "package":
+        return _run_package_skill(state, ws, ctx, call)
 
     return None
 

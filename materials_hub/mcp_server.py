@@ -448,6 +448,18 @@ def t_learning(a):
     return core.learning_summary(limit=int(a.get("limit") or 50))
 
 
+def t_assemble(a):
+    """只读:把高层目标落成可交付素材包(多智能体编排 Librarian→Critic→Executor;
+    只写 manifest 到 agent_workspace/packages/,绝不改动资产)。"""
+    import agent
+    return agent._assemble_package(
+        str(a.get("goal") or a.get("task") or "").strip(),
+        kind=str(a.get("kind") or "").strip(),
+        scope=str(a.get("scope") or "all").strip().lower(),
+        limit=int(a.get("limit") or 12),
+        queries=a.get("queries") or None)
+
+
 HANDLERS = {"search_materials": t_search, "get_material": t_get,
             "list_tags": t_tags, "hub_stats": t_stats,
             "update_tags": t_update_tags, "register_asset": t_register,
@@ -462,7 +474,8 @@ HANDLERS = {"search_materials": t_search, "get_material": t_get,
             "agent_resume": t_agent_resume,
             "auto_process": t_auto,
             "governance_report": t_governance, "distribution_readiness": t_readiness,
-            "agent_feedback": t_feedback, "learning_summary": t_learning}
+            "agent_feedback": t_feedback, "learning_summary": t_learning,
+            "assemble_package": t_assemble}
 # __PART2__
 _SCHEMA_OBJ = {"type": "object", "properties": {
     "q": {"type": "string", "description": "关键词或中文自然语言问句"},
@@ -536,6 +549,14 @@ TOOLS = [
          "required": ["action", "accepted"]}},
     {"name": "learning_summary", "description": "只读:汇总 Agent 反馈学习日志(各动作采纳率+近期记录)",
      "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer"}}}},
+    {"name": "assemble_package", "description": "只读:把高层目标落成可交付素材包(多智能体编排 Librarian 拆解检索→Critic 核验→Executor 写 manifest JSON 到 agent_workspace/packages/;绝不改动资产)。用于「组装一个混剪素材包/打包分发素材」等。",
+     "inputSchema": {"type": "object", "properties": {
+        "goal": {"type": "string", "description": "高层目标/自然语言(中文)"},
+        "kind": {"type": "string", "enum": ["images", "videos", "silent", "docs", "audio", "subs", "anim", "other"]},
+        "scope": {"type": "string", "enum": ["all", "master", "clips"]},
+        "limit": {"type": "integer"},
+        "queries": {"type": "array", "items": {"type": "string"}}},
+        "required": ["goal"]}},
     {"name": "search_by_image", "description": "只读:以图搜图(query=id/路径)或以文搜图(text=)。mode=auto|phash|clip;CLIP 需 imgembed 索引",
      "inputSchema": {"type": "object", "properties": {
         "query": {"type": "string"}, "id": {"type": "string"}, "path": {"type": "string"},

@@ -415,6 +415,27 @@ def main():
             extra = x.get("desc") or x.get("reason") or ""
             print(f"  {x['id']}  {x['status']}  {extra}")
 
+    elif cmd == "package":
+        import agent as _agent
+        import json as _j
+        if "--goal" in args:
+            goal = args[args.index("--goal") + 1]
+        elif len(args) > 1:
+            goal = args[1]
+        else:
+            goal = ""
+        if not goal:
+            print("用法: python cli.py package \"目标\" [--kind videos] "
+                  "[--scope master|clips|all] [--limit 12]")
+            return
+        kind = args[args.index("--kind") + 1] if "--kind" in args else ""
+        scope = args[args.index("--scope") + 1] if "--scope" in args else "all"
+        limit = int(args[args.index("--limit") + 1]) if "--limit" in args else 12
+        r = _agent._assemble_package(goal, kind=kind, scope=scope, limit=limit)
+        print(_j.dumps({"summary": r["summary"], "path": r["path"],
+                        "asset_count": r["asset_count"], "ids": r["ids"]},
+                       ensure_ascii=False, indent=2))
+
     elif cmd == "agent":
         import agent
         import json as _json

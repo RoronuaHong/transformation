@@ -84,6 +84,13 @@ Backfill tags: `python cli.py facets --link-parents`（补 role:master + clip/�
 2. 汇总 `learning_summary` **or** `python cli.py learning [--limit N]` → 各动作采纳率 `rate` + 近期记录。
 3. 仅追加写本地 `.agent_feedback.jsonl`,不碰资产;驱动「越用越准」。
 
+## Skill I — 目标→素材包组装（多智能体编排）
+
+1. 用户说「组装 / 打包 / 素材包 / 混剪包 / package」类目标时,命中命名技能 `package`(确定性工作流,不经 7B 规划器,零幻觉)。
+2. 内部跑角色链:**Librarian**(目标拆解成多查询 + 检索,只收真实命中)→ **Critic**(确定性核验:真实存在 + `scope` 过滤,丢弃编造/不符 id)→ **Executor**(组装 manifest JSON 落到 `agent_workspace/packages/`,**只读资产,绝不改动**)。
+3. MCP `assemble_package(goal, kind?, scope?, limit?, queries?)` 或 CLI `python cli.py package "目标" [--kind videos] [--scope master|clips|all] [--limit N]`。
+4. 交付物为 `materials-hub/package@1` manifest(含 goal / queries / assets[].role / has_cover / suggested_next);物理切片/导出/补封面仍走既有 `auto` / `autotag` / 工作台。
+
 ## 意图路由（先于规划）
 
 规则在 `agent._classify_turn`，7B 规划器之前。详见 `materials_hub/素材中心最佳实践与优化分析.md` §21。
@@ -95,7 +102,7 @@ Backfill tags: `python cli.py facets --link-parents`（补 role:master + clip/�
 | 「帮我看看」「检查一下」、没有上文的「继续」 | 追问技能，禁止默认 search+maintain+job_checkup |
 | 有上文的「继续」 | 开放循环 |
 | 规划结果只是未请求的工具名 | 丢弃，改为追问 |
-| 技能 A–H / 上传视频 | 确定性工作流，见上文 |
+| 技能 A–I / 上传视频 | 确定性工作流，见上文 |
 | 治理/合规/占位/未分类盘点 | 技能 F:`governance_report` |
 | 某 job 能否发布 / 分发就绪 | 技能 G:`distribution_readiness` |
 | 记录采纳/否决 / 看学习概览 | 技能 H:`agent_feedback` / `learning_summary` |
