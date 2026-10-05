@@ -2530,6 +2530,141 @@ def _abs_source(m):
     return p if os.path.isabs(p) else os.path.join(HUB, p)
 
 
+# ----------------------------------------------------------------------------
+# #9 按需交付(deliver):把素材包 manifest / 指定 id 导出为下游可用变体
+# ----------------------------------------------------------------------------
+_FMT_MAP = {"mp4": "mp4", "mov": "mov", "webm": "webm", "mkv": "matroska",
+            "gif": "gif"}
+
+
+def _build_deliver_cmd(exe, src, dst, *, fmt="mp4", res="720", clip=None,
+                       copy_only=False):
+    """拼装 ffmpeg 交付命令(纯参数构造,不执行)。"""
+    cmd = [exe, "-v", "error"]
+    if clip:
+        start, end = float(clip[0]), float(clip[1])
+        cmd += ["-ss", "%.3f" % start, "-i", src,
+                "-t", "%.3f" % max(0.0, end - start)]
+    else:
+        cmd += ["-i", src]
+    # 编码策略:区间裁剪需重编码;指定分辨率需重编码;否则可选流拷贝(最快)
+    if copy_only and clip is None:
+        cmd += ["-c", "copy"]
+    else:
+        cmd += ["-c:v", "libx264", "-preset", "fast", "-c:a", "aac"]
+        try:
+            rh = int(res)
+        except (TypeError, ValueError):
+            rh = 0
+        if rh > 0:
+            cmd += ["-vf", "scale=-2:%d" % rh]
+    cmd += ["-f", _FMT_MAP.get(fmt, fmt), dst]
+    return cmd
+
+
+def deliver_package(manifest_path=None, ids=None, *, out_dir=None,
+                    confirm=False, fmt="mp4", res="720",
+                    clips=None, copy_only=False, overwrite=False):
+    """#9 按需交付:把素材包 manifest 或指定 id 列表导出为下游可用变体。
+
+    安全铁律:只读原素材、只新建交付文件(绝不改动资产本体),落到 out_dir
+    (默认 ``index/agent_workspace/deliveries/<时间戳>/``,派生数据,可删可重建)。
+    ``confirm=False``(默认)仅返回 dry-run 计划、不写任何文件;``confirm=True``
+    才真正调用 ffmpeg 导出。
+
+    Args:
+      manifest_path: 素材包 manifest JSON 路径(与 ids 二选一)
+      ids: 素材 id 列表(字符串)
+      out_dir: 交付目录(默认上述 deliveries 子目录)
+      confirm: 是否执行导出(写文件);False=dry-run
+      fmt: 目标封装(mp4/mov/webm/mkv/gif)
+      res: 目标高度像素(720/1080;0=保持原分辨率)
+      clips: 可选区间裁剪 {id: (start, end)}(秒)
+      copy_only: True=流拷贝不重编码(仅 remux;res 忽略;clip 仍走重编码)
+      overwrite: 目标已存在是否覆盖(否则跳过并标 skipped)
+    Returns: dict(dry_run, out_dir, plan[], written[], skipped[], errors[])
+    """
+    target_ids = []
+    if manifest_path:
+        try:
+            with open(manifest_path, encoding="utf-8") as f:
+                man = json.load(f)
+            for a in (man.get("assets") or []):
+                i = a.get("id")
+                if i and str(i) not in target_ids:
+                    target_ids.append(str(i))
+        except Exception as e:  # noqa: BLE001
+            return {"error": "manifest read failed: %s" % e,
+                    "dry_run": not confirm, "out_dir": out_dir or "",
+                    "plan": [], "written": [], "skipped": [], "errors": []}
+    for i in (ids or []):
+        s = str(i).strip()
+        if s and s not in target_ids:
+            target_ids.append(s)
+
+    if not target_ids:
+        return {"error": "no target ids (provide manifest_path or ids)",
+                "dry_run": not confirm, "out_dir": out_dir or "",
+                "plan": [], "written": [], "skipped": [], "errors": []}
+
+    exe = ffmpeg_path()
+    if out_dir:
+        out_dir = os.path.abspath(out_dir)
+    else:
+        out_dir = os.path.join(HUB, "index", "agent_workspace",
+                               "deliveries", time.strftime("%Y%m%d_%H%M%S"))
+
+    plan, written, skipped, errors = [], [], [], []
+    for mid in target_ids:
+        m = get_material(mid)
+        if not m:
+            errors.append({"id": mid, "status": "not_found"})
+            plan.append({"id": mid, "status": "not_found"})
+            continue
+        src = _abs_source(m)
+        if not src or not os.path.exists(src):
+            errors.append({"id": mid, "status": "source_missing", "src": src})
+            plan.append({"id": mid, "status": "source_missing", "src": src})
+            continue
+        clip = (clips or {}).get(mid)
+        nm = re.sub(r"\W+", "_", (m.get("name") or mid))[:40].strip("_") or mid
+        dst = os.path.join(out_dir, "%s_%s.%s" % (mid, nm, fmt))
+        cmd = _build_deliver_cmd(exe, src, dst, fmt=fmt, res=res,
+                                 clip=clip, copy_only=copy_only)
+        entry = {"id": mid, "src": src, "dst": dst, "cmd": cmd,
+                 "clip": list(clip) if clip else None, "status": "planned"}
+        plan.append(entry)
+        if not confirm:
+            continue
+        if os.path.exists(dst) and not overwrite:
+            skipped.append({"id": mid, "dst": dst, "status": "exists"})
+            entry["status"] = "skipped_exists"
+            continue
+        if exe is None:
+            errors.append({"id": mid, "status": "no_ffmpeg"})
+            entry["status"] = "no_ffmpeg"
+            continue
+        os.makedirs(out_dir, exist_ok=True)
+        flags = 0x08000000 if os.name == "nt" else 0
+        try:
+            p = subprocess.run(cmd, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.PIPE, timeout=600,
+                               creationflags=flags)
+            if p.returncode == 0 and os.path.exists(dst) and os.path.getsize(dst) > 0:
+                written.append({"id": mid, "dst": dst, "status": "ok"})
+                entry["status"] = "ok"
+            else:
+                err = (p.stderr or b"").decode("utf-8", "ignore")[:300]
+                errors.append({"id": mid, "status": "ffmpeg_error", "detail": err})
+                entry["status"] = "ffmpeg_error"
+        except Exception as e:  # noqa: BLE001
+            errors.append({"id": mid, "status": "exception", "detail": str(e)[:200]})
+            entry["status"] = "exception"
+
+    return {"dry_run": not confirm, "out_dir": out_dir, "plan": plan,
+            "written": written, "skipped": skipped, "errors": errors}
+
+
 def make_thumb(mid, retry_failed=False):
     """为视频抽一帧存成 jpg 封面,缓存到 index/thumbs/<id>.jpg。
     返回封面路径;无 ffmpeg / 非视频 / 抽帧失败均返回 None。

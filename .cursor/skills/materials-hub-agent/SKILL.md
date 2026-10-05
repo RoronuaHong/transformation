@@ -91,6 +91,13 @@ Backfill tags: `python cli.py facets --link-parents`（补 role:master + clip/�
 3. MCP `assemble_package(goal, kind?, scope?, limit?, queries?)` 或 CLI `python cli.py package "目标" [--kind videos] [--scope master|clips|all] [--limit N]`。
 4. 交付物为 `materials-hub/package@1` manifest(含 goal / queries / assets[].role / has_cover / suggested_next);物理切片/导出/补封面仍走既有 `auto` / `autotag` / 工作台。
 
+## Skill J — 按需交付（转码 / 区间裁剪 / 格式归一）
+
+1. 用户说「导出 / 交付 / 转码 / deliver / export」类意图时,命中命名技能 `deliver`(确定性工作流,不经 7B 规划器)。**裁剪意图优先**:任务含「裁剪/crop/剪辑」且点名素材 id 时仍走 Skill 裁剪,「裁剪并导出」不误导向 deliver。
+2. 消费 `assemble_package` 产出的素材包 manifest 或指定 id 列表,导出为下游 AIGC/剪辑可用的交付变体:`core.deliver_package` 拼 ffmpeg 命令(转码 libx264 / 区间裁剪 `-ss`+`-t` / 格式归一 `-f`),落 `index/agent_workspace/deliveries/` 派生目录。
+3. 安全铁律:只读原素材、只新建交付文件、绝不改动资产本体。`confirm=false`(默认)仅返回 dry-run 计划不写文件;`confirm=true` 才真正导出(MCP `deliver_package` 与 Agent 工具 `deliver` 均强制 `confirm=true`,与写护栏一致)。
+4. MCP `deliver_package(manifest?, ids?, fmt?, res?, clips?, out_dir?, copy_only?, overwrite?, confirm(必须 true))` 或 CLI `python cli.py deliver --manifest <pkg.json> [--ids id1,id2] [--fmt mp4] [--res 720|1080|0] [--out-dir DIR] [--copy-only] [--overwrite] [--confirm]`(默认 dry-run)。
+
 ## 意图路由（先于规划）
 
 规则在 `agent._classify_turn`，7B 规划器之前。详见 `materials_hub/素材中心最佳实践与优化分析.md` §21。
@@ -102,10 +109,12 @@ Backfill tags: `python cli.py facets --link-parents`（补 role:master + clip/�
 | 「帮我看看」「检查一下」、没有上文的「继续」 | 追问技能，禁止默认 search+maintain+job_checkup |
 | 有上文的「继续」 | 开放循环 |
 | 规划结果只是未请求的工具名 | 丢弃，改为追问 |
-| 技能 A–I / 上传视频 | 确定性工作流，见上文 |
+| 技能 A–J / 上传视频 | 确定性工作流，见上文 |
 | 治理/合规/占位/未分类盘点 | 技能 F:`governance_report` |
 | 某 job 能否发布 / 分发就绪 | 技能 G:`distribution_readiness` |
 | 记录采纳/否决 / 看学习概览 | 技能 H:`agent_feedback` / `learning_summary` |
+| 组装/打包/混剪/素材包 | 技能 I:`assemble_package` |
+| 导出/交付/转码素材包或 id | 技能 J:`deliver_package`(需 confirm) |
 | 裁剪且给出 id / 上传 / 起止秒 | 逻辑时间窗。点名片头、片尾、主戏只留该段。说导出也不在这里编码 |
 | 只说「裁剪」没有对象 | 追问 id 和起止秒 |
 | 还有未做完的待办就结束 | 进度按已完成条数，文案「部分完成」 |

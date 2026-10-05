@@ -436,6 +436,31 @@ def main():
                         "asset_count": r["asset_count"], "ids": r["ids"]},
                        ensure_ascii=False, indent=2))
 
+    elif cmd == "deliver":
+        import agent as _agent
+        import json as _j
+        confirm = "--confirm" in args
+        manifest = args[args.index("--manifest") + 1] if "--manifest" in args else ""
+        ids = []
+        if "--ids" in args:
+            ids = [x.strip() for x in args[args.index("--ids") + 1].split(",") if x.strip()]
+        out_dir = args[args.index("--out-dir") + 1] if "--out-dir" in args else None
+        fmt = args[args.index("--fmt") + 1] if "--fmt" in args else "mp4"
+        res = args[args.index("--res") + 1] if "--res" in args else "720"
+        copy_only = "--copy-only" in args
+        overwrite = "--overwrite" in args
+        if not manifest and not ids:
+            print("用法: python cli.py deliver --manifest <pkg.json> [--ids id1,id2] "
+                  "[--fmt mp4] [--res 720|1080|0] [--out-dir DIR] "
+                  "[--copy-only] [--overwrite] [--confirm]")
+            print("  默认 dry-run(不写文件);加 --confirm 才真正导出(写需授权)。")
+            return
+        r = _agent.core.deliver_package(
+            manifest_path=manifest or None, ids=ids or None,
+            out_dir=out_dir, confirm=confirm, fmt=fmt, res=res,
+            copy_only=copy_only, overwrite=overwrite)
+        print(_j.dumps(r, ensure_ascii=False, indent=2))
+
     elif cmd == "agent":
         import agent
         import json as _json

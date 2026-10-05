@@ -460,6 +460,31 @@ def t_assemble(a):
         queries=a.get("queries") or None)
 
 
+def t_deliver(a):
+    """写:把素材包/指定 id 导出为下游交付变体(转码/区间裁剪/格式归一)。
+
+    只新建交付文件、绝不改动资产本体;需 confirm=true(人工复核护栏)。"""
+    _require_confirm(a)
+    import agent
+    clips = None
+    raw = a.get("clips") or {}
+    if isinstance(raw, dict):
+        clips = {}
+        for k, v in raw.items():
+            try:
+                clips[str(k)] = (float(v[0]), float(v[1]))
+            except (TypeError, ValueError, IndexError):
+                continue
+    return agent.core.deliver_package(
+        manifest_path=str(a.get("manifest") or "").strip() or None,
+        ids=[str(x).strip() for x in (a.get("ids") or []) if str(x).strip()] or None,
+        out_dir=str(a.get("out_dir") or "").strip() or None,
+        confirm=True, fmt=str(a.get("fmt") or "mp4").strip(),
+        res=str(a.get("res") or "720").strip(), clips=clips,
+        copy_only=bool(a.get("copy_only")),
+        overwrite=bool(a.get("overwrite")))
+
+
 HANDLERS = {"search_materials": t_search, "get_material": t_get,
             "list_tags": t_tags, "hub_stats": t_stats,
             "update_tags": t_update_tags, "register_asset": t_register,
@@ -475,7 +500,8 @@ HANDLERS = {"search_materials": t_search, "get_material": t_get,
             "auto_process": t_auto,
             "governance_report": t_governance, "distribution_readiness": t_readiness,
             "agent_feedback": t_feedback, "learning_summary": t_learning,
-            "assemble_package": t_assemble}
+            "assemble_package": t_assemble,
+            "deliver_package": t_deliver}
 # __PART2__
 _SCHEMA_OBJ = {"type": "object", "properties": {
     "q": {"type": "string", "description": "关键词或中文自然语言问句"},
@@ -557,6 +583,18 @@ TOOLS = [
         "limit": {"type": "integer"},
         "queries": {"type": "array", "items": {"type": "string"}}},
         "required": ["goal"]}},
+    {"name": "deliver_package", "description": "写:把素材包(manifest)/指定 id 导出为下游交付变体(转码/区间裁剪/格式归一)。只新建文件、绝不改动资产本体;需 confirm=true(人工复核)。用于「把这个素材包导出成 720p mp4/切出某段」等。",
+     "inputSchema": {"type": "object", "properties": {
+        "manifest": {"type": "string", "description": "assemble_package 产出的素材包 manifest JSON 路径"},
+        "ids": {"type": "array", "items": {"type": "string"}, "description": "直接指定素材 id 列表(与 manifest 二选一)"},
+        "fmt": {"type": "string", "description": "目标封装(mp4/mov/webm/mkv/gif)", "default": "mp4"},
+        "res": {"type": "string", "description": "目标高度像素(720/1080/0=原画)", "default": "720"},
+        "clips": {"type": "object", "description": "区间裁剪 {id:[start,end]} 秒", "additionalProperties": {"type": "array", "items": {"type": "number"}}},
+        "out_dir": {"type": "string", "description": "交付目录(默认 index/agent_workspace/deliveries/<ts>/)"},
+        "copy_only": {"type": "boolean", "description": "流拷贝不重编码(仅 remux,最快)"},
+        "overwrite": {"type": "boolean", "description": "目标已存在是否覆盖"},
+        "confirm": {"type": "boolean", "description": "必须为 true 才允许写文件(人工复核护栏)"}},
+        "required": ["confirm"]}},
     {"name": "search_by_image", "description": "只读:以图搜图(query=id/路径)或以文搜图(text=)。mode=auto|phash|clip;CLIP 需 imgembed 索引",
      "inputSchema": {"type": "object", "properties": {
         "query": {"type": "string"}, "id": {"type": "string"}, "path": {"type": "string"},

@@ -826,6 +826,32 @@ def _tool_assemble_package(a):
         queries=a.get("queries") or None)
 
 
+def _tool_deliver(a):
+    """写:把素材包/指定 id 导出为下游交付变体(转码/区间裁剪/格式归一)。
+
+    安全:只新建交付文件、绝不改动资产本体;必须显式 confirm=true 才真正导出,
+    否则返回 dry-run 计划(与 MCP t_deliver 同一护栏)。"""
+    if not a.get("confirm") is True:
+        return {"error": "deliver requires confirm=true (Human-in-the-loop)"}
+    ids = [str(x).strip() for x in (a.get("ids") or []) if str(x).strip()]
+    clips = None
+    raw_clips = a.get("clips") or {}
+    if isinstance(raw_clips, dict):
+        clips = {}
+        for k, v in raw_clips.items():
+            try:
+                clips[str(k)] = (float(v[0]), float(v[1]))
+            except (TypeError, ValueError, IndexError):
+                continue
+    return core.deliver_package(
+        manifest_path=str(a.get("manifest") or "").strip() or None,
+        ids=ids or None, out_dir=(str(a.get("out_dir") or "").strip() or None),
+        confirm=True, fmt=str(a.get("fmt") or "mp4").strip(),
+        res=str(a.get("res") or "720").strip(), clips=clips,
+        copy_only=bool(a.get("copy_only")),
+        overwrite=bool(a.get("overwrite")))
+
+
 def _seed_ids_from_task(task, ctx):
     """从任务正文预填 seen_ids/last_id(上传附带的 id=xxxxxxxx 真源)。"""
     for mid in _TASK_ID_RE.findall(task or ""):
@@ -1186,6 +1212,10 @@ def _build_tools(allow_write, ctx=None):
                                "args: id, tags, remove?")
         tools["register_asset"] = (_tool_register,
                                    "写:登记外部文件引用(不复制);args: path, tags?, description?")
+        tools["deliver"] = (_tool_deliver,
+                            "写:把素材包(manifest)/指定 id 导出为下游交付变体(转码/区间裁剪/"
+                            "格式归一);只新建文件不改资产;args: manifest?, ids?, confirm(必须 true),"
+                            " fmt?, res?(720/1080/0), clips?{id:[s,e]}, out_dir?, copy_only?, overwrite?")
     # 给写工具注入 ctx(携带最近检索到的 last_id,用于 id 兜底)
     if ctx is not None:
         for name in ("update_tags",):
@@ -1421,6 +1451,54 @@ def _run_package_skill(state, ws, ctx, call):
         res["summary"] += "\n丢弃(id 不存在或不符 scope): " + ", ".join(
             str(x) for x in res["dropped_ids"][:8])
     return res.get("summary")
+
+
+def _run_deliver_skill(state, ws, ctx, call):
+    """Skill:把素材包/指定 id 导出为下游交付变体(转码/区间裁剪/格式归一)。
+
+    写操作:仅在用户已授权写入(allow_write,即 CLI --write / MCP confirm=true)
+    时真正导出;否则返回 dry-run 计划并提示需开启写权限。绝不改动资产本体。"""
+    task = state.get("task") or ""
+    # 解析 manifest 路径(任务里出现的 .json)或 id(12 位十六进制)
+    manifest = ""
+    for tok in re.findall(r"\S+\.json", task):
+        if os.path.exists(tok):
+            manifest = tok
+            break
+    ids = re.findall(r"\b[0-9a-f]{12}\b", task)
+    allow_write = bool(ctx.get("allow_write"))
+    res = core.deliver_package(
+        manifest_path=manifest or None, ids=ids or None,
+        confirm=allow_write, fmt="mp4", res="720")
+    if res.get("error"):
+        return "[交付] " + res["error"]
+    n_plan = len(res.get("plan") or [])
+    n_written = len(res.get("written") or [])
+    n_skip = len(res.get("skipped") or [])
+    n_err = len(res.get("errors") or [])
+    if allow_write:
+        summary = ("[交付] 已导出 %d 个交付变体(计划 %d · 跳过 %d · 失败 %d),"
+                   "落到 %s" % (n_written, n_plan, n_skip, n_err, res.get("out_dir")))
+    else:
+        summary = ("[交付] dry-run:计划导出 %d 个(未写文件;开启 --write / confirm=true "
+                   "才真正转码导出)。目标目录 %s" % (n_plan, res.get("out_dir")))
+    for i in ids:
+        ctx["seen_ids"].add(str(i))
+    n = len(state.get("steps") or []) + 1
+    ptr = _observe(state, ws, {
+        "deliver_out_dir": res.get("out_dir"), "plan": n_plan,
+        "written": n_written, "skipped": n_skip, "errors": n_err,
+        "dry_run": res.get("dry_run"),
+    })
+    state["steps"].append({
+        "n": n, "action": "deliver", "ok": True,
+        "args": {"manifest": bool(manifest), "ids": ids[:8],
+                 "confirm": allow_write}, "obs": ptr,
+        "_sig": _tool_sig("deliver", {"manifest": bool(manifest),
+                                      "ids": ids[:8]}),
+        "skill": "deliver",
+    })
+    return summary
 
 
 # ---------------------------------------------------------------- 规划与主循环(支柱 1/4)
@@ -1679,6 +1757,12 @@ def _match_named_skill(task):
     按钮文案有简体/繁体/英文三套,必须都能命中同一条技能。
     """
     t = task or ""
+    # 裁剪意图优先:显式「裁剪/切/crop」且点名素材 id 时,即便含「导出成」也走 crop
+    # (crop 技能只产出时间窗,编码导出由 deliver/工作台接管,避免误导向 deliver)。
+    if _wants_crop(t) and _crop_material_ids(t):
+        return "crop"
+    if re.search(r"交付(?!包)|导出|转码|导出成|导出文件|deliver|export", t, re.I):
+        return "deliver"
     if re.search(r"素材包|打包|组装|混剪|分发包|交付包|素材集合|package|deliverable", t, re.I):
         return "package"
     if re.search(r"缺封面|无封面|無封面|missing\s+covers?", t, re.I):
@@ -1695,8 +1779,6 @@ def _match_named_skill(task):
         return "segment"
     if re.search(r"体检|體檢", t) and _JOB_ATTACH_RE.search(t):
         return "job"
-    if _wants_crop(t) and _crop_material_ids(t):
-        return "crop"
     return ""
 
 
@@ -1712,6 +1794,8 @@ def _named_skill_todos(skill):
         "crop": ["读取母版", "反查子组件", "读取镜头时间轴", "给出裁剪窗"],
         "package": ["拆解目标为检索查询", "Librarian 检索候选素材",
                     "Critic 核验候选", "Executor 组装素材包", "汇总"],
+        "deliver": ["解析目标素材/素材包", "按需导出交付变体(转码/裁剪)",
+                    "汇总交付清单"],
     }
     return [{"id": i, "text": text, "status": "pending"}
             for i, text in enumerate(labels.get(skill) or ["执行", "汇总"], 1)]
@@ -1906,6 +1990,9 @@ def _run_named_skill(state, ws, tools, ctx, skill):
 
     if skill == "package":
         return _run_package_skill(state, ws, ctx, call)
+
+    if skill == "deliver":
+        return _run_deliver_skill(state, ws, ctx, call)
 
     return None
 
