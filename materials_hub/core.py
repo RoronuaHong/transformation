@@ -1830,6 +1830,11 @@ QUERY_SYNONYMS = {
     "上色": ["colorize", "color", "codeformer", "fixed"], # 中文手写 上色
     "彩色": ["color", "colorize", "codeformer", "fixed"], # grayscale to color(译中:彩色)
     "灰度": ["grayscale", "gray", "colorize", "codeformer", "fixed"],
+    # ↓ 2026-10-06 第六轮实例测试(缩写/方言/长句)暴露的缺口(数据驱动)
+    "放大": ["upscale", "esrgan", "deblur"],            # esrgan x4 upscale → 去模糊成品
+    "动漫": ["anime", "cartoon", "deblur", "old_sttn"], # 老动画太糊了 → deblur/STTN
+    "动画": ["anime", "cartoon", "deblur", "old_sttn"],
+    "画质": ["quality", "cmp", "compare"],              # 画质对比 → 前后对比图
     "效果": ["result", "out", "cmp"],
     "对比图": ["cmp", "compare"],
     # 「画面→frame/scene」已删(2026-09-28):泛场景词展开让 name 含 frame 的条目
