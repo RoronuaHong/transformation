@@ -823,6 +823,60 @@ def _ranked(q="", kind="", tag="", mode="auto"):
     return semantic_rank(q2, base, lex)
 
 
+def _has_cjk(s):
+    return bool(re.search(r'[\u4e00-\u9fff\u3400-\u4dbf]', s or ""))
+
+
+_TRANSLATE_CACHE = {"model": None, "probed": False}
+
+def _ollama_model_names():
+    try:
+        return [m["name"] for m in (_http_json(_embed_url() + "/api/tags", timeout=8).get("models") or [])]
+    except Exception:
+        return []
+
+def _translate_model():
+    """跨语检索桥接:选一个本地翻译模型(默认 translategemma:4b)。
+    没有就返回 '',search 走原行为(零回归)。结果缓存避免每次检索都探 ollama。
+    显式设了 VITUAL_TRANSLATE_MODEL 但该模型未装 → 返回 '' 不回退;
+    仅当完全未设 env 才默认 translategemma(便于关闭做 A/B)。"""
+    if _TRANSLATE_CACHE["probed"]:
+        return _TRANSLATE_CACHE["model"] or ""
+    _TRANSLATE_CACHE["probed"] = True
+    env = os.environ.get("VITUAL_TRANSLATE_MODEL", "").strip()
+    have = _ollama_model_names()
+    if env:
+        hit = next((c for c in have if c == env or c.split(":")[0] == env.split(":")[0]), None)
+        _TRANSLATE_CACHE["model"] = hit or ""      # 显式指定但未装 → 空,不回退
+    else:
+        hit = next((c for c in have if "translat" in c.lower()), None)
+        _TRANSLATE_CACHE["model"] = hit or ""
+    return _TRANSLATE_CACHE["model"] or ""
+
+def _translate_to_zh(q):
+    model = _translate_model()
+    if not model:
+        return ""
+    try:
+        r = _http_json(_embed_url() + "/api/generate", timeout=60,
+                       payload={"model": model,
+                                "prompt": "Translate the following text into Simplified Chinese. "
+                                          "Output only the translation, no explanation or quotes.\n\n" + q,
+                                "stream": False})
+        return (r.get("response") or "").strip().strip("\"' \n")
+    except Exception:
+        return ""
+
+def _maybe_translate(q):
+    """跨语桥接:英文/非中文查询先译中,再中英合并扩展,让强词法 + 稠密混合检索双命中
+    (词法对中文文档、稠密对中文查询都更强)。中文查询(含 CJK)原样返回——
+    门禁 16 句中文查询不受影响。无翻译模型时返回原查询(零回归)。"""
+    if not q or _has_cjk(q) or not _translate_model():
+        return q
+    zh = _translate_to_zh(q)
+    return (zh + " " + q) if zh else q
+
+
 def search(q="", kind="", tag="", limit=None, offset=0, mode="auto", sort=""):
     """检索:自然语言问句 → 排序后返回,支持分页。
     mode="auto"     有 embedding 模型且素材已建向量 → 稠密+词法混合;
@@ -833,6 +887,7 @@ def search(q="", kind="", tag="", limit=None, offset=0, mode="auto", sort=""):
                     显式指定 "newest"/"oldest"/"name"/"size" 时覆盖相关性排序
                     (DAM 面板的排序控件;在分页之前生效,全库级排序)。"""
     _t0 = time.perf_counter()
+    q = _maybe_translate(q)
     ck = (q, kind, tag, limit, offset, mode, sort)
     if os.environ.get("VITUAL_CACHE_SEARCH"):
         if ck in _SEARCH_CACHE:
