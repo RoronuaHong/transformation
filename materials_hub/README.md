@@ -470,7 +470,7 @@ Prompts:`fill_missing_thumbs`、`job_checkup`（`prompts/list` / `prompts/get`�
 上传、整理 ingest、扫描、`POST /api/split-silent` 成功后会后台 `enqueue_autoproc`
 (thumb→OCR→shots→pHash);进度看 `GET /api/auto/status`,也可 `POST /api/auto` 手动跑。
 流水线 `hub_push` → `run_job_dir`：登记后默认拆 silent+track 再 auto。
-详解与路线图见 `素材中心最佳实践与优化分析.md` §18–§19；Cursor skill：`materials-hub-agent`。
+详解与路线图见 `素材中心最佳实践与优化分析.md` §18–§22；Cursor skill：`materials-hub-agent`。
 
 ## Deep Agent(路线 C:stdlib 编排 + MCP 暴露)
 
