@@ -162,6 +162,7 @@ python cli.py search --file q.txt  # 中文查询建议走文件(Windows 终端 
 python cli.py search --stdin       # 或从标准输入读查询
 python eval_search.py --baseline  # 检索质量评估(16 查询人工标注 ground truth,P@5/R@20/MRR/NDCG@10,lexical↔auto 对比)
 python eval_search.py --mode lexical --gate  # 回归门禁:均值掉出基线(容差 0.02)→ GATE: FAIL 且退出码 1
+python eval_gt_candidates.py  # GT 补全候选(证据驱动,**不改权威 GT**,产出供人工核对的清单)
 python cli.py ocr <id> [--force]  # 视频画面 OCR(离线 rapidocr,文本入检索;--all 批量)
 python cli.py facets [--limit N] [--link-clips|--link-parents] [--scrub]   # 补 DAM 面标签 + 回填 parent:/去旧别名
 python cli.py auto [--limit N] [--autotag]   # 自动处理链:封面→OCR→镜头→pHash→(打标)→语义索引(幂等)
@@ -317,6 +318,12 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 > **门禁基线(2026-10-06 实测,384 条语料 + 16 查询 human GT,mode=lexical)**:
 > P@5 0.60 / R@20 0.78 / MRR 0.75 / NDCG@10 0.75(容差 0.02)。
 > 任何检索/同义词改动请跑 `python eval_search.py --mode lexical --gate` 防回归。
+>
+> **GT 漏标补全(人工流程)**:语料重建到 384 条后部分查询的 GT 不再完整(如 31 条 `type:benchmark`
+> 素材 GT 仅标 18 条)。`python eval_gt_candidates.py` 按证据产出候选并**分级**——
+> `high`(窄面标签,如 `type:benchmark`/`type:subs`,基本可认定漏标)/ `review`(宽面标签如
+> `type:render`,需人工判断)/ `low`(仅文件名词元,最易误伤)。**脚本默认绝不改写 `eval_ground_truth.json`**;
+> `--apply` 也只另写 `eval_ground_truth.proposed.json` 供人工比对后再决定是否采纳。当前:high 53 / review 577 / low 10。
 
 个别查询收益更明显:「把模糊画面变清晰」0.20 → 0.80(P@5)、「按时间切的片段」0.00 → 0.16(R@20)。
 
