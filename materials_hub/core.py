@@ -1820,8 +1820,8 @@ QUERY_SYNONYMS = {
     "切片": ["segment", "clip", "slice"],
     "合成": ["combine", "combined"],
     "合并": ["merge", "combine"],
-    "水印": ["watermark", "logo"],
-    "台标": ["logo", "watermark"],
+    "水印": ["watermark", "logo", "delogo"],
+    "台标": ["logo", "watermark", "delogo"],
     "效果": ["result", "out", "cmp"],
     "对比图": ["cmp", "compare"],
     # 「画面→frame/scene」已删(2026-09-28):泛场景词展开让 name 含 frame 的条目
