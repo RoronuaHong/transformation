@@ -356,7 +356,7 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 | `VITUAL_EMBED_MODEL` | 自动发现 | 指定 embedding 模型 |
 | `VITUAL_EMBED_MIN_COS` | `0.25` | 稠密相似度入选阈值(居中后) |
 | `VITUAL_RRF_K` / `VITUAL_HYBRID_WLEX` | `60` / `1.0` | RRF 常数 / 词法权重(调大更偏精确关键词) |
-| `VITUAL_RERANK_MODEL` | 空(关闭) | 可选 stage-2 重排:设 `bge-reranker-v2-m3` 走 ollama cross-encoder;`lexical` 为内置离线弱基线(实测会劣化排序,勿用于生产);`VITUAL_RERANK_TOP` 控制精排候选量(默认 60) |
+| `VITUAL_RERANK_MODEL` | 空(关闭) | 可选 stage-2 重排:`_ollama_rerank` 调 ollama `/api/rerank`。**注意:本机 ollama 0.34.0 不暴露该端点(实测 404),故该路径静默降级为原 RRF 融合**;设 `DENGCAO/BGE-RERANKER-V2-M3` 等模型名仅当端点可用时生效。`lexical` 为内置离线弱基线(实测会劣化排序,勿用于生产);`VITUAL_RERANK_TOP` 控制精排候选量(默认 60) |
 | `VITUAL_CACHE_SEARCH` / `VITUAL_CACHE_PERSIST` | 关 / 关 | 查询内存缓存 / 额外落盘 `index/search_cache.pkl`(跨会话复用) |
 | `VITUAL_OCR_PYTHON` | 自动发现 | 画面 OCR 用的 python(需装 rapidocr;默认自动找 `subtitle_pipeline/.venv`) |
 
