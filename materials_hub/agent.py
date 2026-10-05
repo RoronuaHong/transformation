@@ -1501,6 +1501,67 @@ def _run_deliver_skill(state, ws, ctx, call):
     return summary
 
 
+def _run_publish_skill(state, ws, ctx, call):
+    """Skill:一键出片——串联 package(目标→素材包)→deliver(导出交付变体)。
+
+    闭环「素材检索→二次创作」:一句话目标直接落到可用交付文件。
+    写操作仅在 allow_write 时执行导出;否则素材包照出,交付为 dry-run。
+    绝不改动资产本体(assets 只读,交付只新建文件)。"""
+    task = state.get("task") or ""
+    goal = _extract_package_goal(task)
+    model = state.get("model")
+    n = len(state.get("steps") or [])
+
+    # 步骤 1:组装素材包(Librarian→Critic→Executor)
+    pkg = _assemble_package(goal, model=model, ws=ws)
+    for i in pkg.get("ids", []):
+        ctx["seen_ids"].add(str(i))
+    n_assets = pkg.get("asset_count") or 0
+    n += 1
+    state["steps"].append({
+        "n": n, "action": "assemble_package", "ok": True,
+        "args": {"goal": goal[:80]},
+        "obs": _observe(state, ws, {
+            "package": os.path.basename(pkg.get("path", "")),
+            "asset_count": n_assets, "roles": pkg.get("roles")}),
+        "_sig": _tool_sig("assemble_package", {"goal": goal[:80]}),
+        "skill": "publish",
+    })
+    if not n_assets:
+        return ("[一键出片] 目标「%s」未检索到素材(素材包 0 条),未产生交付文件。"
+                "换个说法或先确认库里有相关素材。" % goal[:40])
+
+    # 步骤 2:按素材包导出交付变体
+    allow_write = bool(ctx.get("allow_write"))
+    dv = core.deliver_package(manifest_path=pkg.get("path"),
+                              confirm=allow_write, fmt="mp4", res="720")
+    if dv.get("error"):
+        return "[一键出片] 素材包 %d 条已出,但交付失败:%s" % (n_assets, dv["error"])
+    n_plan = len(dv.get("plan") or [])
+    n_written = len(dv.get("written") or [])
+    n_err = len(dv.get("errors") or [])
+    n += 1
+    state["steps"].append({
+        "n": n, "action": "deliver", "ok": True,
+        "args": {"manifest": pkg.get("path"), "confirm": allow_write},
+        "obs": _observe(state, ws, {
+            "deliver_out_dir": dv.get("out_dir"), "plan": n_plan,
+            "written": n_written, "errors": n_err,
+            "dry_run": dv.get("dry_run")}),
+        "_sig": _tool_sig("deliver", {"manifest": pkg.get("path")}),
+        "skill": "publish",
+    })
+    if allow_write:
+        summary = ("[一键出片] 目标「%s」→ 素材包 %d 条 → 已导出 %d 个交付变体"
+                   "(失败 %d),落到 %s" % (goal[:30], n_assets, n_written, n_err,
+                                          dv.get("out_dir")))
+    else:
+        summary = ("[一键出片] 目标「%s」→ 素材包 %d 条;交付为 dry-run(计划 %d 个,"
+                   "未写文件;开启 --write / confirm=true 才真正导出)。目录 %s"
+                   % (goal[:30], n_assets, n_plan, dv.get("out_dir")))
+    return summary
+
+
 # ---------------------------------------------------------------- 规划与主循环(支柱 1/4)
 _PLAN_SYS = ("你是素材库任务的规划器。把任务拆成 3-5 条可执行待办"
              '(输出 {"todos":[{"id":1,"text":"..."}]})。'
@@ -1761,6 +1822,11 @@ def _match_named_skill(task):
     # (crop 技能只产出时间窗,编码导出由 deliver/工作台接管,避免误导向 deliver)。
     if _wants_crop(t) and _crop_material_ids(t):
         return "crop"
+    # 一键出片:显式「出片」或同时含「组装类动词」+「导出类动词」→ 串联 package→deliver
+    if re.search(r"出片|onego|pipeline", t, re.I) or (
+            re.search(r"组装|打包|混剪|package|deliverable", t, re.I)
+            and re.search(r"交付(?!包)|导出|转码|deliver|export", t, re.I)):
+        return "publish"
     if re.search(r"交付(?!包)|导出|转码|导出成|导出文件|deliver|export", t, re.I):
         return "deliver"
     if re.search(r"素材包|打包|组装|混剪|分发包|交付包|素材集合|package|deliverable", t, re.I):
@@ -1796,6 +1862,7 @@ def _named_skill_todos(skill):
                     "Critic 核验候选", "Executor 组装素材包", "汇总"],
         "deliver": ["解析目标素材/素材包", "按需导出交付变体(转码/裁剪)",
                     "汇总交付清单"],
+        "publish": ["按目标组装素材包", "导出交付变体", "汇总出片清单"],
     }
     return [{"id": i, "text": text, "status": "pending"}
             for i, text in enumerate(labels.get(skill) or ["执行", "汇总"], 1)]
@@ -1993,6 +2060,9 @@ def _run_named_skill(state, ws, tools, ctx, skill):
 
     if skill == "deliver":
         return _run_deliver_skill(state, ws, ctx, call)
+
+    if skill == "publish":
+        return _run_publish_skill(state, ws, ctx, call)
 
     return None
 

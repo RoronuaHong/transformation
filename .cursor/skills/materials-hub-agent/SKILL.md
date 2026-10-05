@@ -98,6 +98,14 @@ Backfill tags: `python cli.py facets --link-parents`（补 role:master + clip/�
 3. 安全铁律:只读原素材、只新建交付文件、绝不改动资产本体。`confirm=false`(默认)仅返回 dry-run 计划不写文件;`confirm=true` 才真正导出(MCP `deliver_package` 与 Agent 工具 `deliver` 均强制 `confirm=true`,与写护栏一致)。
 4. MCP `deliver_package(manifest?, ids?, fmt?, res?, clips?, out_dir?, copy_only?, overwrite?, confirm(必须 true))` 或 CLI `python cli.py deliver --manifest <pkg.json> [--ids id1,id2] [--fmt mp4] [--res 720|1080|0] [--out-dir DIR] [--copy-only] [--overwrite] [--confirm]`(默认 dry-run)。
 
+## Skill K — 一键出片（package → deliver 串联）
+
+1. 用户说「出片 / onego / pipeline」，或同时含「组装|打包|混剪|package」+「导出|转码|交付|deliver|export」时,命中命名技能 `publish`(确定性串联,不经 7B 规划器)。
+2. 流程:**先组装**(复用 Skill I 的 Librarian→Critic→Executor 出 manifest)**再交付**(用该 manifest 调 `core.deliver_package` 导出变体);素材包 0 条时直接止步,不进交付。
+3. 闭环「素材检索→二次创作」:一句话目标直接落到可用交付文件。写操作仍需授权(`--write` / `confirm=true`),否则交付为 dry-run。
+4. CLI `python cli.py publish "目标" [--confirm] [--fmt mp4] [--res 720|1080|0]`。
+5. **刻意不新增 MCP 工具**:`publish` 只是 `assemble_package`+`deliver_package` 的确定性串联,宿主自行两步调用即可;新增工具会扩大 MCP 面、增加 token 与维护成本(对齐 §15.1「降 token 膨胀/窄作用域」)。
+
 ## 意图路由（先于规划）
 
 规则在 `agent._classify_turn`，7B 规划器之前。详见 `materials_hub/素材中心最佳实践与优化分析.md` §21。
@@ -109,12 +117,13 @@ Backfill tags: `python cli.py facets --link-parents`（补 role:master + clip/�
 | 「帮我看看」「检查一下」、没有上文的「继续」 | 追问技能，禁止默认 search+maintain+job_checkup |
 | 有上文的「继续」 | 开放循环 |
 | 规划结果只是未请求的工具名 | 丢弃，改为追问 |
-| 技能 A–J / 上传视频 | 确定性工作流，见上文 |
+| 技能 A–K / 上传视频 | 确定性工作流，见上文 |
 | 治理/合规/占位/未分类盘点 | 技能 F:`governance_report` |
 | 某 job 能否发布 / 分发就绪 | 技能 G:`distribution_readiness` |
 | 记录采纳/否决 / 看学习概览 | 技能 H:`agent_feedback` / `learning_summary` |
 | 组装/打包/混剪/素材包 | 技能 I:`assemble_package` |
 | 导出/交付/转码素材包或 id | 技能 J:`deliver_package`(需 confirm) |
+| 出片/组装并导出/onego | 技能 K:`publish`(package→deliver 串联,需 confirm) |
 | 裁剪且给出 id / 上传 / 起止秒 | 逻辑时间窗。点名片头、片尾、主戏只留该段。说导出也不在这里编码 |
 | 只说「裁剪」没有对象 | 追问 id 和起止秒 |
 | 还有未做完的待办就结束 | 进度按已完成条数，文案「部分完成」 |

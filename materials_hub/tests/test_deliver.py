@@ -19,7 +19,9 @@ import agent  # noqa: E402
 
 core._init_db()
 
-_ORIG = {"ffmpeg_path": core.ffmpeg_path, "get_material": core.get_material}
+_ORIG = {"ffmpeg_path": core.ffmpeg_path, "get_material": core.get_material,
+         "search": core.search, "expand_query": core.expand_query,
+         "chat_models": core.chat_models, "deliver_package": core.deliver_package}
 _ORIG_SUBPROC_RUN = core.subprocess.run
 _ORIG_WS = agent.WORKSPACE
 _FAKE_EXE = "fake-ffmpeg"
@@ -180,6 +182,81 @@ def test_run_deliver_skill_dry_no_write_perm():
         assert "dry-run" in s, s
         assert state["steps"][-1]["skill"] == "deliver"
         assert state["steps"][-1]["args"]["confirm"] is False
+    finally:
+        _reset()
+        shutil.rmtree(ws, ignore_errors=True)
+
+
+def test_match_named_skill_publish():
+    assert agent._match_named_skill("一键出片：猫的混剪") == "publish"
+    assert agent._match_named_skill("组装一个关于猫的素材包并导出成 mp4") == "publish"
+    # 仅组装(无导出意图)仍是 package;仅导出已有素材包仍是 deliver
+    assert agent._match_named_skill("帮我组装一个关于猫的素材包") == "package"
+    assert agent._match_named_skill("把素材包导出成 720p mp4") == "deliver"
+
+
+def _setup_pkg_mocks(mats):
+    core.search = lambda q, kind="", tag="", limit=None, offset=0, mode="auto": mats[
+        :limit or len(mats)]
+    core.get_material = lambda mid: next(
+        (m for m in mats if m["id"] == mid), None)
+    core.expand_query = lambda q: q
+    core.chat_models = lambda: []
+    core.deliver_package = lambda **kw: _fake_deliver(**kw)
+
+
+def test_run_publish_skill_dry_run():
+    ws = tempfile.mkdtemp()
+    agent.WORKSPACE = ws
+    core.ffmpeg_path = lambda: _FAKE_EXE
+    try:
+        _setup_pkg_mocks([_mat("m1"), _mat("m2")])
+        state = {"task": "一键出片：猫的混剪", "steps": [], "model": None,
+                 "todos": agent._named_skill_todos("publish")}
+        ctx = {"seen_ids": set(), "allow_write": False}
+        s = agent._run_publish_skill(state, ws, ctx, lambda n, a, i: {})
+        assert "一键出片" in s, s
+        assert "素材包 2 条" in s, s
+        assert "dry-run" in s, s
+        assert len(state["steps"]) == 2, state["steps"]
+        assert state["steps"][0]["action"] == "assemble_package"
+        assert state["steps"][1]["action"] == "deliver"
+        assert all(x["skill"] == "publish" for x in state["steps"])
+    finally:
+        _reset()
+        shutil.rmtree(ws, ignore_errors=True)
+
+
+def test_run_publish_skill_with_write_perm():
+    ws = tempfile.mkdtemp()
+    agent.WORKSPACE = ws
+    core.ffmpeg_path = lambda: _FAKE_EXE
+    try:
+        _setup_pkg_mocks([_mat("m1")])
+        state = {"task": "一键出片：猫的混剪", "steps": [], "model": None,
+                 "todos": agent._named_skill_todos("publish")}
+        ctx = {"seen_ids": set(), "allow_write": True}
+        s = agent._run_publish_skill(state, ws, ctx, lambda n, a, i: {})
+        assert "已导出" in s, s
+        assert state["steps"][1]["args"]["confirm"] is True
+    finally:
+        _reset()
+        shutil.rmtree(ws, ignore_errors=True)
+
+
+def test_run_publish_skill_no_assets_stops():
+    ws = tempfile.mkdtemp()
+    agent.WORKSPACE = ws
+    core.ffmpeg_path = lambda: _FAKE_EXE
+    try:
+        _setup_pkg_mocks([])
+        state = {"task": "一键出片：不存在的题材", "steps": [], "model": None,
+                 "todos": agent._named_skill_todos("publish")}
+        ctx = {"seen_ids": set(), "allow_write": True}
+        s = agent._run_publish_skill(state, ws, ctx, lambda n, a, i: {})
+        assert "未检索到素材" in s, s
+        # 0 素材时不应进入交付步骤
+        assert len(state["steps"]) == 1, state["steps"]
     finally:
         _reset()
         shutil.rmtree(ws, ignore_errors=True)

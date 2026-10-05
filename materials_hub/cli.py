@@ -461,6 +461,28 @@ def main():
             copy_only=copy_only, overwrite=overwrite)
         print(_j.dumps(r, ensure_ascii=False, indent=2))
 
+    elif cmd == "publish":
+        import agent as _agent
+        import json as _j
+        goal = args[args.index("--goal") + 1] if "--goal" in args else (
+            args[1] if len(args) > 1 else "")
+        if not goal:
+            print("用法: python cli.py publish \"目标\" [--confirm] "
+                  "[--fmt mp4] [--res 720|1080|0]")
+            print("  一键出片:先按目标组装素材包(只读),再导出交付变体;"
+                  "默认 dry-run,--confirm 才写文件。")
+            return
+        confirm = "--confirm" in args
+        fmt = args[args.index("--fmt") + 1] if "--fmt" in args else "mp4"
+        res = args[args.index("--res") + 1] if "--res" in args else "720"
+        pkg = _agent._assemble_package(goal)
+        r = _agent.core.deliver_package(
+            manifest_path=pkg.get("path"), confirm=confirm, fmt=fmt, res=res)
+        print(_j.dumps({"goal": goal, "package": pkg.get("path"),
+                        "asset_count": pkg.get("asset_count"),
+                        "ids": pkg.get("ids"), "deliver": r},
+                       ensure_ascii=False, indent=2))
+
     elif cmd == "agent":
         import agent
         import json as _json
