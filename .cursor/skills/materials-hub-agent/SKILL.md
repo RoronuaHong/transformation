@@ -94,7 +94,7 @@ Backfill tags: `python cli.py facets --link-parents`（补 role:master + clip/�
 ## Skill J — 按需交付（转码 / 区间裁剪 / 格式归一）
 
 1. 用户说「导出 / 交付 / 转码 / deliver / export」类意图时,命中命名技能 `deliver`(确定性工作流,不经 7B 规划器)。**裁剪意图优先**:任务含「裁剪/crop/剪辑」且点名素材 id 时仍走 Skill 裁剪,「裁剪并导出」不误导向 deliver。
-2. 消费 `assemble_package` 产出的素材包 manifest 或指定 id 列表,导出为下游 AIGC/剪辑可用的交付变体:`core.deliver_package` 拼 ffmpeg 命令(转码 libx264 / 区间裁剪 `-ss`+`-t` / 格式归一 `-f`),落 `index/agent_workspace/deliveries/` 派生目录。
+2. 消费 `assemble_package` 产出的素材包 manifest 或指定 id 列表,导出为下游 AIGC/剪辑可用的交付变体:`core.deliver_package` 拼 ffmpeg 命令(转码 libx264 / 区间裁剪 `-ss`+`-t` / 格式归一 `-f`),落 `index/agent_workspace/deliveries/` 派生目录。**按 kind 分流:视频类(videos/silent/anim)转码;非视频类(docs/subs/audio/images)按原样复制并保留原扩展名**——对 .srt/.ass 硬转 mp4 必然失败(实测教训)。
 3. 安全铁律:只读原素材、只新建交付文件、绝不改动资产本体。`confirm=false`(默认)仅返回 dry-run 计划不写文件;`confirm=true` 才真正导出(MCP `deliver_package` 与 Agent 工具 `deliver` 均强制 `confirm=true`,与写护栏一致)。
 4. MCP `deliver_package(manifest?, ids?, fmt?, res?, clips?, out_dir?, copy_only?, overwrite?, confirm(必须 true))` 或 CLI `python cli.py deliver --manifest <pkg.json> [--ids id1,id2] [--fmt mp4] [--res 720|1080|0] [--out-dir DIR] [--copy-only] [--overwrite] [--confirm]`(默认 dry-run)。
 

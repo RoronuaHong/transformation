@@ -583,7 +583,7 @@ TOOLS = [
         "limit": {"type": "integer"},
         "queries": {"type": "array", "items": {"type": "string"}}},
         "required": ["goal"]}},
-    {"name": "deliver_package", "description": "写:把素材包(manifest)/指定 id 导出为下游交付变体(转码/区间裁剪/格式归一)。只新建文件、绝不改动资产本体;需 confirm=true(人工复核)。用于「把这个素材包导出成 720p mp4/切出某段」等。",
+    {"name": "deliver_package", "description": "写:把素材包(manifest)/指定 id 导出为下游交付变体(视频类转码/区间裁剪/格式归一;非视频类如 docs/subs/audio 按原样复制并保留原扩展名)。只新建文件、绝不改动资产本体;需 confirm=true(人工复核)。用于「把这个素材包导出成 720p mp4/切出某段」等。",
      "inputSchema": {"type": "object", "properties": {
         "manifest": {"type": "string", "description": "assemble_package 产出的素材包 manifest JSON 路径"},
         "ids": {"type": "array", "items": {"type": "string"}, "description": "直接指定素材 id 列表(与 manifest 二选一)"},

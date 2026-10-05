@@ -1213,9 +1213,10 @@ def _build_tools(allow_write, ctx=None):
         tools["register_asset"] = (_tool_register,
                                    "写:登记外部文件引用(不复制);args: path, tags?, description?")
         tools["deliver"] = (_tool_deliver,
-                            "写:把素材包(manifest)/指定 id 导出为下游交付变体(转码/区间裁剪/"
-                            "格式归一);只新建文件不改资产;args: manifest?, ids?, confirm(必须 true),"
-                            " fmt?, res?(720/1080/0), clips?{id:[s,e]}, out_dir?, copy_only?, overwrite?")
+                            "写:把素材包(manifest)/指定 id 导出为下游交付变体(视频类转码/区间裁剪/"
+                            "格式归一;非视频类按原样复制);只新建文件不改资产;args: manifest?, ids?,"
+                            " confirm(必须 true), fmt?, res?(720/1080/0), clips?{id:[s,e]},"
+                            " out_dir?, copy_only?, overwrite?")
     # 给写工具注入 ctx(携带最近检索到的 last_id,用于 id 兜底)
     if ctx is not None:
         for name in ("update_tags",):

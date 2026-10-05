@@ -118,6 +118,32 @@ def test_deliver_package_confirm_writes():
         _reset()
 
 
+def test_deliver_package_non_video_copies_instead_of_transcode():
+    """非视频类(docs/subs/audio/images)按原样复制交付,保留原扩展名,不调 ffmpeg。
+
+    实例教训:对 .srt/.ass 硬转 mp4 必然失败(ffmpeg 无法把字幕当视频编码)。"""
+    tmp = tempfile.mkdtemp()
+    src = os.path.join(tmp, "note.md")
+    with open(src, "w", encoding="utf-8") as f:
+        f.write("# hi\n")
+    core.ffmpeg_path = lambda: _FAKE_EXE
+    core.get_material = lambda mid: {"id": mid, "kind": "docs", "name": "note.md",
+                                     "location": "external", "external_path": src}
+    try:
+        r = core.deliver_package(ids=["d1"], out_dir=os.path.join(tmp, "out"),
+                                 confirm=True, fmt="mp4")
+        assert r["dry_run"] is False
+        assert len(r["written"]) == 1, r
+        assert r["written"][0]["status"] == "copied", r
+        dst = r["written"][0]["dst"]
+        assert dst.endswith(".md"), dst          # 保留原扩展名,不强行转 .mp4
+        assert os.path.exists(dst)
+        assert r["plan"][0]["mode"] == "copy"    # 非视频走复制而非转码
+    finally:
+        _reset()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_deliver_package_missing_id():
     core.ffmpeg_path = lambda: _FAKE_EXE
     core.get_material = lambda mid: None

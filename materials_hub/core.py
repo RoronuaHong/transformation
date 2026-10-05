@@ -2582,6 +2582,10 @@ def deliver_package(manifest_path=None, ids=None, *, out_dir=None,
       clips: 可选区间裁剪 {id: (start, end)}(秒)
       copy_only: True=流拷贝不重编码(仅 remux;res 忽略;clip 仍走重编码)
       overwrite: 目标已存在是否覆盖(否则跳过并标 skipped)
+
+    交付策略按 kind 分流:**视频类**(videos/silent/anim)走 ffmpeg 转码/裁剪;
+    **非视频类**(docs/subs/audio/images)按原样复制、保留原扩展名,不做转码
+    (实例教训:对 .srt/.ass 硬转 mp4 必然失败)。
     Returns: dict(dry_run, out_dir, plan[], written[], skipped[], errors[])
     """
     target_ids = []
@@ -2628,11 +2632,21 @@ def deliver_package(manifest_path=None, ids=None, *, out_dir=None,
             continue
         clip = (clips or {}).get(mid)
         nm = re.sub(r"\W+", "_", (m.get("name") or mid))[:40].strip("_") or mid
-        dst = os.path.join(out_dir, "%s_%s.%s" % (mid, nm, fmt))
-        cmd = _build_deliver_cmd(exe, src, dst, fmt=fmt, res=res,
-                                 clip=clip, copy_only=copy_only)
+        # 非视频类(文档/字幕/音频/图片)不强行转码:按原样复制交付并保留原扩展名。
+        # 实例教训:对 .srt/.ass 硬转 mp4 必然失败(ffmpeg 无法把字幕当视频编码)。
+        video_like = m.get("kind") in VIDEO_LIKE_KINDS
+        if video_like:
+            dst = os.path.join(out_dir, "%s_%s.%s" % (mid, nm, fmt))
+            cmd = _build_deliver_cmd(exe, src, dst, fmt=fmt, res=res,
+                                     clip=clip, copy_only=copy_only)
+        else:
+            ext = os.path.splitext(src)[1].lstrip(".") or "bin"
+            dst = os.path.join(out_dir, "%s_%s.%s" % (mid, nm, ext))
+            cmd = ["copy", src, dst]
         entry = {"id": mid, "src": src, "dst": dst, "cmd": cmd,
-                 "clip": list(clip) if clip else None, "status": "planned"}
+                 "clip": list(clip) if clip else None,
+                 "mode": "transcode" if video_like else "copy",
+                 "status": "planned"}
         plan.append(entry)
         if not confirm:
             continue
@@ -2640,11 +2654,21 @@ def deliver_package(manifest_path=None, ids=None, *, out_dir=None,
             skipped.append({"id": mid, "dst": dst, "status": "exists"})
             entry["status"] = "skipped_exists"
             continue
+        os.makedirs(out_dir, exist_ok=True)
+        if not video_like:
+            try:
+                shutil.copy2(src, dst)
+                written.append({"id": mid, "dst": dst, "status": "copied"})
+                entry["status"] = "copied"
+            except Exception as e:  # noqa: BLE001
+                errors.append({"id": mid, "status": "copy_error",
+                               "detail": str(e)[:200]})
+                entry["status"] = "copy_error"
+            continue
         if exe is None:
             errors.append({"id": mid, "status": "no_ffmpeg"})
             entry["status"] = "no_ffmpeg"
             continue
-        os.makedirs(out_dir, exist_ok=True)
         flags = 0x08000000 if os.name == "nt" else 0
         try:
             p = subprocess.run(cmd, stdout=subprocess.DEVNULL,

@@ -158,4 +158,4 @@ python bridge_subtitle.py --state                    # 查看上次同步时间/
 - `python bridge_subtitle.py --limit 20` 试登记 20 个,`python cli.py list` 查看标签。
 - 启动 `python server.py`,面板按 `type:benchmark` / `job:BV1aDb56iEvu` 筛选并预览。
 - **实例闭环(已实测)**:把某个真实产物临时改名 → `/api/broken` 与 `/api/health` 立即反映 →
-  `POST /api/prune` 清理 → 恢复文件 → 重跑 bridge 重新登记,全程索引条数回到 344、`ok:true`。
+  `POST /api/prune` 清理 → 恢复文件 → 重跑 bridge 重新登记,全程索引条数回到 23、`ok:true`。

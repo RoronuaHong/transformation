@@ -198,9 +198,9 @@ python bridge_subtitle.py --thumbs --prune               # 推荐:一次跑完 �
 ```
 - **幂等**:重复运行会跳过已登记(同 sha256)的素材。
 - **重做**:想清空重建,删 `index/hub.db` 后重跑 `python bridge_subtitle.py`(仅重建外部引用;`materials/` 下的内部素材需再 `python cli.py scan`)。
-- **当前状态**(最近一次全量):共 **344** 条,其中 **341** 条为外部引用 subtitle_pipeline;
-  按 kind:videos 83 / images 157 / docs 85 / subs 16 / audio 3;
-  按 type:render 240 / notes 30 / subs 16 / media 23 / benchmark 18 / test 4。
+- **当前状态**(2026-10-05 实测):共 **23** 条,其中 **16** 条为外部引用、7 条内部素材(外部引用 0 项失效);
+  按 kind:videos 4 / images 2 / audio 2 / silent 1 / docs 10 / subs 2 / anim 1 / other 1。
+  *(历史:曾全量登记 344 条 / 341 条外部引用 subtitle_pipeline;该语料期已过,现索引按上述 23 条。)*
 - **定时 / 流水线触发**:可在 batch 跑完后定时执行 bridge;进阶可在 subtitle_pipeline 收尾调用 `--scope batch`,或经其 `vitual_mcp` 推送(MCP 阶段二)。
 
 ## Python API(core)
@@ -295,7 +295,9 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 3. 稠密排名与词法排名用 **RRF 融合**(词法权重默认 1.0),因此**语义只负责补召回,不会埋掉精确关键词命中**;
 4. 结果集 = 稠密相似度过线(默认 0.25)∪ 词法命中的,再按融合分排序。
 
-**实测(本库 344 条真实素材;历史演进在 9 宽查询上测,2026-09-28 起权威口径为 16 查询人工标注 ground truth)**
+**实测(历史演进在 9 宽查询上测,2026-09-28 起权威口径为 16 查询人工标注 ground truth)**
+
+> ⚠️ **语料现状(2026-10-05 实测)**：索引现为 **23 条**（`hub.db` 派生，可重建），而 `eval_ground_truth.json` 引用的 **233 个素材 id 现存 0 个**，故 `python eval_search.py` 当前 16 查询全为 **0.00**——**评估门禁暂不可复现**。下表为 **344 条语料时期的历史归档值**，恢复需重建索引（重跑 bridge 登记外部引用）或用当前语料重新标注 GT。
 
 | 阶段 | P@5 | R@20 |
 |---|---|---|
@@ -304,7 +306,8 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 | + 长词松匹配 | 0.53 | 0.63 |
 | + 语义混合 | 0.71 | 0.71 |
 | + 同义词补齐 & 中文 bigram 降权(9 宽查询) | 0.96 | 0.69 |
-| **权威口径:16 查询 human-ground-truth(2026-09-28)** | **0.86** | **0.82** |
+| **权威口径:16 查询 human-ground-truth(2026-09-28,344 条语料)** | **0.86** | **0.82** |
+| **当前(2026-10-05,23 条语料)** | **0.00** | **0.00**(门禁不可复现,见上方告警) |
 
 > 16 查询口径含 7 组窄查询(相关集 1–6 条),并新增 **MRR=1.00 / NDCG@10≈0.98**:全部查询 top1 必对、
 > 窄查询召回全进 top20。为什么权威口径 P@5 反而比 0.96 低?——9 宽查询相关集最大 87 条,指标饱和虚高;
@@ -419,7 +422,7 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 - **怎么判断索引指向的文件都还在?** `GET /api/health` 的 `ok` 字段即答案(或看状态栏是否显示「引用完整」)。
 - **能用自然语言搜吗?** 能。默认走「词法(同义词+松匹配)+ 语义」混合排序,问句不必含连续子串;精确过滤用 `type:` / `job:` / `lang:` 标签。
 - **语义检索要不要额外装东西?** 不用装 Python 包。只要本机 ollama 里有 embedding 模型(`ollama pull nomic-embed-text`)即可,全离线;没有就自动退回词法。
-- **为什么中文查询要靠同义词表?** 因为手边能离线拿到的 embedding 模型(nomic-embed-text/bge-m3 建库前)是英文单语的,而本库元数据也是英文;词表把中文意图映射到语料词汇。现状(2026-09-28,16 查询人工标注):**P@5=0.86 / R@20=0.82 / MRR=1.00 / NDCG@10≈0.98**,`python eval_search.py` 可复测。注意:英文单语模型下语义检索的边际增益≈0(16 查询实测 lift≈0),换多语 chat/embedding 组合或 cross-encoder 重排(`VITUAL_RERANK_MODEL`)才可能再抬;重排启用前必须过评估门禁——内置 `lexical` 弱基线实测会把 P@5 从 0.86 打到 0.31。
+- **为什么中文查询要靠同义词表?** 因为手边能离线拿到的 embedding 模型(nomic-embed-text/bge-m3 建库前)是英文单语的,而本库元数据也是英文;词表把中文意图映射到语料词汇。历史(2026-09-28,16 查询人工标注,344 条语料):**P@5=0.86 / R@20=0.82 / MRR=1.00 / NDCG@10≈0.98**。**2026-10-05 复测告警**:当前索引仅 23 条、GT 引用的 233 个 id 现存 0 个,`python eval_search.py` 实测 16 查询全 0.00,门禁暂不可复现(恢复见上节告警)。注意:英文单语模型下语义检索的边际增益≈0(16 查询实测 lift≈0),换多语 chat/embedding 组合或 cross-encoder 重排(`VITUAL_RERANK_MODEL`)才可能再抬;重排启用前必须过评估门禁——内置 `lexical` 弱基线实测会把 P@5 从 0.86 打到 0.31。
 - **检索结果变了?** 若新增了大量素材,记得 `python cli.py embed`(或面板按钮 / `bridge --embed`)刷新语义索引;未建向量的条目仍走词法,不会丢。
 - **视频封面是怎么来的?** 服务端用自动发现的 ffmpeg 抽第 1 秒的帧,存 `index/thumbs/<id>.jpg` 复用;本机确实没有 ffmpeg 时,前端用 `<video> + canvas` 截帧兜底。两种模式都只对进入视口的卡片生效。
 - **为什么有几个视频显示「封面不可用」?** 那些源文件本身损坏(典型报错 `moov atom not found`,多为上游写入中断的 mp4)。抽帧失败会留 `.fail` 标记不再重试;**源文件修好后**用 `POST /api/thumbs {"purge":true}` 清标记再生成即可。
@@ -457,7 +460,7 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 `agent_feedback(action,accepted[,note?,by?])` 记录 Agent 动作采纳/否决(学习闭环,追加写) /
 `learning_summary(limit?)` 汇总反馈学习日志(各动作采纳率) /
 `assemble_package(goal,kind?,scope?,limit?,queries?)` 目标→素材包组装(多智能体 Librarian→Critic→Executor 角色链;只把 manifest 写到 agent_workspace/packages/,只读资产) /
-`deliver_package(manifest?,ids?,fmt?,res?,clips?,out_dir?,copy_only?,overwrite?,confirm(必须 true))` 把素材包/指定 id 导出为下游交付变体(转码/区间裁剪/格式归一;只新建文件、绝不改动资产本体;写需 confirm) /
+`deliver_package(manifest?,ids?,fmt?,res?,clips?,out_dir?,copy_only?,overwrite?,confirm(必须 true))` 把素材包/指定 id 导出为下游交付变体(视频类转码/区间裁剪/格式归一,**非视频类按原样复制保留原扩展名**;只新建文件、绝不改动资产本体;写需 confirm) /
 `update_tags(id,tags,confirm[,remove])` 与 `register_asset(path,...,confirm)` **写工具(强制 `confirm=true`)**；`update_tags` 为**合并语义**(只增不删，系统面标签永不动，删须 `remove`)。
 Deep Agent 类(另见下节):`agent_run` / `agent_status` / `agent_cancel` / `agent_list` / `agent_resume`。
 
@@ -493,7 +496,7 @@ LLM 先把任务拆成待办,再逐步调用素材工具完成,长观察落盘�
 - **MCP 工具(agent 类 5 个:agent_run / agent_status / agent_cancel / agent_list / agent_resume;完整 29 个 MCP 工具见上方「MCP 接入」)**:`agent_run(task, confirm?, max_steps?)` 默认只读,写任务需 `confirm=true`;`agent_status(task_id)` 查待办/步骤/总结;`agent_cancel(task_id)` **协作式取消**——写 `cancel.flag`,主循环下一步边界终止,已执行进度保留落盘(长任务 1–3 分钟不必干等);`agent_list(limit?)` 盘点历史任务(状态/步数/创建时间);`agent_resume(task_id, extra_steps?)` **续跑步数耗尽的任务**——复用待办/历史步骤/滚动摘要,接续步号不重做(真实库历史任务约半数 max_steps_reached,7B 常来不及 finish)。
 - **CLI**:`python cli.py agent --task "..." [--write] [--max-steps 12]` / `--status <id>` / `--cancel <id>` / `--resume <id> [--extra-steps 6]` / `--list` / `--cleanup [--max-age 72]` / `--file task.txt`(中文规避终端 GBK)。
 - **为什么是"路线 C"**:官方 `deepagents` 库依赖 langchain/langgraph,与零依赖哲学冲突;故编排自实现、协议走既有 MCP——未来可无缝切官方库或接入 CodeBuddy/Claude 等宿主。
-- **离线测试**:`tests/test_agent.py`(单元 + mock LLM 脚本回放)、`tests/test_agent_skills.py`(MCP 工具/资源/技能冒烟)、`tests/test_agent_eval.py`(真实任务模板回归,断言无编造 id/引用合法/记忆沉淀/长任务压缩)、`tests/test_deliver.py`(按需交付 dry-run/confirm/缺失 id/命令构造/技能路由 + 一键出片串联);全套件 `pytest` 当前 **120 passed**(均 mock 驱动,不连 ollama)。
+- **离线测试**:`tests/test_agent.py`(单元 + mock LLM 脚本回放)、`tests/test_agent_skills.py`(MCP 工具/资源/技能冒烟)、`tests/test_agent_eval.py`(真实任务模板回归,断言无编造 id/引用合法/记忆沉淀/长任务压缩)、`tests/test_deliver.py`(按需交付 dry-run/confirm/缺失 id/命令构造/技能路由 + 一键出片串联);全套件 `pytest` 当前 **121 passed**(均 mock 驱动,不连 ollama)。
 
 ### 入口与调用链(2026-09-30 补)
 
