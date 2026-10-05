@@ -154,6 +154,8 @@ def main():
                     help="--apply 时一并纳入 review(宽面标签)候选")
     ap.add_argument("--include-low", action="store_true",
                     help="--apply 时一并纳入 low 置信(文件名词元)候选")
+    ap.add_argument("--proposed", default=PROPOSED_FILE,
+                    help="--apply 时提案输出路径(默认 eval_ground_truth.proposed.json)")
     args = ap.parse_args()
 
     if not os.path.exists(GT_FILE):
@@ -208,9 +210,9 @@ def main():
                     if c["id"] not in merged[q]:
                         merged[q].append(c["id"])
                         added += 1
-        with open(PROPOSED_FILE, "w", encoding="utf-8") as f:
+        with open(args.proposed, "w", encoding="utf-8") as f:
             json.dump(merged, f, ensure_ascii=False, indent=2)
-        print("已写出合并提案(未覆盖原 GT): %s (新增 %d 条)" % (PROPOSED_FILE, added))
+        print("已写出合并提案(未覆盖原 GT): %s (新增 %d 条)" % (args.proposed, added))
     return 0
 
 

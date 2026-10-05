@@ -10,8 +10,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import eval_search as ev  # noqa: E402
 
 
+def _base():
+    """从 GATE_BASELINE 派生,避免基线调整时测试写死数字而失效。"""
+    b = ev.GATE_BASELINE
+    return b["p5"], b["r20"], b["mrr"], b["ndcg"]
+
+
 def test_gate_passes_at_baseline():
-    ok, details = ev.check_gate(0.60, 0.78, 0.75, 0.75)
+    ok, details = ev.check_gate(*_base())
     assert ok is True
     assert len(details) == 4
     assert all(d["pass"] for d in details)
@@ -19,21 +25,24 @@ def test_gate_passes_at_baseline():
 
 
 def test_gate_fails_when_p5_drops():
-    ok, details = ev.check_gate(0.40, 0.78, 0.75, 0.75)
+    p5, r20, mrr, ndcg = _base()
+    ok, details = ev.check_gate(p5 - 0.20, r20, mrr, ndcg)
     assert ok is False
-    p5 = next(d for d in details if d["metric"] == "p5")
-    assert p5["pass"] is False
-    assert p5["delta"] < 0
+    p5_row = next(d for d in details if d["metric"] == "p5")
+    assert p5_row["pass"] is False
+    assert p5_row["delta"] < 0
     # 其余指标仍应通过
     assert all(d["pass"] for d in details if d["metric"] != "p5")
 
 
 def test_gate_tolerance_allows_minor_noise():
-    # 低于基线但在容差(0.02)内 → 仍通过
-    ok, _ = ev.check_gate(0.59, 0.78, 0.75, 0.75)
+    p5, r20, mrr, ndcg = _base()
+    tol = ev.GATE_TOL
+    # 低于基线但在容差内 → 仍通过
+    ok, _ = ev.check_gate(p5 - tol / 2.0, r20, mrr, ndcg)
     assert ok is True
     # 超出容差 → 失败
-    ok2, _ = ev.check_gate(0.57, 0.78, 0.75, 0.75)
+    ok2, _ = ev.check_gate(p5 - tol * 2.0, r20, mrr, ndcg)
     assert ok2 is False
 
 

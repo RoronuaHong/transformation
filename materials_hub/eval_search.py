@@ -70,24 +70,27 @@ def heuristic_rel(q, rows):
     return rel
 
 
-def load_ground_truth():
-    if os.path.exists(GT_FILE):
+def load_ground_truth(path=None):
+    p = path or GT_FILE
+    if os.path.exists(p):
         try:
-            with open(GT_FILE, encoding="utf-8") as f:
+            with open(p, encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
-            print(f"[warn] 读取 {GT_FILE} 失败: {e}")
+            print(f"[warn] 读取 {p} 失败: {e}")
     return None
 
 
 # ---------------------------------------------------------------------------
-# 回归门禁基线(2026-10-06 实测)
-#   语料:384 条(bridge 重建后)· oracle:16 查询 human ground-truth · mode:lexical
-#   低于 344 语料期的 0.86 系语料增长 + GT 按旧语料标注所致,**非检索代码回归**;
-#   要抬回 0.86 量级需按当前语料重标注/扩充 GT(见《最佳实践》§15.4)。
-#   门禁用途:任何检索/同义词改动跑 `--gate`,均值掉出基线即失败(退出码 1)。
+# 回归门禁基线(2026-10-06 实测,已含 GT 漏标补全)
+#   语料:384 条(bridge 重建后)· oracle:16 查询 human ground-truth(427 条标注)· mode:lexical
+#   沿革:344 语料期为 0.86 → 重建后 GT 漏标致 0.60 → 按窄面标签补全 GT(374→427)后 **0.71**。
+#   补全方案经 A/B 实测选定:high-only(+53)零回退且 MRR 0.75→0.85;
+#   全量(+640,含宽面/词元弱证据)虽 P@5 0.80 但 R@20 反降至 0.73,且标注过宽会稀释区分度,
+#   故仅作备选(`eval_ground_truth.all.json`),未采纳。详见《最佳实践》§15.4。
+#   门禁用途:任何检索/同义词改动跑 `--gate`,均值掉出基线(容差 0.02)即失败(退出码 1)。
 # ---------------------------------------------------------------------------
-GATE_BASELINE = {"p5": 0.60, "r20": 0.78, "mrr": 0.75, "ndcg": 0.75}
+GATE_BASELINE = {"p5": 0.71, "r20": 0.78, "mrr": 0.85, "ndcg": 0.84}
 GATE_TOL = 0.02          # 容差:允许浮点/排序稳定性带来的微小波动
 GATE_METRICS = ("p5", "r20", "mrr", "ndcg")
 
@@ -160,9 +163,12 @@ def main():
     ap.add_argument("--gate", action="store_true",
                     help="回归门禁:均值低于基线(含容差)则退出码 1。"
                          "基线以 --mode lexical 测得,建议配合 --mode lexical 使用")
+    ap.add_argument("--gt", default=None,
+                    help="指定 ground-truth JSON(默认 eval_ground_truth.json);"
+                         "用于 A/B 不同的 GT 标注方案")
     args = ap.parse_args()
 
-    gt = load_ground_truth()
+    gt = load_ground_truth(args.gt)
     oracle = "human-ground-truth" if gt else "heuristic(synonym-expansion)"
 
     def _show(mode):
