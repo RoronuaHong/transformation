@@ -456,10 +456,10 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 - **外部文件被上游删了/搬走了怎么办?** 状态栏会红字提示「失效 N」,点开弹窗可一键清理;命令行用 `python bridge_subtitle.py --prune`(加 `--dry-run` 只看不删)。清理只删索引记录,**不会删任何磁盘文件**。
 - **怎么判断索引指向的文件都还在?** `GET /api/health` 的 `ok` 字段即答案(或看状态栏是否显示「引用完整」)。
 - **能用自然语言搜吗?** 能。默认走「词法(同义词+松匹配)+ 语义」混合排序,问句不必含连续子串;精确过滤用 `type:` / `job:` / `lang:` 标签。
-- **语义检索要不要额外装东西?** 不用装 Python 包。只要本机 ollama 里有 embedding 模型(`ollama pull nomic-embed-text`)即可,全离线;没有就自动退回词法。
+- **语义检索要不要额外装东西?** 不用装 Python 包。默认多语模型 `bge-m3`(`ollama pull bge-m3`,优先);也可 `nomic-embed-text`,全离线;没有就自动退回词法。
 - **为什么中文查询要靠同义词表?** 默认语义模型已换多语 `bge-m3`(2026-10-06 纳入,中文进多语空间),但窄面召回仍由同义词表主导(实测 auto lift 仅 +0.01,因 16 查询 GT 已被 lexical+同义词覆盖);词表把中文意图映射到语料真实英文词汇仍是主路径。历史(2026-09-28,16 查询人工标注,344 条语料):**P@5=0.86 / R@20=0.82 / MRR=1.00 / NDCG@10≈0.98**。**2026-10-06 复测**:已重建索引至 384 条、GT 233 个 id 100% 命中,门禁恢复可复现;并按窄面标签补全 GT 漏标(374→427 条)后当前实测(lexical)**P@5 0.71 / R@20 0.78 / MRR 0.85 / NDCG@10 0.84**(补全前 0.60/0.78/0.75/0.75;仍低于 344 语料期的 0.86 是因语料结构变化,非代码回归)。语义向量已重建(**覆盖率 384/384 = 1.0**,`python cli.py embed`),`auto` 混合模式不再回退纯词法;
 但在当前语料+GT 下实测 **lift(auto−lexical)仅 P@5 +0.01 / MRR +0.01**(auto 0.72 vs lexical 0.71)——
-再次印证「英文单语 embedding 对中文查询无实质边际增益」,要真正抬升需多语 embedding 或真 cross-encoder 重排。注意:英文单语模型下语义检索的边际增益≈0(16 查询实测 lift≈0),换多语 chat/embedding 组合或 cross-encoder 重排(`VITUAL_RERANK_MODEL`)才可能再抬;重排启用前必须过评估门禁——内置 `lexical` 弱基线实测会把 P@5 从 0.86 打到 0.31。
+印证「语义在此小语料(384 条,多 anime/测试片靠近质心)下边际增益≈0」:bge-m3 多语向量已正确接入(2026-10-06 修前缀——改用官方 `Represent this passage/sentence...` 检索指令,此前错套 nomic 的 `search_document:`/`search_query:`),但跨语英文查询密集余弦仍仅 0.15–0.32、相关文档被通用片淹没,故**扩 GT 显多语增益不可行**;真 cross-encoder 重排(`VITUAL_RERANK_MODEL`)才可能再抬——但本机 ollama 0.34.0 不暴露 `/api/rerank`,暂不可行。重排启用前必须过评估门禁——内置 `lexical` 弱基线实测会把 P@5 从 0.86 打到 0.31。
 - **检索结果变了?** 若新增了大量素材,记得 `python cli.py embed`(或面板按钮 / `bridge --embed`)刷新语义索引;未建向量的条目仍走词法,不会丢。
 - **视频封面是怎么来的?** 服务端用自动发现的 ffmpeg 抽第 1 秒的帧,存 `index/thumbs/<id>.jpg` 复用;本机确实没有 ffmpeg 时,前端用 `<video> + canvas` 截帧兜底。两种模式都只对进入视口的卡片生效。
 - **为什么有几个视频显示「封面不可用」?** 那些源文件本身损坏(典型报错 `moov atom not found`,多为上游写入中断的 mp4)。抽帧失败会留 `.fail` 标记不再重试;**源文件修好后**用 `POST /api/thumbs {"purge":true}` 清标记再生成即可。

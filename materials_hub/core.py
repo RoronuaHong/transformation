@@ -1476,6 +1476,22 @@ def embed_texts(texts, model=None):
     return out if len(out) == len(texts) else None
 
 
+def _embed_prefixes(model=None):
+    """按 embedding 模型选指令前缀( document / query )。
+
+    bge-m3 等多语模型用官方 retrieval 指令(否则稠密检索质量严重下滑——
+    实测 bge-m3 套 nomic 的 `search_document:`/`search_query:` 前缀时跨语召回很弱,
+    相关文档被靠近质心的通用片压住);nomic-embed-text 等英文单语模型用原约定。
+    前缀必须文档端与查询端一致,否则余弦不可比。
+    """
+    if model is None:
+        model = embed_probe().get("model", "")
+    if "bge" in (model or "").lower():
+        return ("Represent this passage for retrieval: ",
+                "Represent this sentence for searching relevant passages: ")
+    return ("search_document: ", "search_query: ")
+
+
 def doc_text(m):
     """把一条素材拼成用于 embedding 的文档文本。
 
@@ -1485,7 +1501,8 @@ def doc_text(m):
     2. **文件名/目录名按下划线连字符拆词** —— `clean_lama_writing.mp4` →
        `clean lama writing`,模型才能对上 lama/clean 这些词。
     3. **外部引用的目录段含阶段语义**(dehardsub/deblur/mosaic/probe),取末几段。
-    4. nomic-embed-text 要求文档加 `search_document:` 前缀(查询用 `search_query:`)。
+    4. **指令前缀按模型自适应**(见 `_embed_prefixes`):bge-m3 用官方 retrieval 指令,
+       nomic-embed-text 用英文单语约定(`search_document:`/`search_query:`)。
     """
     stem, ext = os.path.splitext(m.get("name", ""))
     words = re.sub(r"[_\-.]+", " ", stem)
@@ -1496,7 +1513,8 @@ def doc_text(m):
     stage = re.sub(r"[_\-.]+", " ", " ".join(dirs[-4:]))   # 同样避开工作区前缀(见 _path_tokens)
     tags = [t.strip() for t in (m.get("tags") or "").split(",") if t.strip() and t.strip() != "sp"]
     parts = [words, " ".join(tags), m.get("description", ""), m.get("kind", ""), stage]
-    return "search_document: " + " | ".join(x for x in parts if x)
+    doc_p, _ = _embed_prefixes()
+    return doc_p + " | ".join(x for x in parts if x)
 
 
 def _text_sig(t):
@@ -1609,7 +1627,8 @@ def semantic_rank(q, base_rows, lexical_rows=None):
     vecs = load_vectors([m["id"] for m in base_rows], info["model"])
     if not vecs:
         return (lexical_rows if lexical_rows is not None else base_rows), False
-    qv = embed_texts(["search_query: " + q])
+    _, q_p = _embed_prefixes(info["model"])
+    qv = embed_texts([q_p + q])
     if not qv:
         return (lexical_rows if lexical_rows is not None else base_rows), False
 
