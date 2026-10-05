@@ -160,7 +160,8 @@ python cli.py embed                # 增量构建语义检索索引
 python cli.py embed --force        # 全量重建;--status 只看状态
 python cli.py search --file q.txt  # 中文查询建议走文件(Windows 终端 GBK 代码页会弄坏命令行中文)
 python cli.py search --stdin       # 或从标准输入读查询
-python eval_search.py --baseline  # 检索质量评估(16 查询人工标注 ground truth,P@5/R@20/MRR/NDCG@10,lexical↔auto 对比,回归门禁)
+python eval_search.py --baseline  # 检索质量评估(16 查询人工标注 ground truth,P@5/R@20/MRR/NDCG@10,lexical↔auto 对比)
+python eval_search.py --mode lexical --gate  # 回归门禁:均值掉出基线(容差 0.02)→ GATE: FAIL 且退出码 1
 python cli.py ocr <id> [--force]  # 视频画面 OCR(离线 rapidocr,文本入检索;--all 批量)
 python cli.py facets [--limit N] [--link-clips|--link-parents] [--scrub]   # 补 DAM 面标签 + 回填 parent:/去旧别名
 python cli.py auto [--limit N] [--autotag]   # 自动处理链:封面→OCR→镜头→pHash→(打标)→语义索引(幂等)
@@ -312,6 +313,10 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 > 16 查询口径含 7 组窄查询(相关集 1–6 条),并新增 **MRR=1.00 / NDCG@10≈0.98**:全部查询 top1 必对、
 > 窄查询召回全进 top20。为什么权威口径 P@5 反而比 0.96 低?——9 宽查询相关集最大 87 条,指标饱和虚高;
 > 窄查询才对"无关条目混进 top5"敏感。详见 `eval_search.py` 与《最佳实践》§15.4。
+>
+> **门禁基线(2026-10-06 实测,384 条语料 + 16 查询 human GT,mode=lexical)**:
+> P@5 0.60 / R@20 0.78 / MRR 0.75 / NDCG@10 0.75(容差 0.02)。
+> 任何检索/同义词改动请跑 `python eval_search.py --mode lexical --gate` 防回归。
 
 个别查询收益更明显:「把模糊画面变清晰」0.20 → 0.80(P@5)、「按时间切的片段」0.00 → 0.16(R@20)。
 
@@ -496,7 +501,7 @@ LLM 先把任务拆成待办,再逐步调用素材工具完成,长观察落盘�
 - **MCP 工具(agent 类 5 个:agent_run / agent_status / agent_cancel / agent_list / agent_resume;完整 29 个 MCP 工具见上方「MCP 接入」)**:`agent_run(task, confirm?, max_steps?)` 默认只读,写任务需 `confirm=true`;`agent_status(task_id)` 查待办/步骤/总结;`agent_cancel(task_id)` **协作式取消**——写 `cancel.flag`,主循环下一步边界终止,已执行进度保留落盘(长任务 1–3 分钟不必干等);`agent_list(limit?)` 盘点历史任务(状态/步数/创建时间);`agent_resume(task_id, extra_steps?)` **续跑步数耗尽的任务**——复用待办/历史步骤/滚动摘要,接续步号不重做(真实库历史任务约半数 max_steps_reached,7B 常来不及 finish)。
 - **CLI**:`python cli.py agent --task "..." [--write] [--max-steps 12]` / `--status <id>` / `--cancel <id>` / `--resume <id> [--extra-steps 6]` / `--list` / `--cleanup [--max-age 72]` / `--file task.txt`(中文规避终端 GBK)。
 - **为什么是"路线 C"**:官方 `deepagents` 库依赖 langchain/langgraph,与零依赖哲学冲突;故编排自实现、协议走既有 MCP——未来可无缝切官方库或接入 CodeBuddy/Claude 等宿主。
-- **离线测试**:`tests/test_agent.py`(单元 + mock LLM 脚本回放)、`tests/test_agent_skills.py`(MCP 工具/资源/技能冒烟)、`tests/test_agent_eval.py`(真实任务模板回归,断言无编造 id/引用合法/记忆沉淀/长任务压缩)、`tests/test_deliver.py`(按需交付 dry-run/confirm/缺失 id/命令构造/技能路由 + 一键出片串联);全套件 `pytest` 当前 **121 passed**(均 mock 驱动,不连 ollama)。
+- **离线测试**:`tests/test_agent.py`(单元 + mock LLM 脚本回放)、`tests/test_agent_skills.py`(MCP 工具/资源/技能冒烟)、`tests/test_agent_eval.py`(真实任务模板回归,断言无编造 id/引用合法/记忆沉淀/长任务压缩)、`tests/test_deliver.py`(按需交付 dry-run/confirm/缺失 id/命令构造/技能路由 + 一键出片串联);全套件 `pytest` 当前 **126 passed**(均 mock 驱动,不连 ollama;含 `tests/test_eval_gate.py` 5 例门禁纯函数测试)。
 
 ### 入口与调用链(2026-09-30 补)
 
