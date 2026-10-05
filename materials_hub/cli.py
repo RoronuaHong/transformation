@@ -32,6 +32,10 @@
   python cli.py auto [--limit N] [--autotag]  一条命令跑完自动处理链:封面→OCR→镜头索引→pHash→(可选)打标→语义索引(幂等)
   python cli.py facets [--limit N] [--link-clips|--link-parents]  补 DAM 面标签 + 回填 parent:
   python cli.py facets [--scrub]  去掉与 parent: 重复的旧 from: 别名(库内治理)
+  python cli.py govern [--limit N]       全库治理/合规扫描(占位/缺描述/未分类/无标签)
+  python cli.py readiness --job <id>    某 job 分发渠道就绪度(封面/镜头/clip 父链/标签齐备)
+  python cli.py feedback --action X [--reject] [--note Y]   记录 Agent 动作采纳/否决(学习闭环)
+  python cli.py learning [--limit N]     汇总反馈学习日志(各动作采纳率)
   python cli.py agent --task "..."      Deep Agent 多步任务(LLM 拆待办→逐步执行,见 agent.py)
   python cli.py agent --task "..." --write  允许 agent 写(标签/登记;默认只读)
   python cli.py agent --status <id>     查看某次 agent 任务的状态与轨迹
@@ -57,6 +61,9 @@ from core import (
     build_image_embeddings, image_embed_status,
     auto_process_all, pending_processing,
     apply_media_facet_tags, link_relation_parents, scrub_deprecated_from_tags,
+)
+from core import (
+    governance_report, distribution_readiness, log_feedback, learning_summary,
 )
 
 
@@ -325,6 +332,30 @@ def main():
         if "--scrub" in args:
             s = scrub_deprecated_from_tags(limit=limit)
             print(f"scrub-from: scanned={s.get('scanned')} cleaned={s.get('cleaned')}")
+
+    elif cmd == "govern":
+        import json as _j
+        r = governance_report(limit=int(args[args.index("--limit") + 1]) if "--limit" in args else 50)
+        print(_j.dumps(r, ensure_ascii=False, indent=2))
+
+    elif cmd == "readiness":
+        import json as _j
+        jid = args[args.index("--job") + 1] if "--job" in args else ""
+        r = distribution_readiness(job_id=jid)
+        print(_j.dumps(r, ensure_ascii=False, indent=2))
+
+    elif cmd == "feedback":
+        import json as _j
+        action = args[args.index("--action") + 1] if "--action" in args else ""
+        accept = "--reject" not in args
+        note = args[args.index("--note") + 1] if "--note" in args else ""
+        r = log_feedback(action=action, accepted=accept, note=note)
+        print(_j.dumps(r, ensure_ascii=False))
+
+    elif cmd == "learning":
+        import json as _j
+        r = learning_summary(limit=int(args[args.index("--limit") + 1]) if "--limit" in args else 50)
+        print(_j.dumps(r, ensure_ascii=False, indent=2))
 
     elif cmd == "embed":
         st = embed_status()

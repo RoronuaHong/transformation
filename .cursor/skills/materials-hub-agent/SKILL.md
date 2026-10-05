@@ -1,6 +1,6 @@
 ---
 name: materials-hub-agent
-description: Materials hub Agent skills — missing covers, job checkup, near-dupes, image search, event-driven autoproc, master/shots/clip taxonomy. Use when the user asks about 素材中心 Agent、无封面、silent 补封面、job 体检、以图搜图、近重复、hub://job、MCP prompts, 原片切片分类, or materials_hub maintain.
+description: Materials hub Agent skills — missing covers, job checkup, near-dupes, image search, event-driven autoproc, master/shots/clip taxonomy. Use when the user asks about 素材中心 Agent、无封面、silent 补封面、job 体检、以图搜图、近重复、hub://job、MCP prompts, 原片切片分类, 治理合规, 分发就绪, Agent 学习闭环, or materials_hub maintain.
 ---
 
 # Materials Hub Agent skills
@@ -64,6 +64,26 @@ Deep Agent `maintain` already samples `near_dupe_clusters` / `near_dupe_pairs`.
 
 Backfill tags: `python cli.py facets --link-parents`（补 role:master + clip/组件 `parent:`）。
 
+## Skill F — 治理 / 合规盘点
+
+1. MCP `governance_report` **or** `python cli.py govern [--limit N]`。
+2. 检查四类治理风险:`placeholder`(占位/临时文件名)、`missing_desc`(无描述)、`missing_role`(视频类未分类为 master/clip/组件)、`untagged`(无语义标签且无 ai_tags)。
+3. 仅报告,不自动改。若用户授权,可结合 `facets --link-parents` / `autotag --rule --apply` 修复。
+   CLI: `python cli.py govern`。
+
+## Skill G — 分发渠道就绪度
+
+1. MCP `distribution_readiness` **or** `python cli.py readiness --job <id>`。
+2. 复用 `job_checkup`:`channel_ready` = 体检 ok 且 封面/镜头/clip 父链/标签 齐备;`blocking` 列出阻碍分发的项(命名空间化:`missing_thumbs:`/`clips_missing_parent:`/...)。
+3. 用于「某活动素材能不能发」「发给合作方前先体检」等场景。
+   CLI: `python cli.py readiness --job <id>`。
+
+## Skill H — Agent 反馈学习闭环
+
+1. 每次 Agent 动作(采纳/否决)调用 MCP `agent_feedback(action=..., accepted=...)` 或 `python cli.py feedback --action X [--reject] [--note Y]`(加 `--reject` 表示否决)。
+2. 汇总 `learning_summary` **or** `python cli.py learning [--limit N]` → 各动作采纳率 `rate` + 近期记录。
+3. 仅追加写本地 `.agent_feedback.jsonl`,不碰资产;驱动「越用越准」。
+
 ## 意图路由（先于规划）
 
 规则在 `agent._classify_turn`，7B 规划器之前。详见 `materials_hub/素材中心最佳实践与优化分析.md` §21。
@@ -76,6 +96,9 @@ Backfill tags: `python cli.py facets --link-parents`（补 role:master + clip/�
 | 有上文的「继续」 | 开放循环 |
 | 规划结果只是未请求的工具名 | 丢弃，改为追问 |
 | 技能 A–E / 上传视频 | 确定性工作流，见上文 |
+| 治理/合规/占位/未分类盘点 | 技能 F:`governance_report` |
+| 某 job 能否发布 / 分发就绪 | 技能 G:`distribution_readiness` |
+| 记录采纳/否决 / 看学习概览 | 技能 H:`agent_feedback` / `learning_summary` |
 | 裁剪且给出 id / 上传 / 起止秒 | 逻辑时间窗。点名片头、片尾、主戏只留该段。说导出也不在这里编码 |
 | 只说「裁剪」没有对象 | 追问 id 和起止秒 |
 | 还有未做完的待办就结束 | 进度按已完成条数，文案「部分完成」 |

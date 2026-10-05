@@ -3838,6 +3838,155 @@ def job_checkup(job_id):
     }
 
 
+# ───────────── Agentic DAM 补齐能力:治理 / 分发就绪 / 持续学习 ─────────────
+# 对应网上 Agentic DAM 最佳实践的 Governance / Distribution / Learning 三类缺口。
+
+_PLACEHOLDER_RE = re.compile(
+    r"(?i)(temp|tmp|草稿|占位|placeholder|draft|未命名|untitled|新建|copy|副本|\.bak|test_|_test)"
+)
+
+
+def governance_report(limit=50):
+    """全库治理/合规只读扫描(Agent「治理合规」技能用)。
+
+    检查:占位/临时文件、缺描述、未分类(无 role:/type:)、无语义标签且无机标。
+    返回每类问题与样本 id(各限 limit)。不含任何写操作。
+    """
+    issues = {"placeholder": [], "missing_desc": [],
+              "missing_role": [], "untagged": []}
+    scanned = 0
+    for m in all_materials():
+        scanned += 1
+        mid = m["id"]
+        name = (m.get("name") or "")
+        tags = _material_tag_set(m)
+        desc = (m.get("description") or "").strip()
+        ai_tags = (m.get("ai_tags") or "").strip()
+        if _PLACEHOLDER_RE.search(name):
+            issues["placeholder"].append(mid)
+        if not desc:
+            issues["missing_desc"].append(mid)
+        k = m.get("kind") or ""
+        if k in VIDEO_LIKE_KINDS and not (
+            any(t.startswith("role:") for t in tags)
+            or any(t.startswith("type:") for t in tags)
+        ):
+            issues["missing_role"].append(mid)
+        semantic = [t for t in tags
+                    if not (t.startswith("job:") or t.startswith("parent:")
+                            or t == k or t.startswith("kind:"))]
+        if not semantic and not ai_tags:
+            issues["untagged"].append(mid)
+    for key in issues:
+        issues[key] = issues[key][:limit]
+    return {
+        "scanned": scanned,
+        "issues": issues,
+        "counts": {k: len(v) for k, v in issues.items()},
+    }
+
+
+def distribution_readiness(job_id=""):
+    """某 job 的分发渠道就绪度评估(只读,复用 job_checkup)。
+
+    判定 channel_ready:体检 ok 且 封面/镜头/clip 父链/标签 齐备。
+    返回 blocking 清单(阻碍分发的项)与 checkup 摘要。
+    """
+    c = job_checkup(job_id)
+    if not c.get("ok"):
+        return {"job": job_id, "channel_ready": False,
+                "reason": c.get("error") or "job_checkup not ok",
+                "blocking": ["job_checkup_failed"], "checkup": c}
+    blocking = []
+    if c.get("missing_thumbs"):
+        blocking.append("missing_thumbs:" + ",".join(c["missing_thumbs"][:5]))
+    if c.get("missing_shots"):
+        blocking.append("missing_shots:" + ",".join(c["missing_shots"][:5]))
+    if c.get("clips_missing_parent"):
+        blocking.append("clips_missing_parent:" + ",".join(c["clips_missing_parent"][:5]))
+    if not c.get("master_ids"):
+        blocking.append("no_master")
+    return {
+        "job": job_id,
+        "channel_ready": not blocking,
+        "blocking": blocking,
+        "masters": len(c.get("master_ids", [])),
+        "checkup_summary": {
+            "kinds": c.get("kinds"),
+            "missing_thumbs": len(c.get("missing_thumbs", [])),
+            "missing_shots": len(c.get("missing_shots", [])),
+            "clips_missing_parent": len(c.get("clips_missing_parent", [])),
+        },
+    }
+
+
+_FEEDBACK_PATH = None
+
+
+def _feedback_path():
+    global _FEEDBACK_PATH
+    if _FEEDBACK_PATH is None:
+        _FEEDBACK_PATH = os.path.join(HUB, ".agent_feedback.jsonl")
+    return _FEEDBACK_PATH
+
+
+def log_feedback(action, accepted, note="", by="agent"):
+    """记录一次 Agent 动作被采纳/否决(持续学习闭环,仅追加写)。
+
+    action: 动作名(如 job_checkup/governance_report/update_tags);
+    accepted: True=采纳,False=否决(override)。返回累计条数。
+    """
+    action = (action or "").strip()
+    if not action:
+        return {"ok": False, "error": "action required"}
+    rec = {"ts": datetime.datetime.now().isoformat(),
+           "action": action, "accepted": bool(accepted),
+           "note": str(note or ""), "by": str(by or "agent")}
+    try:
+        with open(_feedback_path(), "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
+    n = 0
+    try:
+        with open(_feedback_path(), "r", encoding="utf-8") as f:
+            n = sum(1 for _ in f)
+    except OSError:
+        n = 0
+    return {"ok": True, "action": action, "accepted": bool(accepted), "count": n}
+
+
+def learning_summary(limit=50):
+    """汇总 Agent 反馈学习日志(只读):各动作采纳率 + 近期记录。"""
+    path = _feedback_path()
+    rows = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except ValueError:
+                    continue
+    except OSError:
+        return {"total": 0, "by_action": {}, "recent": []}
+    by_action = {}
+    for r in rows:
+        a = r.get("action", "?")
+        d = by_action.setdefault(a, {"accepted": 0, "overrides": 0, "total": 0})
+        d["total"] += 1
+        if r.get("accepted"):
+            d["accepted"] += 1
+        else:
+            d["overrides"] += 1
+    for a, d in by_action.items():
+        d["rate"] = round(d["accepted"] / d["total"], 3) if d["total"] else 0.0
+    recent = rows[-limit:] if limit else rows
+    return {"total": len(rows), "by_action": by_action, "recent": recent}
+
+
 def split_new_videos(mids, *, force=False):
     """对一批素材 id 里 kind=videos 且有音轨的条目跑 split_video_to_silent_and_audio。
     跳过 role:clip(除非 force)。返回 {ran, ok, results, new_ids}。"""

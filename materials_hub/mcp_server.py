@@ -423,6 +423,31 @@ def t_auto(a):
                                  autotag=bool(a.get("autotag")))
 
 
+def t_governance(a):
+    """只读:全库治理/合规扫描(占位文件/缺描述/未分类/无标签)。"""
+    return core.governance_report(limit=int(a.get("limit") or 50))
+
+
+def t_readiness(a):
+    """只读:某 job 分发渠道就绪度评估(封面/镜头/clip 父链/标签齐备→channel_ready)。"""
+    return core.distribution_readiness(job_id=a.get("job_id") or a.get("job") or "")
+
+
+def t_feedback(a):
+    """写(追加,非资产):记录一次 Agent 动作被采纳/采纳否决(持续学习闭环)。"""
+    return core.log_feedback(
+        action=str(a.get("action") or ""),
+        accepted=bool(a.get("accepted")),
+        note=str(a.get("note") or ""),
+        by=str(a.get("by") or "agent"),
+    )
+
+
+def t_learning(a):
+    """只读:汇总 Agent 反馈学习日志(各动作采纳率+近期记录)。"""
+    return core.learning_summary(limit=int(a.get("limit") or 50))
+
+
 HANDLERS = {"search_materials": t_search, "get_material": t_get,
             "list_tags": t_tags, "hub_stats": t_stats,
             "update_tags": t_update_tags, "register_asset": t_register,
@@ -435,7 +460,9 @@ HANDLERS = {"search_materials": t_search, "get_material": t_get,
             "agent_run": t_agent_run, "agent_status": t_agent_status,
             "agent_cancel": t_agent_cancel, "agent_list": t_agent_list,
             "agent_resume": t_agent_resume,
-            "auto_process": t_auto}
+            "auto_process": t_auto,
+            "governance_report": t_governance, "distribution_readiness": t_readiness,
+            "agent_feedback": t_feedback, "learning_summary": t_learning}
 # __PART2__
 _SCHEMA_OBJ = {"type": "object", "properties": {
     "q": {"type": "string", "description": "关键词或中文自然语言问句"},
@@ -498,6 +525,17 @@ TOOLS = [
     {"name": "near_duplicate_report", "description": "只读:全库画面近重复报告(dHash 汉明距离≤max_dist 的对+并查集簇,一实体多引用)",
      "inputSchema": {"type": "object", "properties": {
          "max_dist": {"type": "integer"}, "limit": {"type": "integer"}}}},
+    {"name": "governance_report", "description": "只读:全库治理/合规扫描(占位/缺描述/未分类/无标签),Agent「治理合规」技能第一步",
+     "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer"}}}},
+    {"name": "distribution_readiness", "description": "只读:某 job 分发渠道就绪度评估(封面/镜头/clip 父链/标签齐备→channel_ready+blocking)",
+     "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}}},
+    {"name": "agent_feedback", "description": "写(追加,非资产):记录 Agent 动作被采纳/否决(持续学习闭环)。action=动作名,accepted=采纳",
+     "inputSchema": {"type": "object", "properties": {
+         "action": {"type": "string"}, "accepted": {"type": "boolean"},
+         "note": {"type": "string"}, "by": {"type": "string"}},
+         "required": ["action", "accepted"]}},
+    {"name": "learning_summary", "description": "只读:汇总 Agent 反馈学习日志(各动作采纳率+近期记录)",
+     "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer"}}}},
     {"name": "search_by_image", "description": "只读:以图搜图(query=id/路径)或以文搜图(text=)。mode=auto|phash|clip;CLIP 需 imgembed 索引",
      "inputSchema": {"type": "object", "properties": {
         "query": {"type": "string"}, "id": {"type": "string"}, "path": {"type": "string"},
