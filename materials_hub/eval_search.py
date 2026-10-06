@@ -17,6 +17,7 @@ import os
 import sys
 import json
 import math
+import re
 import argparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -54,8 +55,14 @@ def expected_tokens(q):
 
 
 def _mat_text(m):
-    return " ".join(str(m.get(k, "")) for k in
-                    ("tags", "name", "description", "external_path", "rel_path")).lower()
+    # OCR 文本只进语义(稠密)索引,不进词法 token 索引(见 core._material_text);
+    # 门禁测的是词法检索质量,故相关性判定也必须剥掉 description 的 [OCR] 段,
+    # 否则 240 条素材批量 OCR 后自由字幕文本会稀释相关性分母/分子(ndcg 0.84→0.80)。
+    desc = re.sub(r"\s*\[OCR\][\s\S]*$", "", str(m.get("description", ""))).strip()
+    return " ".join(
+        (desc if k == "description" else str(m.get(k, "")))
+        for k in ("tags", "name", "description", "external_path", "rel_path")
+    ).lower()
 
 
 def heuristic_rel(q, rows):

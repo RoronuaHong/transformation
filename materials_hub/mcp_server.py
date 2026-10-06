@@ -185,8 +185,9 @@ def t_chunk_search(a):
 
 
 def t_run_ocr(a):
-    """写(派生数据):对视频/图片做画面 OCR,文本落 sidecar 并追加 description。
-    会改 description,故仍需 confirm=true;已有结果幂等返回 cached(不重跑)。"""
+    """写(派生数据):对视频/图片做画面 OCR,文本落 sidecar `index/ocr/<id>.txt`(可检索)。
+    不写 description:OCR 走"语义 doc_text + 词法低权重通道 + 全文分块"三条可检索路径,
+    写进 description 会稀释常规排序。仍需 confirm=true;已有结果幂等返回 cached(不重跑)。"""
     _require_confirm(a)
     mid = a.get("id", "")
     if not core.get_material(mid):
@@ -540,7 +541,7 @@ TOOLS = [
          "path": {"type": "string"}, "source": {"type": "string"},
          "tags": {"type": "string"}, "description": {"type": "string"},
          "confirm": {"type": "boolean"}}, "required": ["path", "confirm"]}},
-    {"name": "run_ocr", "description": "写(派生数据):视频/图片画面 OCR(离线 rapidocr,ffmpeg 采样帧),文本入 sidecar 并追加 description 使画面文字可被检索。已有结果幂等返回;需 confirm=true",
+    {"name": "run_ocr", "description": "写(派生数据):视频/图片画面 OCR(离线 rapidocr,ffmpeg 采样帧),文本入 sidecar 使画面文字可被检索(语义+词法+全文三条路径),不写 description。已有结果幂等返回;需 confirm=true",
      "inputSchema": {"type": "object", "properties": {
          "id": {"type": "string"}, "frames": {"type": "integer"},
          "force": {"type": "boolean"}, "confirm": {"type": "boolean"}},

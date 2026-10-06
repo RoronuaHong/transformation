@@ -120,11 +120,52 @@ def test_parse_ocr_runner_stdout():
     print("PASS test_parse_ocr_runner_stdout")
 
 
+def test_ocr_lexical_low_weight_channel():
+    """OCR 走独立低权重词法通道:稀有画面文字能命中,但权重远低于 name/description。"""
+    _mk_material("o5", name="zzz.mp4")
+    os.makedirs(core.OCR_DIR, exist_ok=True)
+    sc = core.ocr_sidecar_path("o5")
+    token = "qiaomaoguantou"                   # 只出现在 OCR sidecar 里的稀有 token
+    with open(sc, "w", encoding="utf-8") as f:
+        f.write("[1.0s] 画面文字 " + token)
+    core._OCR_TEXT_CACHE.pop("o5", None)
+    m = core.get_material("o5")
+    s_ocr = core._score(core._tokens(token), m)
+    assert s_ocr > 0, s_ocr                   # 稀有画面文字仍可被词法命中
+    # 但通道是低权重:name 命中(3.0)显著高于仅 OCR 命中(0.35)
+    m_name = dict(m, name=token + ".mp4")
+    s_name = core._score(core._tokens(token), m_name)
+    assert s_ocr < s_name, (s_ocr, s_name)
+    assert core._OCR_FIELD_WEIGHT < core._FIELD_WEIGHT["description"]
+    # 语义文档文本也收录 OCR
+    assert token in core.doc_text(m), core.doc_text(m)
+    print("PASS test_ocr_lexical_low_weight_channel")
+
+
+def test_ocr_text_cache_invalidates_on_mtime():
+    """_ocr_text 缓存按 (mtime,size) 失效:长驻进程在另一进程重跑 OCR 后不会读旧文本。"""
+    _mk_material("o6")
+    os.makedirs(core.OCR_DIR, exist_ok=True)
+    sc = core.ocr_sidecar_path("o6")
+    core._OCR_TEXT_CACHE.pop("o6", None)
+    with open(sc, "w", encoding="utf-8") as f:
+        f.write("first-ocr")
+    assert "first-ocr" in core._ocr_text("o6")
+    with open(sc, "w", encoding="utf-8") as f:
+        f.write("second-ocr")
+    st = os.stat(sc)
+    os.utime(sc, (st.st_atime + 10, st.st_mtime + 10))   # 强制 mtime 变化
+    assert "second-ocr" in core._ocr_text("o6"), core._ocr_text("o6")
+    print("PASS test_ocr_text_cache_invalidates_on_mtime")
+
+
 if __name__ == "__main__":
     test_history_records_write_ops()
     test_history_remove_and_order()
     test_ocr_sidecar_in_material_text()
     test_ocr_material_cached_and_guards()
     test_parse_ocr_runner_stdout()
+    test_ocr_lexical_low_weight_channel()
+    test_ocr_text_cache_invalidates_on_mtime()
     _teardown()
     print("OK")

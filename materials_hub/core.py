@@ -754,6 +754,41 @@ def _tok_w(t):
     return 1.0
 
 
+# 画面 OCR 文本的词法权重:刻意远低于 name(3.0)/tags(2.5)/description(1.5)。
+# OCR 是自由字幕文本,内含 bilibili/字幕 等高频泛词;若与 description 同权参与会稀释
+# 基于精确 token 的排序(实测 240 条批量 OCR 后 ndcg 0.84→0.80)。低权重既保留
+# 稀有 OCR 字符串(如"茄猫的罐头")的精确命中,又不足以扰动常规查询排序。
+_OCR_FIELD_WEIGHT = 0.35
+_OCR_TEXT_CACHE = {}
+
+
+def _ocr_text(mid):
+    """读素材的画面 OCR sidecar 文本(index/ocr/<id>.txt),带进程内缓存。无则 ''。
+
+    缓存按 sidecar 的 **(mtime, size)** 校验,而非只按 id:长驻进程(MCP server /
+    --watch 守护)若在另一进程重跑 OCR(cli.py ocr 写新 sidecar)后继续工作,只按 id
+    命中会永远返回旧文本(无 TTL、无容量上限的纯 id 缓存是真实陈旧风险)。"""
+    sc = ocr_sidecar_path(mid or "")
+    st = None
+    if sc:
+        try:
+            st = (os.path.getmtime(sc), os.path.getsize(sc))
+        except OSError:
+            st = None
+    cached = _OCR_TEXT_CACHE.get(mid)
+    if cached is not None and cached[0] == st:
+        return cached[1]
+    t = ""
+    if sc and os.path.isfile(sc):
+        try:
+            with open(sc, "r", encoding="utf-8", errors="ignore") as f:
+                t = f.read().strip()
+        except Exception:
+            pass
+    _OCR_TEXT_CACHE[mid] = (st, t)
+    return t
+
+
 def _score(q_tokens, m):
     """加权近似打分:query token 与素材各字段 token 重叠累计(按类型加权,见 _tok_w)。
 
@@ -775,6 +810,12 @@ def _score(q_tokens, m):
                 loose += _tok_w(qt) * 0.6
         if loose:
             sc += w * loose
+    # 画面 OCR 文本:独立低权重通道(见 _OCR_FIELD_WEIGHT)
+    ot = _tokens(_ocr_text(m.get("id", "")))
+    if ot:
+        ov = q_tokens & ot
+        if ov:
+            sc += _OCR_FIELD_WEIGHT * sum(_tok_w(t) for t in ov)
     return sc
 
 
@@ -952,8 +993,12 @@ _TEXT_EXT = (".md", ".txt", ".srt", ".ass", ".vtt", ".json", ".csv", ".py",
 
 def _material_text(m):
     """素材可检索的全文:库内 description + 关联文本文件内容(若 external_path/rel_path
-    指向可读文本文件)+ 视频画面 OCR sidecar(index/ocr/<id>.txt,若已生成)。
-    媒体文件本身不读,只取文本类。只读、不写、不越权。"""
+    指向可读文本文件)。
+    媒体文件本身不读,只取文本类。只读、不写、不越权。
+    注:这是**全文(长文档分块检索)**通道,与主排序 `_score` 不同——`_score` 只按
+    name/tags/description 计分(OCR 另走独立的 0.35 低权重通道),故此处收录 OCR
+    sidecar 不会稀释主排序(240 条批量 OCR 后 ndcg 0.84→0.80 的稀释源是 description
+    列被写入 OCR,已由"OCR 只落 sidecar + 低权重通道"解决)。"""
     parts = [(m.get("description") or "").strip()]
     p = m.get("external_path") or ""
     if not p:
@@ -1567,7 +1612,12 @@ def doc_text(m):
     dirs = [d for d in os.path.dirname(p).replace("\\", "/").split("/") if d]
     stage = re.sub(r"[_\-.]+", " ", " ".join(dirs[-4:]))   # 同样避开工作区前缀(见 _path_tokens)
     tags = [t.strip() for t in (m.get("tags") or "").split(",") if t.strip() and t.strip() != "sp"]
-    parts = [words, " ".join(tags), m.get("description", ""), m.get("kind", ""), stage]
+    # 画面 OCR 文本:在这里进语义(稠密)索引。词法侧 _score 的**主字段循环**只按 DB 字段
+    # (name/tags/description/rel_path)计分,OCR 另走 0.35 独立低权重通道(见 _score),
+    # 不挤占 description 的 1.5 权重——避免自由字幕文本稀释精确 token 排序
+    # (实测 240 条批量 OCR 写进 description 后门禁 ndcg 0.84→0.80)。
+    ocr = _ocr_text(m.get("id", ""))
+    parts = [words, " ".join(tags), m.get("description", ""), ocr, m.get("kind", ""), stage]
     doc_p, _ = _embed_prefixes()
     return doc_p + " | ".join(x for x in parts if x)
 
@@ -1835,6 +1885,9 @@ QUERY_SYNONYMS = {
     "动漫": ["anime", "cartoon", "deblur", "old_sttn"], # 老动画太糊了 → deblur/STTN
     "动画": ["anime", "cartoon", "deblur", "old_sttn"],
     "画质": ["quality", "cmp", "compare"],              # 画质对比 → 前后对比图
+    "提升": ["upscale", "enhance", "deblur"],          # turn low-res into watchable / 提升至4K
+    "低分辨率": ["lowres", "deblur", "upscale"],        # low res
+    "低清": ["lowres", "deblur", "upscale"],
     "效果": ["result", "out", "cmp"],
     "对比图": ["cmp", "compare"],
     # 「画面→frame/scene」已删(2026-09-28):泛场景词展开让 name 含 frame 的条目
@@ -2911,7 +2964,10 @@ def _parse_ocr_runner_stdout(raw):
 def ocr_material(mid, frames=5, force=False):
     """对视频/图片素材做画面 OCR(离线,rapidocr 由 SP venv 提供):
     ffmpeg 采样帧 → ocr_runner 子进程识别 → 文本落 sidecar `index/ocr/<id>.txt`
-    并追加到 description(` [OCR] ...`,词法/语义检索即刻可命中)。
+    画面文字由此可检索:语义(稠密)由 `doc_text` 读 sidecar 收录;词法由 `_score` 的
+    OCR 独立低权重通道(0.35)命中稀有字符串;全文分块检索由 `_material_text` 收录。
+    刻意**不写 DB description 列**——该列被 `_score` 按 1.5 权重计分,写入自由字幕
+    文本会稀释常规排序(实测 240 条批量 OCR 后门禁 ndcg 0.84→0.80)。
     幂等:已有 sidecar 且未 force 时直接返回 cached。变更记入 history 审计。"""
     m = get_material(mid)
     if not m:
@@ -3001,12 +3057,10 @@ def ocr_material(mid, frames=5, force=False):
     os.makedirs(OCR_DIR, exist_ok=True)
     with open(sc, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
-    # description 追加 OCR 摘要(幂等:先剥旧 [OCR] 段),使主检索/语义建库即刻可命中
-    cur_desc = (m.get("description") or "").strip()
-    base = re.sub(r"\s*\[OCR\][\s\S]*$", "", cur_desc).strip()
-    new_desc = (base + ("\n" if base else "") + "[OCR] " + "\n".join(lines)[:400]).strip()
-    if new_desc != cur_desc:
-        _update_material(mid, description=new_desc)
+    _OCR_TEXT_CACHE.pop(mid, None)      # sidecar 已更新,失效进程内缓存
+    # OCR 文本只落 sidecar(index/ocr/<id>.txt),由语义 doc_text 读取参与稠密检索;
+    # 不写进 DB description 列——否则自由字幕文本进入词法 SQL 检索(_score 读 description)
+    # 会稀释门禁/查询排序(实测 240 条批量 OCR 后 ndcg 0.84→0.80)。
     log_history("app", "ocr", mid, f"frames={len(imgs)} chars={total}")
     return {"id": mid, "status": "ok", "frames": len(imgs), "chars": total,
             "sample": "\n".join(lines)[:200]}
