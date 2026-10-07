@@ -8,7 +8,7 @@ Deep Agent 四支柱(区别于单轮 tool-calling):
                         index/agent_workspace/<task_id>/state.json,可中断后用
                         agent_status() 查看。
   2. 上下文卸载      —— 过长的观察结果落盘 <ws>/notes/step_NNN.json,
-                        上下文只留「文件指针 + 前 200 字符」,主循环不被 344 条
+                        上下文只留「文件指针 + 前 200 字符」,主循环不被 384 条
                         检索结果撑爆(与 chunk_search/read_text_preview 同一省 token 哲学)。
   3. Subagents       —— retrieve 子代理(LLM 驱动:多查询→汇总,只回摘要,上下文隔离)
                         与 maintain(确定性巡检:health + broken_externals,不走 LLM)。

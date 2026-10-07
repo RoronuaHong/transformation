@@ -515,7 +515,7 @@ _CONFIRM = {"type": "object", "properties": {
     "confirm": {"type": "boolean", "description": "必须为 true 才允许写/删操作(人工复核护栏)"}}}
 
 TOOLS = [
-    {"name": "search_materials", "description": "检索素材库(344+ 条,支持中文自然语言问句,内置中英同义词+语义混合排序)",
+    {"name": "search_materials", "description": "检索素材库(384 条,支持中文自然语言问句,内置中英同义词+语义混合排序;英文等非中文查询会自动经本地翻译模型译中再中英合并检索)",
      "inputSchema": _SCHEMA_OBJ},
     {"name": "get_material", "description": "按 id 取素材完整记录",
      "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},

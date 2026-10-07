@@ -76,10 +76,12 @@ sp | <platform> | job:<id> | type:<media|clip|subs|notes|benchmark|render|test>
 5. 找片段默认 `role:master` + `get_shots`;不要把每个镜头拆成独立入库视频。
 
 ### 分类(kind)与扩展名
-`images` · `videos` · `docs` · `audio` · **`subs`(srt/ass/vtt/ssa/sub/sbv)** · `other`。
+`images` · `videos` · **`silent`(无声音轨的画面)** · `docs` · `audio` · **`subs`(srt/ass/vtt/ssa/sub/sbv)** · `anim` · `other`。
+(当前 384 条:images 157 / docs 105 / silent 77 / subs 19 / videos 16 / audio 8 / anim 1 / other 1)
 
 ### 检索打分(词法层)
 字段权重:`name 3.0` > `tags 2.5` > `description 1.5` > `rel_path 1.0`。query 与各字段 token 重叠累计得分,按分排序;无 query 时按时间倒序。
+另有**画面 OCR 独立通道(权重 0.35)**:视频/图片画面文字(经 rapidocr 识别)只存 sidecar `index/ocr/<id>.txt`,以远低于上述字段的权重独立参与词法匹配——既能让「茄猫的罐头」这类稀有画面文字精确命中,又不会因字幕里的高频泛词稀释常规排序(**OCR 刻意不并入 `description`**:该列按 1.5 权重计入主排序,写进去会稀释,实测 240 条批量 OCR 后门禁 NDCG 0.84→0.80)。
 另外两条提升召回的规则(都经真实语料实测):
 1. **领域同义词表**:中文词映射到语料里的英文词(如「字幕」→ subs/hardsub/dehardsub)。仅「加词」不改词,原命中不会消失。
 2. **长词松匹配**:英文/数字 token ≥5 字符时互为子串也算命中(权重 0.6)。必要性:数据里是 `demosaic`,查 `mosaic` 严格分词匹配不上。
@@ -132,7 +134,7 @@ python server.py        # 启动面板,打开 http://localhost:8000
 - **引用巡检**:状态栏「失效 N」红字可点,弹窗列出源文件已消失的外部引用,可「清理全部」(只删索引)。
 
 ## 检索示例
-- 自然语言:`python cli.py search --file q.txt`(文件内容「去除字幕只留背景」)→ 命中 `dehardsub` 阶段的成片(纯词法在这里是 0 命中,语义补召回)。
+- 自然语言:`python cli.py search --file q.txt`(文件内容「去除字幕只留背景」)→ 命中 `dehardsub` 阶段的成片。词法层会先经同义词扩展(「字幕/去字幕」→ `subs/hardsub/dehardsub`),故**纯词法也能命中**(早期「纯词法 0 命中、靠语义补召回」的结论是同义词表补齐前的历史结果)。
 - 中文/英文关键词都行;命令行中文受 Windows 终端编码影响时用 `--file` 或 `--stdin`(见下)。
 - 标签筛选:`job:BV1aDb56iEvu`(某 B 站视频全套素材)、`type:benchmark`(基准视频)、`type:render`(渲染预览)、`lang:zh`(中文字幕/笔记)。
 - 组合:在面板里先选 `类型=视频`,再搜 `render` 或 `benchmark`。
@@ -313,7 +315,7 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 
 **实测(历史演进在 9 宽查询上测,2026-09-28 起权威口径为 16 查询人工标注 ground truth)**
 
-> **语料现状(2026-10-06 实测)**：索引曾因重置掉到 **23 条**、评估门禁失效；已重跑 `bridge_subtitle.py` 重建为 **384 条**，`eval_ground_truth.json` 的 **233 个 id 现存 233 个（100%）**，**门禁恢复可复现**。当前实测低于 344 语料期的 0.86，**归因是语料增长（344→384）+ GT 按旧语料标注导致新增相关项未标注（如 31 条 `type:benchmark` 中 GT 仅标 18 条），而非检索代码回归**；要回到 0.86 量级需按当前语料重标注/扩充 GT。
+> **语料现状(2026-10-06 实测)**：索引曾因重置掉到 **23 条**、评估门禁失效；已重跑 `bridge_subtitle.py` 重建为 **384 条**，`eval_ground_truth.json`（经窄面标签补全后）**427 条标注 / 249 个唯一 id，现存 249 个（100%）**，**门禁恢复可复现**。当前实测低于 344 语料期的 0.86，**归因是语料增长（344→384）+ GT 按旧语料标注导致新增相关项未标注（如 31 条 `type:benchmark` 中 GT 仅标 18 条），而非检索代码回归**；要回到 0.86 量级需按当前语料重标注/扩充 GT。
 
 | 阶段 | P@5 | R@20 |
 |---|---|---|
@@ -325,9 +327,11 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 | **历史归档:16 查询 GT(2026-09-28,344 条语料)** | **0.86** | **0.82** |
 | **当前实测(2026-10-06,384 条语料,lexical,GT 补全后)** | **0.71** | **0.78**(MRR 0.85 / NDCG@10 0.84) |
 
-> 16 查询口径含 7 组窄查询(相关集 1–6 条),并新增 **MRR=1.00 / NDCG@10≈0.98**:全部查询 top1 必对、
-> 窄查询召回全进 top20。为什么权威口径 P@5 反而比 0.96 低?——9 宽查询相关集最大 87 条,指标饱和虚高;
+> 16 查询口径含 7 组窄查询(相关集 1–6 条)。为什么权威口径 P@5 反而比 0.96 低?——9 宽查询相关集最大 87 条,指标饱和虚高;
 > 窄查询才对"无关条目混进 top5"敏感。详见 `eval_search.py` 与《最佳实践》§15.4。
+>
+> ⚠️ **上表 MRR=1.00 / NDCG@10≈0.98 是「344 条语料期」的历史归档值**(当时全部查询 top1 必对、窄查询召回全进 top20)。
+> **当前(384 条语料 + GT 补全后)实测为 MRR 0.85 / NDCG@10 0.84**,即下方门禁基线——差异源于语料增长(344→384)与 GT 按当前语料重标注,**非检索代码回归**。
 >
 > **门禁基线(2026-10-06 实测,384 条语料 + 16 查询 human GT(427 条标注),mode=lexical)**:
 > P@5 0.71 / R@20 0.78 / MRR 0.85 / NDCG@10 0.84(容差 0.02)。
@@ -360,9 +364,11 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 | `VITUAL_CACHE_SEARCH` / `VITUAL_CACHE_PERSIST` | 关 / 关 | 查询内存缓存 / 额外落盘 `index/search_cache.pkl`(跨会话复用) |
 | `VITUAL_OCR_PYTHON` | 自动发现 | 画面 OCR 用的 python(需装 rapidocr;默认自动找 `subtitle_pipeline/.venv`) |
 
-**已知限制(实测结论,别指望它做多语检索)**
-- `nomic-embed-text` 是**英文单语**模型,中文查询真正起作用的是**同义词表 + 松匹配**这一层;
-  换多语模型(如 `bge-m3`)后中文语义会更好。
+**已知限制(实测结论)**
+- **语义模型已是多语**:默认 `bge-m3`(中文进多语向量空间),非中文查询经本地 `translategemma:4b` 译中后中英合并检索(跨语桥接)。
+  但**窄面召回仍由同义词表主导**——16 查询 GT 上 `auto` 相对 `lexical` 仅 +0.01(因 GT 已被 lexical+同义词覆盖)。
+  (旧结论「`nomic-embed-text` 英文单语、别指望多语」属换模型前的历史状态。)
+- **rerank 暂不可用**:cross-encoder 重排需 ollama 暴露 `/api/rerank`,当前版本不暴露,自动降级 RRF(见上表 `VITUAL_RERANK_MODEL`)。
 - 中文单字匹配会带来少量误召回(例如查询里的「赛」命中了无关的中文文件名)。
 - 语义检索需要 ollama 常驻;关掉后自动回退词法,不影响使用。
 - 想只用精确关键词:面板检索方式切「精确关键词」,或 `?mode=lexical`。
@@ -415,7 +421,7 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 **已知限制**
 - **本地单用户(现已可鉴权)**:服务默认只听 `127.0.0.1`;设 `VITUAL_HUB_TOKEN` 后开启令牌鉴权,可安全跨机(见下方「安全与网络暴露」)。
 - **无版本管理**:素材更新会覆盖索引记录,不保留历史版本。
-- **语义检索依赖本地 ollama**:没有 embedding 模型时自动退回纯词法;当前可用模型是英文单语的,中文靠同义词表兜(见[语义检索](#语义检索本地-embedding))。
+- **语义检索依赖本地 ollama**:没有 embedding 模型时自动退回纯词法。**默认模型已为多语 `bge-m3`**(中文进多语向量空间),英文等非中文查询会经本地 `translategemma:4b` 译中再中英合并检索;窄面召回仍由同义词表主导(见[语义检索](#语义检索本地-embedding))。**仍待条件**:cross-encoder 重排(rerank)需 ollama 暴露 `/api/rerank`,当前版本未暴露,代码已就绪并自动降级 RRF。
 - **封面依赖 ffmpeg**:本机找不到 ffmpeg 时自动降级为浏览器截帧(可用但较慢);源文件损坏(如上游写入中断的 mp4)抽不出封面,只会标记不重试。
 - **封面缓存不入库**:`index/thumbs/` 是派生数据,删除无副作用(重跑生成即可)。
 
@@ -441,8 +447,11 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 | `VITUAL_ALERT_BROKEN` | `0`(不告警) | 失效外链数超过该阈值时,`/api/health` 附 `alerts` 字段 |
 | `VITUAL_HUB_EXT_ROOTS` | 工作区根 | 允许登记/读取外部引用的额外根目录(分号分隔) |
 
+**已落地(原列在「后续可扩展」,现已完成)**
+- **多语 embedding**:默认已切 `bge-m3`,文本向量覆盖率 **384/384 = 1.0**;非中文查询经 `translategemma:4b` 跨语桥接。
+- **图片语义(CLIP)**:`models/clip/ViT-B-32.pt` 已就位,图像向量覆盖率 **241/251 = 0.960**,支持以图搜图(cosine 0.89+)与以文搜图(偏弱——零样本 CLIP 对垂类内容)。
+
 **后续可扩展**
-- **多语 embedding / 图片语义**:换成 `bge-m3` 等多语模型可显著改善中文语义;再用 CLIP 类模型可支持"按画面内容搜图"(当前语义只覆盖元数据文本)。
 - **转码代理**(依赖 ffmpeg):为超大视频生成低码率预览版,提速浏览。
 - **远程采集**:加网络抓取源(需明确站点与授权)。
 - **多库隔离**:按项目分库。
@@ -457,7 +466,7 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 - **怎么判断索引指向的文件都还在?** `GET /api/health` 的 `ok` 字段即答案(或看状态栏是否显示「引用完整」)。
 - **能用自然语言搜吗?** 能。默认走「词法(同义词+松匹配)+ 语义」混合排序,问句不必含连续子串;精确过滤用 `type:` / `job:` / `lang:` 标签。**英文等非中文查询会自动经本地 `translategemma:4b` 译中、再中英合并扩展检索(跨语桥接,离线零 key)**,故英文问句也能命中中文语料(实测跨语 GT:auto P@5 0.33→0.80)。
 - **语义检索要不要额外装东西?** 不用装 Python 包。默认多语模型 `bge-m3`(`ollama pull bge-m3`,优先);也可 `nomic-embed-text`,全离线;没有就自动退回词法。
-- **为什么中文查询要靠同义词表?** 默认语义模型已换多语 `bge-m3`(2026-10-06 纳入,中文进多语空间),但窄面召回仍由同义词表主导(实测 auto lift 仅 +0.01,因 16 查询 GT 已被 lexical+同义词覆盖);词表把中文意图映射到语料真实英文词汇仍是主路径。历史(2026-09-28,16 查询人工标注,344 条语料):**P@5=0.86 / R@20=0.82 / MRR=1.00 / NDCG@10≈0.98**。**2026-10-06 复测**:已重建索引至 384 条、GT 233 个 id 100% 命中,门禁恢复可复现;并按窄面标签补全 GT 漏标(374→427 条)后当前实测(lexical)**P@5 0.71 / R@20 0.78 / MRR 0.85 / NDCG@10 0.84**(补全前 0.60/0.78/0.75/0.75;仍低于 344 语料期的 0.86 是因语料结构变化,非代码回归)。语义向量已重建(**覆盖率 384/384 = 1.0**,`python cli.py embed`),`auto` 混合模式不再回退纯词法;
+- **为什么中文查询要靠同义词表?** 默认语义模型已换多语 `bge-m3`(2026-10-06 纳入,中文进多语空间),但窄面召回仍由同义词表主导(实测 auto lift 仅 +0.01,因 16 查询 GT 已被 lexical+同义词覆盖);词表把中文意图映射到语料真实英文词汇仍是主路径。历史(2026-09-28,16 查询人工标注,344 条语料):**P@5=0.86 / R@20=0.82 / MRR=1.00 / NDCG@10≈0.98**。**2026-10-06 复测**:已重建索引至 384 条、GT 249 个唯一 id 100% 命中,门禁恢复可复现;并按窄面标签补全 GT 漏标(374→427 条)后当前实测(lexical)**P@5 0.71 / R@20 0.78 / MRR 0.85 / NDCG@10 0.84**(补全前 0.60/0.78/0.75/0.75;仍低于 344 语料期的 0.86 是因语料结构变化,非代码回归)。语义向量已重建(**覆盖率 384/384 = 1.0**,`python cli.py embed`),`auto` 混合模式不再回退纯词法;
 但在当前语料+GT 下实测 **lift(auto−lexical)仅 P@5 +0.01 / MRR +0.01**(auto 0.72 vs lexical 0.71)——
 印证「语义在此小语料(384 条,多 anime/测试片靠近质心)下边际增益≈0」:bge-m3 多语向量已正确接入(2026-10-06 修前缀——改用官方 `Represent this passage/sentence...` 检索指令,此前错套 nomic 的 `search_document:`/`search_query:`),但**纯靠 bge-m3 跨语密集余弦弱(0.15–0.32,相关文档被通用片淹没)**。2026-10-06 **实测解法=查询翻译桥接**:`search` 检测非中文查询→经本地 `translategemma:4b` 译中、再中英合并扩展检索(中文查询/门禁 16 句不受影响)。跨语 GT A/B:auto P@5 **0.33→0.80**、MRR **0.42→0.78**、NDCG **0.32→0.72**;空查询 `upscale`/`extract keyframes` 从 0 命中→P@5 1.00。**故跨语检索已实质可用,无需等 reranker**;真 cross-encoder 重排(`VITUAL_RERANK_MODEL`)仍是可选再抬项——但本机 ollama 0.34.0 不暴露 `/api/rerank`,暂不可行。重排启用前必须过评估门禁——内置 `lexical` 弱基线实测会把 P@5 从 0.86 打到 0.31。
 - **检索结果变了?** 若新增了大量素材,记得 `python cli.py embed`(或面板按钮 / `bridge --embed`)刷新语义索引;未建向量的条目仍走词法,不会丢。
@@ -488,9 +497,9 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 `auto_process(confirm,limit?,autotag?)` 对新素材跑封面/OCR/镜头/pHash(写,需 confirm) /
 `find_similar(id)` 画面近重复(dHash) /
 `near_duplicate_report(max_dist?,limit?)` 全库近重复对+簇 /
-`search_by_image(query|id|path)` 以图搜图(dHash;CLIP 待权重) /
+`search_by_image(query|id|path,text?,mode?)` 以图搜图/以文搜图(mode=auto|phash|clip;CLIP 权重已就位,以图搜图 cosine 0.89+) /
 `related(id,rel?)` 关系反查(沿 parent:/role:/job: 面标签一跳遍历,rel=all/parent/children/job/role/kind) /
-`build_image_embeddings(force?,limit?,status?)` CLIP 图像向量索引(以文/以图搜图) /
+`build_image_embeddings(force?,limit?,status_only?,confirm(必须 true))` CLIP 图像向量索引(以文/以图搜图;写,需 confirm) /
 `list_missing_covers` / `job_checkup` 运维只读技能 /
 `governance_report(limit?)` 全库治理/合规扫描(占位/缺描述/未分类/无标签) /
 `distribution_readiness(job_id?)` 某 job 分发渠道就绪度(channel_ready + blocking) /
@@ -533,14 +542,14 @@ LLM 先把任务拆成待办,再逐步调用素材工具完成,长观察落盘�
 - **MCP 工具(agent 类 5 个:agent_run / agent_status / agent_cancel / agent_list / agent_resume;完整 29 个 MCP 工具见上方「MCP 接入」)**:`agent_run(task, confirm?, max_steps?)` 默认只读,写任务需 `confirm=true`;`agent_status(task_id)` 查待办/步骤/总结;`agent_cancel(task_id)` **协作式取消**——写 `cancel.flag`,主循环下一步边界终止,已执行进度保留落盘(长任务 1–3 分钟不必干等);`agent_list(limit?)` 盘点历史任务(状态/步数/创建时间);`agent_resume(task_id, extra_steps?)` **续跑步数耗尽的任务**——复用待办/历史步骤/滚动摘要,接续步号不重做(真实库历史任务约半数 max_steps_reached,7B 常来不及 finish)。
 - **CLI**:`python cli.py agent --task "..." [--write] [--max-steps 12]` / `--status <id>` / `--cancel <id>` / `--resume <id> [--extra-steps 6]` / `--list` / `--cleanup [--max-age 72]` / `--file task.txt`(中文规避终端 GBK)。
 - **为什么是"路线 C"**:官方 `deepagents` 库依赖 langchain/langgraph,与零依赖哲学冲突;故编排自实现、协议走既有 MCP——未来可无缝切官方库或接入 CodeBuddy/Claude 等宿主。
-- **离线测试**:`tests/test_agent.py`(单元 + mock LLM 脚本回放)、`tests/test_agent_skills.py`(MCP 工具/资源/技能冒烟)、`tests/test_agent_eval.py`(真实任务模板回归,断言无编造 id/引用合法/记忆沉淀/长任务压缩)、`tests/test_deliver.py`(按需交付 dry-run/confirm/缺失 id/命令构造/技能路由 + 一键出片串联)、`tests/test_obs.py`(结构化日志/指标分位/Timer 失败判定/日志聚合跨进程);全套件 `pytest` 当前 **138 passed**(均 mock 驱动,不连 ollama;含 `tests/test_eval_gate.py` 门禁纯函数与 `tests/test_eval_gt_candidates.py` GT 候选)。
+- **离线测试**:`tests/test_agent.py`(单元 + mock LLM 脚本回放)、`tests/test_agent_skills.py`(MCP 工具/资源/技能冒烟)、`tests/test_agent_eval.py`(真实任务模板回归,断言无编造 id/引用合法/记忆沉淀/长任务压缩)、`tests/test_deliver.py`(按需交付 dry-run/confirm/缺失 id/命令构造/技能路由 + 一键出片串联)、`tests/test_obs.py`(结构化日志/指标分位/Timer 失败判定/日志聚合跨进程);全套件 `pytest` 当前 **140 passed**(均 mock 驱动,不连 ollama;含 `tests/test_eval_gate.py` 门禁纯函数、`tests/test_eval_gt_candidates.py` GT 候选,以及 OCR 架构新增的「词法低权重通道」「sidecar 缓存 mtime 失效」两条用例)。*(注:此数会随用例增删变化,以实跑为准。)*
 
 ### 入口与调用链(2026-09-30 补)
 
 分两层,宿主只跟 MCP 层打交道:
 
-1. **进程入口(服务)**:`mcp_server.py` 的 `main()`(`mcp_server.py:517`)——MCP **stdio JSON-RPC** 服务器:`sys.stdout/in` 重定向 UTF-8 → `core.init_hub()` → `while True: readline()` 行循环 → `_dispatch(req)` 分发。由宿主(CodeBuddy / Claude Desktop)按 `mcpServers` 配置以 `python mcp_server.py --token <TOKEN>` 拉起(见上方「MCP 接入」段)。
-2. **逻辑入口(agent 本体)**:`agent.py` 的 `agent_run(task, allow_write, max_steps, model, task_id)`(`agent.py:478`)——Deep Agent 主循环,返回最终状态 dict;轮询用 `agent_status(task_id)` 读取 `index/agent_workspace/<task_id>/state.json`。底层 LLM=本机 ollama,无模型时 `skipped` 降级(零网络依赖)。
+1. **进程入口(服务)**:`mcp_server.py` 的 `main()`(不再写死行号,行号会漂移)——MCP **stdio JSON-RPC** 服务器:`sys.stdout/in` 重定向 UTF-8 → `core.init_hub()` → `while True: readline()` 行循环 → `_dispatch(req)` 分发。由宿主(CodeBuddy / Claude Desktop)按 `mcpServers` 配置以 `python mcp_server.py --token <TOKEN>` 拉起(见上方「MCP 接入」段)。
+2. **逻辑入口(agent 本体)**:`agent.py` 的 `agent_run(task, allow_write, max_steps, model, task_id)`(同上,只引函数名不引行号)——Deep Agent 主循环,返回最终状态 dict;轮询用 `agent_status(task_id)` 读取 `index/agent_workspace/<task_id>/state.json`。底层 LLM=本机 ollama,无模型时 `skipped` 降级(零网络依赖)。
 
 **调用链**:宿主调 MCP 工具 `agent_run` → `t_agent_run`(`mcp_server.py`)丢**后台线程**跑 `agent.agent_run()`,立即返回 `task_id` → 宿主轮询 `agent_status` 看进度/结果(长任务 1–3 分钟不阻塞 MCP 调用);中途可 `agent_cancel(task_id)` 协作式取消(步边界终止、进度保留)。
 
