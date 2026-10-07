@@ -64,6 +64,7 @@ from core import (
 )
 from core import (
     governance_report, distribution_readiness, log_feedback, learning_summary,
+    normalize_name, normalize_all_names,
 )
 
 
@@ -337,6 +338,20 @@ def main():
         import json as _j
         r = governance_report(limit=int(args[args.index("--limit") + 1]) if "--limit" in args else 50)
         print(_j.dumps(r, ensure_ascii=False, indent=2))
+
+    elif cmd == "rename":
+        # 命名规范化(见 naming.py 的六条硬规则):默认 dry-run,加 --apply 才写库。
+        # 只改索引显示名 name;orig_name/rel_path/external_path/磁盘文件一律不动。
+        import naming as _nm
+        dry = "--apply" not in args
+        n = int(args[args.index("--samples") + 1]) if "--samples" in args else 10
+        ms = all_materials()
+        plan = _nm.plan_renames(ms)
+        for m, new in plan[:n]:
+            print(f"  {m.get('name')}  ->  {new}")
+        changed, total = normalize_all_names(dry_run=dry)
+        print(f"rename: {'DRY-RUN(未写入)' if dry else 'APPLIED'} "
+              f"changed={changed}/{total} unique={len({x for _, x in plan})}/{total}")
 
     elif cmd == "readiness":
         import json as _j

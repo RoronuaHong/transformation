@@ -2259,6 +2259,7 @@ def ingest_file(src, move=True, source=""):
         tags=tags, description="", source=source, orig_name=os.path.basename(src),
         created_at=datetime.datetime.now().isoformat(timespec="seconds"),
     )
+    normalize_name(mid)          # 入库即规范化显示名(只改 name,不动 rel_path/磁盘)
     return {"status": "added", "id": mid, "path": os.path.relpath(dest, HUB)}
 
 
@@ -2527,6 +2528,7 @@ def ingest_external(src, source="", tags="", description="", kind=None):
     )
     con.commit()
     con.close()
+    normalize_name(mid)          # 入库即规范化显示名(只改 name,不动 external_path/磁盘)
     return {"status": "added", "id": mid}
 
 
@@ -2552,8 +2554,53 @@ def scan_materials():
                         tags="", description="", source="scan", orig_name=f,
                         created_at=datetime.datetime.now().isoformat(timespec="seconds"),
                     )
+                    normalize_name(mid)      # 入库即规范化显示名
                     results.append(mid)
     return results
+
+
+# ---------- 命名规范化(见 naming.py) ----------
+# 最佳实践:显示名应自解释、唯一、可溯源。铁律是**只改索引里的 name**——
+# `orig_name` 保留磁盘真实文件名,`rel_path`/`external_path`/磁盘文件一律不动
+# (external 引用改磁盘 = 破坏上游管线)。规范名由 orig_name 推导,故幂等。
+def normalize_name(mid, dry_run=False):
+    """规范化单条素材的显示名。返回新名(无变化则返回当前名);素材不存在返回 None。"""
+    import naming
+    m = get_material(mid)
+    if not m:
+        return None
+    src = (m.get("orig_name") or "").strip() or (m.get("name") or "")
+    new = naming.canonical_name(src, m.get("kind", ""), m.get("tags", ""), mid=mid,
+                                description=m.get("description", ""))
+    if new == (m.get("name") or ""):
+        return new
+    if not dry_run:
+        con = _con()
+        con.execute(
+            "UPDATE materials SET name=?, orig_name=COALESCE(NULLIF(orig_name,''),?) WHERE id=?",
+            (new, m.get("name", ""), mid))
+        con.commit()
+        con.close()
+        log_history("app", "rename", mid, "canonical name")
+    return new
+
+
+def normalize_all_names(dry_run=True):
+    """批量规范化全部素材显示名,返回 (changed, total)。默认 dry_run=True(只看不改)。"""
+    import naming
+    ms = all_materials()
+    plan = naming.plan_renames(ms)
+    changed = [(m, n) for m, n in plan if n != (m.get("name") or "")]
+    if not dry_run and changed:
+        con = _con()
+        for m, n in changed:
+            con.execute(
+                "UPDATE materials SET name=?, orig_name=COALESCE(NULLIF(orig_name,''),?) WHERE id=?",
+                (n, m.get("name", ""), m.get("id")))
+        con.commit()
+        con.close()
+        log_history("app", "rename", "", "canonical names: %d/%d" % (len(changed), len(ms)))
+    return len(changed), len(ms)
 
 
 # ---------- 引用完整性(external 引用巡检) ----------
