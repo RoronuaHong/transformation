@@ -7,7 +7,12 @@
   - 结构化引用 citations 全部 valid
   - 成功任务沉淀跨任务记忆（playbook）
   - 长任务滚动摘要 context_digest 非空（防 context-rot）
-不连 ollama、不写真实库。运行：python tests/test_agent_eval.py
+不连 ollama、不写真实库。
+
+函数名统一 `test_eval_*` 而非 `eval_*`——pytest 默认只收集 `test*` 前缀函数，
+写 `eval_*` 会让这 5 个场景**不被 pytest 收集**（只能手动 python 跑），
+等于 Agent 质量门形同虚设。改名后随全套件 `pytest` 一起回归。
+运行：pytest tests/test_agent_eval.py  或  python tests/test_agent_eval.py
 """
 import os
 import sys
@@ -38,7 +43,7 @@ def _run(script, search_items, task="任务", **extra):
     return r, st
 
 
-def eval_retrieval_with_citations():
+def test_eval_retrieval_with_citations():
     """检索综合 + 引用溯源：ids/citations 合法、记忆沉淀、短任务不压缩。"""
     m1 = _mat("m1"); m1["tags"] = "sp,type:deblur"
     script = [
@@ -64,21 +69,18 @@ def eval_retrieval_with_citations():
     assert r["context_digest"] == "", "短任务不应产生滚动摘要"   # 缺口6:短任务无关
 
 
-def eval_long_task_compression():
+def test_eval_long_task_compression():
     """长任务(>6 步)：滚动摘要非空、防 context-rot。"""
     m1 = _mat("m1")
-    script = ['{"todos":[{"id":1,"text":"巡检"},{"id":2,"text":"检索"},'
-              '{"id":3,"text":"再巡检"},{"id":4,"text":"整理"}]}']
-    script += ['{"action":"maintain","args":{}}',
-               '{"action":"search_materials","args":{"q":"x"}}',
-               '{"action":"maintain","args":{}}',
-               '{"action":"search_materials","args":{"q":"x"}}',
-               '{"action":"maintain","args":{}}']
-    script += ['{"action":"retrieve","args":{"goal":"g"}}',
-               '{"queries":["a","b"]}',
-               '{"summary":"子摘要","ids":["m1"]}',
-               '{"action":"maintain","args":{}}',   # 第 7 个非-finish 步骤,触发滚动摘要压缩
-               '{"action":"finish","args":{"summary":"整理完成","ids":["m1"]},"mark_done":[1,2,3,4]}']
+    # 关键:每一步的 (action, args) 必须互不相同。
+    # 早期版本靠重复 `maintain`(args 恒为 {})凑步数,但那会命中「同参已成功 → 软提示,
+    # 再犯且可恢复 → LoopGuard 硬停转」(agent.py:2521-2548),在上下文长到 6 条之前就被
+    # break 掉,滚动摘要永远为空——该场景因此长期假绿/失效。改用不同 q 的多次检索,
+    # sig 各不相同,不会被去重或硬停转打断,才能真实触发 >_CONTEXT_TAIL 的压缩。
+    script = ['{"todos":[{"id":1,"text":"多轮检索"},{"id":2,"text":"汇总"}]}']
+    script += ['{"action":"search_materials","args":{"q":"x%d"}}' % i for i in range(1, 8)]
+    script += ['{"action":"finish","args":{"summary":"多轮检索完成","ids":["m1"]},'
+               '"mark_done":[1,2]}']
     r, _ = _run(script, [m1])
     assert r["status"] == "done", r
     assert r["result_ids"] == ["m1"], r["result_ids"]
@@ -86,7 +88,7 @@ def eval_long_task_compression():
     assert "step1[" in r["context_digest"], r["context_digest"]
 
 
-def eval_honesty_zero_hits():
+def test_eval_honesty_zero_hits():
     """诚实弃权（0 命中）：不得编造 id、不得误报 critic、须如实说明。"""
     script = [
         '{"todos":[{"id":1,"text":"检索"},{"id":2,"text":"结论"}]}',
@@ -102,7 +104,7 @@ def eval_honesty_zero_hits():
             or "没有" in r["summary"]), r["summary"]
 
 
-def eval_related_traversal():
+def test_eval_related_traversal():
     """关系反查整合：related 沿 parent: 面标签一跳遍历，衍生 id 合法入引用。"""
     m1 = _mat("m1"); m1["tags"] = "sp,role:master"
     m2 = _mat("m2"); m2["tags"] = "sp,parent:m1"
@@ -135,7 +137,7 @@ def eval_related_traversal():
     assert all(c["valid"] for c in r["citations"]), r["citations"]
 
 
-def eval_memory_reuse():
+def test_eval_memory_reuse():
     """跨任务记忆复用：同查询二次执行，playbook 计数累加且 facet 沉淀成 hint。"""
     m1 = _mat("m1", desc="去马赛克成片"); m1["tags"] = "sp,type:deblur"
     script = [
@@ -158,8 +160,8 @@ def eval_memory_reuse():
 
 
 if __name__ == "__main__":
-    cases = [eval_retrieval_with_citations, eval_long_task_compression, eval_honesty_zero_hits,
-             eval_related_traversal, eval_memory_reuse]
+    cases = [test_eval_retrieval_with_citations, test_eval_long_task_compression,
+             test_eval_honesty_zero_hits, test_eval_related_traversal, test_eval_memory_reuse]
     fails = 0
     for fn in cases:
         try:
