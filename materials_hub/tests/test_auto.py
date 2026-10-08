@@ -59,7 +59,8 @@ def _stub_pipeline(calls, fail_ocr=False):
     fail_ocr=True 时 ocr_material 抛异常,用于验证单项失败不中断。
     返回 (还原函数, embed 调用次数列表)。"""
     orig = (core.make_thumb, core.ocr_material, core.build_shot_index,
-            core.phash_material, core.build_embeddings)
+            core.phash_material, core.build_embeddings, core.tech_material,
+            core.describe_material)
     embed_calls = []
 
     def fake_thumb(mid, *a, **kw):
@@ -78,6 +79,17 @@ def _stub_pipeline(calls, fail_ocr=False):
         with open(core.ocr_sidecar_path(mid), "w", encoding="utf-8") as f:
             f.write("ocr text")
         return {"id": mid, "status": "ok", "chars": 8}
+
+    def fake_tech(mid, *a, **kw):
+        calls.append("tech")
+        os.makedirs(core.TECH_DIR, exist_ok=True)
+        with open(core.tech_path(mid), "w", encoding="utf-8") as f:
+            json.dump({"width": 1920, "height": 1080, "duration": 1.0}, f)
+        return {"id": mid, "status": "ok", "tech": {"width": 1920}}
+
+    def fake_describe(mid, *a, **kw):
+        calls.append("describe")
+        return {"id": mid, "status": "ok", "desc": "1920x1080 h264 1.0s"}
 
     def fake_shots(mid, *a, **kw):
         calls.append("shots")
@@ -100,11 +112,13 @@ def _stub_pipeline(calls, fail_ocr=False):
 
     core.make_thumb, core.ocr_material = fake_thumb, fake_ocr
     core.build_shot_index, core.phash_material = fake_shots, fake_phash
-    core.build_embeddings = fake_embed
+    core.build_embeddings, core.tech_material = fake_embed, fake_tech
+    core.describe_material = fake_describe
 
     def restore():
         core.make_thumb, core.ocr_material, core.build_shot_index = orig[0], orig[1], orig[2]
-        core.phash_material, core.build_embeddings = orig[3], orig[4]
+        core.phash_material, core.build_embeddings, core.tech_material = orig[3], orig[4], orig[5]
+        core.describe_material = orig[6]
     return restore, embed_calls
 
 
@@ -137,18 +151,21 @@ def test_auto_process_material_order_and_isolation():
         r = core.auto_process_material("a1")
     finally:
         restore()
-    # 顺序:thumb → ocr → shots → phash
-    assert calls == ["thumb", "ocr", "shots", "phash"], calls
+    # 顺序:thumb → tech → describe → ocr → shots → phash(tech/describe 于 2026-10-08 接入)
+    assert calls == ["thumb", "tech", "describe", "ocr", "shots", "phash"], calls
     st = r["steps"]
     assert st["thumb"]["status"] == "ok", st
+    assert st["tech"]["status"] == "ok", st
+    assert st["describe"]["status"] == "ok", st
     assert st["ocr"]["status"] == "error" and "RuntimeError" in st["ocr"]["reason"], st
     assert st["shots"]["status"] == "ok" and st["phash"]["status"] == "ok", st
-    # ocr 抛异常不中断:shots/phash 的 sidecar 仍然落盘
+    # ocr 抛异常不中断:shots/phash/tech 的 sidecar 仍然落盘
     assert os.path.isfile(core.shot_index_path("a1")), st
     assert os.path.isfile(core.phash_path("a1")), st
-    # history 有 auto_process 审计(ok=3/4:thumb/shots/phash 成功,ocr 失败)
+    assert os.path.isfile(core.tech_path("a1")), st
+    # history 有 auto_process 审计(ok=5/6:thumb/tech/describe/shots/phash 成功,ocr 失败)
     hs = core.get_history(limit=10, target_id="a1")
-    assert any(h["action"] == "auto_process" and h["detail"] == "ok=3/4" for h in hs), hs
+    assert any(h["action"] == "auto_process" and h["detail"] == "ok=5/6" for h in hs), hs
     print("PASS test_auto_process_material_order_and_isolation")
 
 

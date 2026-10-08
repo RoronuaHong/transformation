@@ -65,6 +65,8 @@ from core import (
 from core import (
     governance_report, distribution_readiness, log_feedback, learning_summary,
     normalize_name, normalize_all_names,
+    tech_material, tech_all, tech_stats, read_tech,
+    describe_material, describe_all,
 )
 
 
@@ -352,6 +354,38 @@ def main():
         changed, total = normalize_all_names(dry_run=dry)
         print(f"rename: {'DRY-RUN(未写入)' if dry else 'APPLIED'} "
               f"changed={changed}/{total} unique={len({x for _, x in plan})}/{total}")
+
+    elif cmd == "tech":
+        # 技术元数据(Cloudinary MAM / Adobe AEM「技术类元数据」):时长/分辨率/编码/帧率/采样率。
+        # 派生数据 → 只落 sidecar index/tech/<id>.json,可重建;不写 description(会稀释排序)。
+        import json as _j
+        if "--stats" in args:
+            print(_j.dumps(tech_stats(), ensure_ascii=False, indent=2))
+        elif "--all" in args:
+            lim = int(args[args.index("--limit") + 1]) if "--limit" in args else 0
+            print(_j.dumps(tech_all(limit=lim, force="--force" in args), ensure_ascii=False))
+        else:
+            mid = args[1] if len(args) > 1 and not args[1].startswith("--") else ""
+            if not mid:
+                print("usage: cli.py tech <id> [--force] | tech --all [--limit N] [--force] | tech --stats")
+            else:
+                print(_j.dumps(tech_material(mid, force="--force" in args),
+                               ensure_ascii=False, indent=2))
+
+    elif cmd == "describe":
+        # 描述性元数据(Adobe AEM「摄入即应用描述性元数据」):确定性生成,
+        # 只用「具体阶段词 + 技术事实 + 项目/来源」,绝不引入泛化类目词(会稀释排序)。
+        # 默认 dry-run;--apply 才写库;只补空描述,不覆盖人工/上游已有描述。
+        import json as _j
+        lim = int(args[args.index("--limit") + 1]) if "--limit" in args else 0
+        # --no-stage:只写技术事实/项目(拉丁+数字),不重复中文阶段词(后者实测会让 r20 掉出容差)
+        r = describe_all(dry_run="--apply" not in args, limit=lim,
+                         with_stage="--no-stage" not in args)
+        print(_j.dumps({k: v for k, v in r.items() if k != "ids"}, ensure_ascii=False))
+        if "--samples" in args:
+            n = int(args[args.index("--samples") + 1])
+            for mid in r["ids"][:n]:
+                print("   ", mid, "->", describe_material(mid, dry_run=True))
 
     elif cmd == "readiness":
         import json as _j

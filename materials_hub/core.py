@@ -24,6 +24,7 @@ INDEX_DIR = os.path.join(HUB, "index")
 OCR_DIR = os.path.join(INDEX_DIR, "ocr")       # 视频画面 OCR 文本 sidecar(派生,可重建)
 SHOT_DIR = os.path.join(INDEX_DIR, "shots")    # 视频镜头索引 sidecar(派生数据,可随时重建)
 PHASH_DIR = os.path.join(INDEX_DIR, "phash")   # dHash 感知哈希 sidecar(派生数据,可随时重建)
+TECH_DIR = os.path.join(INDEX_DIR, "tech")     # 技术元数据 sidecar(时长/分辨率/编码/帧率…,派生可重建)
 INDEX_DB = os.path.join(INDEX_DIR, "hub.db")
 STATIC = os.path.join(HUB, "static")
 THUMBS = os.path.join(INDEX_DIR, "thumbs")  # 视频封面缓存(派生数据,可随时删)
@@ -3981,9 +3982,245 @@ def pending_processing(mid):
     }
 
 
-def auto_process_material(mid, ocr=True, shots=True, phash=True, autotag=False):
-    """对单条素材按需依序执行自动处理链:make_thumb → ocr_material →
-    build_shot_index → phash_material(autotag=True 再追加 auto_tag_material)。
+# ---------- 技术元数据(Technical Metadata) ----------
+# 最佳实践依据:**Cloudinary MAM 2026**「技术元数据」、**Adobe AEM**「技术类元数据」
+# (与描述性/管理性并列的三类之一)——时长/分辨率/编码/帧率/采样率等是媒体资产的
+# 一等公民元数据,用于筛选(找 4K / h264 / 长片)与分发合规。
+# 与 OCR/镜头/pHash 一致:属**派生数据**,只落 sidecar `index/tech/<id>.json`,可随时重建;
+# 刻意**不写进 DB description**(该列参与主排序,写入派生文本会稀释排序,见 OCR 与命名两次教训)。
+TECH_KINDS = ("videos", "silent", "audio", "anim", "images")
+
+
+def tech_path(mid):
+    """技术元数据 sidecar 路径 `index/tech/<id>.json`;mid 为空返回 None。"""
+    if not mid:
+        return None
+    return os.path.join(TECH_DIR, str(mid) + ".json")
+
+
+def read_tech(mid):
+    """读取技术元数据;无/损坏返回 {}。"""
+    p = tech_path(mid)
+    if not p or not os.path.isfile(p):
+        return {}
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _probe_media(path):
+    """ffprobe 采集技术元数据(纯读)。无 ffprobe / 探测失败返回 {}。"""
+    exe = _ffprobe_path()
+    if not exe:
+        return {}
+    flags = 0x08000000 if os.name == "nt" else 0
+    try:
+        p = subprocess.run(
+            [exe, "-v", "error", "-show_entries",
+             "format=duration,format_name,bit_rate:"
+             "stream=codec_type,codec_name,width,height,r_frame_rate,sample_rate,channels",
+             "-of", "json", path],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=30, creationflags=flags)
+        data = json.loads((p.stdout or b"{}").decode("utf-8", "ignore") or "{}")
+    except Exception:
+        return {}
+    out = {}
+    fmt = data.get("format") or {}
+    try:
+        d = round(float(fmt.get("duration") or 0), 3)
+        if d:
+            out["duration"] = d
+    except Exception:
+        pass
+    if fmt.get("format_name"):
+        out["format"] = fmt["format_name"]
+    try:
+        br = int(float(fmt.get("bit_rate") or 0))
+        if br:
+            out["bit_rate"] = br
+    except Exception:
+        pass
+    for s in (data.get("streams") or []):
+        ct = s.get("codec_type")
+        if ct == "video" and "width" not in out:
+            if s.get("codec_name"):
+                out["codec"] = s["codec_name"]
+            try:
+                w = int(s.get("width") or 0)
+                h = int(s.get("height") or 0)
+                if w and h:
+                    out["width"], out["height"] = w, h
+            except Exception:
+                pass
+            try:
+                num, den = (s.get("r_frame_rate") or "0/1").split("/")
+                fps = round(float(num) / float(den), 3)
+                if fps:
+                    out["fps"] = fps
+            except Exception:
+                pass
+        elif ct == "audio" and "sample_rate" not in out:
+            if not out.get("codec") and s.get("codec_name"):
+                out["codec"] = s["codec_name"]
+            try:
+                sr = int(s.get("sample_rate") or 0)
+                ch = int(s.get("channels") or 0)
+                if sr:
+                    out["sample_rate"] = sr
+                if ch:
+                    out["channels"] = ch
+            except Exception:
+                pass
+    return {k: v for k, v in out.items() if v not in (0, "", None)}
+
+
+def tech_material(mid, force=False):
+    """采集单条素材的技术元数据 → sidecar。幂等(已有且未 force → cached)。"""
+    m = get_material(mid)
+    if not m:
+        return {"id": mid, "status": "error", "reason": "not_found"}
+    if m.get("kind") not in TECH_KINDS:
+        return {"id": mid, "status": "skipped", "reason": "kind_not_media"}
+    p = tech_path(mid)
+    if p and os.path.isfile(p) and not force:
+        return {"id": mid, "status": "cached", "tech": read_tech(mid)}
+    src = _material_abs_path(m)
+    if not src or not os.path.isfile(src):
+        return {"id": mid, "status": "error", "reason": "missing_source"}
+    t = _probe_media(src)
+    if not t:
+        return {"id": mid, "status": "skipped", "reason": "no_ffprobe_or_empty"}
+    t["id"] = mid
+    t["kind"] = m.get("kind")
+    t["probed_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+    os.makedirs(TECH_DIR, exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(t, f, ensure_ascii=False)
+    log_history("app", "tech", mid, "w=%s h=%s dur=%s" % (t.get("width"), t.get("height"),
+                                                          t.get("duration")))
+    return {"id": mid, "status": "ok", "tech": t}
+
+
+def tech_all(limit=0, force=False):
+    """批量采集技术元数据。返回 {"scanned","ok","cached","skipped","error"} 计数。"""
+    ms = [m for m in all_materials() if m.get("kind") in TECH_KINDS]
+    if limit and limit > 0:
+        ms = ms[:limit]
+    st = {"scanned": len(ms), "ok": 0, "cached": 0, "skipped": 0, "error": 0}
+    for m in ms:
+        r = tech_material(m.get("id", ""), force=force)
+        k = r.get("status", "error")
+        st[k] = st.get(k, 0) + 1
+    return st
+
+
+def tech_stats():
+    """技术元数据聚合(治理/筛选用):分辨率、编码、总时长分布。只读 sidecar。"""
+    from collections import Counter
+    res, codec, total_dur, n = Counter(), Counter(), 0.0, 0
+    for m in all_materials():
+        if m.get("kind") not in TECH_KINDS:
+            continue
+        t = read_tech(m.get("id", ""))
+        if not t:
+            continue
+        n += 1
+        if t.get("width") and t.get("height"):
+            res["%sx%s" % (t["width"], t["height"])] += 1
+        if t.get("codec"):
+            codec[t["codec"]] += 1
+        total_dur += float(t.get("duration") or 0)
+    return {"with_tech": n, "total_duration": round(total_dur, 1),
+            "resolutions": res.most_common(10), "codecs": codec.most_common(10)}
+
+
+def describe_material(mid, dry_run=False, only_missing=True, with_stage=True):
+    """按「摄入即应用描述性元数据」(Adobe AEM)为素材生成**确定性**描述。
+
+    刻意只用三类信息,**绝不引入泛化类目词**(视频/图/文档/成品/处理结果…):
+      ① 具体处理阶段词(去台标/去马赛克/去硬字幕…)——与显示名同一套受控映射,口径一致;
+         这些词本就已在该素材的 name 里,写进 description 只会**加固**正确匹配。
+      ② 技术事实(1920x1080 / h264 / 12.5s / 16000Hz)——数字与拉丁字符,几乎不与中文查询碰撞。
+      ③ 项目与来源(job:xxxx / from 原名)——latin,便于按项目归组。
+    这是吸收两次教训后的写法:泛化词一旦进入参与排序的字段(name 3.0 / description 1.5)
+    会与通用查询词大面积碰撞、稀释排序(见 OCR 稀释与命名规范化两次实测)。
+
+    only_missing=True 时只补空描述,绝不覆盖人工/上游已有的描述。
+    """
+    import naming
+    m = get_material(mid)
+    if not m:
+        return None
+    cur = (m.get("description") or "").strip()
+    if only_missing and cur:
+        return cur
+    src_name = (m.get("orig_name") or "").strip() or (m.get("name") or "")
+    st = naming.stage_zh(src_name, m.get("kind", ""))
+    tags = m.get("tags") or ""
+    job = ""
+    for t in tags.split(","):
+        t = t.strip()
+        if t.startswith("job:") or t.startswith("parent:"):
+            job = t.split(":", 1)[1].strip()
+            break
+    t = read_tech(mid) if (m.get("kind") or "") in TECH_KINDS else {}
+    parts = []
+    # with_stage=False:只写技术事实/项目(数字+拉丁),不重复中文阶段词。
+    # 实测中文阶段词进 description 会让 r20 0.77→0.76(门禁 FAIL)——它们在 name 里已
+    # 以 3.0 权重命中,再以 1.5 权重重复计入会改变相对排序、把 GT 项挤出前 20。
+    if st and with_stage:
+        parts.append(st)
+    facts = []
+    if t.get("width") and t.get("height"):
+        facts.append("%dx%d" % (t["width"], t["height"]))
+    if t.get("codec"):
+        facts.append(str(t["codec"]))
+    if t.get("duration"):
+        facts.append("%ss" % t["duration"])
+    if t.get("sample_rate"):
+        facts.append("%dHz" % int(t["sample_rate"]))
+    if facts:
+        parts.append(" ".join(facts))
+    if job:
+        parts.append("job:%s" % job)
+    desc = " · ".join(parts)
+    if not desc:
+        return cur
+    if not dry_run and desc != cur:
+        _update_material(mid, description=desc)
+        log_history("app", "describe", mid, desc[:80])
+    return desc
+
+
+def describe_all(dry_run=True, only_missing=True, limit=0, with_stage=True):
+    """批量补描述性元数据。返回 {"scanned","filled","skipped","ids"}。默认 dry_run。"""
+    ms = all_materials()
+    filled, ids = 0, []
+    for m in ms:
+        cur = (m.get("description") or "").strip()
+        if only_missing and cur:
+            continue
+        new = describe_material(m.get("id", ""), dry_run=dry_run,
+                                only_missing=only_missing, with_stage=with_stage)
+        if new and new != cur:
+            filled += 1
+            ids.append(m.get("id", ""))
+        if limit and filled >= limit:
+            break
+    return {"scanned": len(ms), "filled": filled, "ids": ids, "dry_run": dry_run}
+
+
+def auto_process_material(mid, ocr=True, shots=True, phash=True, autotag=False, tech=True,
+                          describe=True):
+    """对单条素材按需依序执行自动处理链:make_thumb → tech_material → describe_material →
+    ocr_material → build_shot_index → phash_material(autotag=True 再追加 auto_tag_material)。
+
+    describe 刻意排在 tech 之后(描述要用技术事实),且默认 `with_stage=False`
+    (实测中文阶段词进 description 会让 r20 掉出容差,见 describe_material 注释)。
 
     每步独立 try/except 包裹:单项失败记 error 但不中断后续步骤;
     各步骤自身幂等(已处理过 → cached/skip),重复跑无害。
@@ -4009,6 +4246,10 @@ def auto_process_material(mid, ocr=True, shots=True, phash=True, autotag=False):
         return {"status": "ok", "path": p} if p else {"status": "skip", "reason": "no_thumb"}
 
     _attempt("thumb", _thumb)
+    if tech:
+        _attempt("tech", lambda: tech_material(mid))
+    if describe:
+        _attempt("describe", lambda: describe_material(mid, with_stage=False))
     if ocr:
         _attempt("ocr", lambda: ocr_material(mid))
     # 物理 clip / 图片 不建镜头表(逻辑片段只在母版 videos/silent shots)
@@ -4232,12 +4473,19 @@ def governance_report(limit=50):
                             or t == k or t.startswith("kind:"))]
         if not semantic and not ai_tags:
             issues["untagged"].append(mid)
+    # counts 必须在截断**之前**算:治理审计要看**真实总数**,issues 只是供人工核对的样本。
+    # (修前的 bug:先 [:limit] 再 counts → 报的是样本数;limit=0 时四类全报 0,
+    #   等于「缺描述 305 条」这类真问题被治理报告完全掩盖。)
+    counts = {k: len(v) for k, v in issues.items()}
+    truncated = {k: (c > limit) for k, c in counts.items()}
     for key in issues:
         issues[key] = issues[key][:limit]
     return {
         "scanned": scanned,
         "issues": issues,
-        "counts": {k: len(v) for k, v in issues.items()},
+        "counts": counts,          # 真实总数(不受 limit 影响)
+        "truncated": truncated,    # 标记该类是否被截断,便于调用方判断要不要翻页
+        "sample_limit": limit,
     }
 
 
