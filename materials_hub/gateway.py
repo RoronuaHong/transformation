@@ -60,6 +60,15 @@ def proxy_target(path: str) -> tuple[str, str] | None:
     return None
 
 
+def _safe_write(handler, data: bytes) -> None:
+    """Write to the client, tolerating a client that already disconnected."""
+    try:
+        handler.wfile.write(data)
+    except OSError:
+        # Broken pipe / aborted connection: the client is gone, nothing to return.
+        pass
+
+
 def forward(handler, origin: str, upstream_path: str) -> None:
     """Buffering reverse proxy (stdlib). Enough for Next HTML/RSC + ops JSON."""
     parsed = urllib.parse.urlparse(origin)
@@ -99,17 +108,21 @@ def forward(handler, origin: str, upstream_path: str) -> None:
             handler.send_header(k, v)
         handler.send_header("Content-Length", str(len(data)))
         handler.end_headers()
-        handler.wfile.write(data)
+        _safe_write(handler, data)
     except OSError as e:
         msg = (
             f"upstream unavailable ({origin}): {e}\n"
             f"Start transform: cd transform && npm run dev\n"
             f"Start ops API: yarn api (or :8901)\n"
         ).encode()
-        handler.send_response(502)
-        handler.send_header("Content-Type", "text/plain; charset=utf-8")
-        handler.send_header("Content-Length", str(len(msg)))
-        handler.end_headers()
-        handler.wfile.write(msg)
+        try:
+            handler.send_response(502)
+            handler.send_header("Content-Type", "text/plain; charset=utf-8")
+            handler.send_header("Content-Length", str(len(msg)))
+            handler.end_headers()
+            handler.wfile.write(msg)
+        except OSError:
+            # Client already disconnected before we could send the 502.
+            pass
     finally:
         conn.close()
