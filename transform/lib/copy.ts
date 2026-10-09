@@ -65,6 +65,7 @@ export type NavCopy = {
   feed: string;
   ask: string;
   hub: string;
+  menu: string;
   themeLight: string;
   themeDark: string;
   themeToLight: string;
@@ -463,6 +464,7 @@ const en: UiCopy = {
     feed: "Library",
     ask: "Ask",
     hub: "Materials",
+    menu: "Menu",
     themeLight: "Light",
     themeDark: "Dark",
     themeToLight: "Switch to light",
@@ -854,6 +856,7 @@ const zh: UiCopy = {
     feed: "列表",
     ask: "问问一桌",
     hub: "素材中心",
+    menu: "菜单",
     themeLight: "浅色",
     themeDark: "深色",
     themeToLight: "切换到浅色",
@@ -1244,6 +1247,7 @@ const zhHant: UiCopy = {
     feed: "列表",
     ask: "問問一桌",
     hub: "素材中心",
+    menu: "選單",
     themeLight: "淺色",
     themeDark: "深色",
     themeToLight: "切換到淺色",

@@ -1400,6 +1400,12 @@ a:hover {
     box-shadow: var(--shadow-card);
     padding: 0.85rem 1rem;
   }
+  .nav-burger { display: inline-flex; }
+  .nav-links { display: none; flex-direction: column; align-items: stretch; gap: 0.35rem; width: 100%; }
+  .nav-links.open { display: flex; }
+  .nav-links > * { width: 100%; }
+  .nav-links a { padding: 0.45rem 0.55rem; border-radius: 8px; }
+  .nav-links a:hover { background: var(--primary-bg); }
 
   .home-intro,
   .article-sheet,
@@ -1665,6 +1671,22 @@ a:hover {
   align-items: center;
   gap: 0.55rem 0.85rem;
 }
+
+/* 汉堡按钮:桌面隐藏,移动端由媒体查询显示(WAI-ARIA disclosure 模式) */
+.nav-burger {
+  display: none;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  padding: 0.45rem 0.55rem;
+  cursor: pointer;
+}
+.nav-burger-box { display: flex; flex-direction: column; gap: 4px; width: 20px; }
+.nav-burger-box span { display: block; height: 2px; border-radius: 2px; background: currentColor; transition: transform 0.15s ease, opacity 0.15s ease; }
+.nav-burger[aria-expanded="true"] .nav-burger-box span:nth-child(1) { transform: translateY(6px) rotate(45deg); }
+.nav-burger[aria-expanded="true"] .nav-burger-box span:nth-child(2) { opacity: 0; }
+.nav-burger[aria-expanded="true"] .nav-burger-box span:nth-child(3) { transform: translateY(-6px) rotate(-45deg); }
 
 .nav-links a {
   font-size: 0.88rem;

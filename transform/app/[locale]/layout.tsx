@@ -1,8 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { HubLink } from "@/components/HubLink";
-import { LangSwitch } from "@/components/LangSwitch";
-import { ThemeToggle } from "@/components/ThemeToggle";
+import { SiteNav } from "@/components/SiteNav";
 import { isRtl, t } from "@/lib/copy";
 import { locales, type Locale, isLocale } from "@/lib/locales";
 
@@ -38,14 +36,7 @@ export default async function LocaleLayout({
             <span className="brand-name">{nav.brand}</span>
           </Link>
         </div>
-        <nav className="nav-links" aria-label={nav.brand}>
-          <Link href={`/${locale}`}>{nav.workbench}</Link>
-          <Link href={`/${locale}/feed`}>{nav.feed}</Link>
-          <Link href={`/${locale}/ask`}>{nav.ask}</Link>
-          <HubLink label={nav.hub} />
-          <ThemeToggle locale={locale} />
-          <LangSwitch locale={locale} />
-        </nav>
+        <SiteNav locale={locale} nav={nav} />
       </header>
       <div id="main">{children}</div>
     </div>
