@@ -86,6 +86,7 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
   const [upNote, setUpNote] = useState("");
   const [pendingIds, setPendingIds] = useState<Set<string>>(new Set());
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [gridMode, setGridMode] = useState<"" | "2" | "1">("");
   const [maxUp, setMaxUp] = useState(HUB_UPLOAD_MAX_BYTES);
   const [detail, setDetail] = useState<HubMaterial | null>(null);
   // 步骤 1/4/5:入库链逐步状态 + 结构化理解记录(派生 sidecar,只读展示)
@@ -247,6 +248,21 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
   useEffect(() => {
     setFiltersOpen(false);
   }, [kind, tag]);
+
+  // 网格密度:localStorage 记忆(自适应/一行2个/一行1个)
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem("hubGridMode");
+      if (saved === "2" || saved === "1") setGridMode(saved);
+    } catch {}
+  }, []);
+
+  function applyGridMode(m: "" | "2" | "1") {
+    setGridMode(m);
+    try {
+      window.localStorage.setItem("hubGridMode", m);
+    } catch {}
+  }
 
   async function onUpload(files: FileList | null) {
     if (!files?.length) return;
@@ -491,6 +507,35 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
                   : ""}
               </p>
             )}
+            <div className="hub-gridmode" role="group" aria-label={copy.gridAuto}>
+              <button
+                type="button"
+                className={gridMode === "" ? "on" : ""}
+                aria-pressed={gridMode === ""}
+                title={copy.gridAuto}
+                onClick={() => applyGridMode("")}
+              >
+                ▦
+              </button>
+              <button
+                type="button"
+                className={gridMode === "2" ? "on" : ""}
+                aria-pressed={gridMode === "2"}
+                title={copy.gridTwo}
+                onClick={() => applyGridMode("2")}
+              >
+                2
+              </button>
+              <button
+                type="button"
+                className={gridMode === "1" ? "on" : ""}
+                aria-pressed={gridMode === "1"}
+                title={copy.gridOne}
+                onClick={() => applyGridMode("1")}
+              >
+                1
+              </button>
+            </div>
           </div>
           {!rows.length ? (
             <div className="hub-empty" role="status">
@@ -507,7 +552,13 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
               )}
             </div>
           ) : (
-            <div className={"hub-grid" + (busy ? " busy" : "")}>
+            <div
+              className={
+                "hub-grid" +
+                (gridMode ? ` cols-${gridMode}` : "") +
+                (busy ? " busy" : "")
+              }
+            >
               {rows.map((m) => (
                 <article key={m.id} className="hub-card">
                   <div className="hub-thumb">

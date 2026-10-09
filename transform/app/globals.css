@@ -3844,7 +3844,14 @@ html[data-theme="dark"] .theme-toggle-track {
   cursor: pointer;
 }
 .hub-toolbar .hub-upload { background: var(--primary); color: #fff; border-color: transparent; font-weight: 600; }
-.hub-resultbar { margin: 0 0 0.85rem; }
+.hub-resultbar { margin: 0 0 0.85rem; display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; flex-wrap: wrap; }
+/* 网格密度切换:自适应(▦) / 一行2个 / 一行1个 */
+.hub-gridmode { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.hub-gridmode button { border: 0; background: transparent; color: var(--muted); padding: 0.22rem 0.6rem; border-radius: 6px; cursor: pointer; font: inherit; font-size: 0.8rem; line-height: 1.2; }
+.hub-gridmode button:hover { color: var(--primary); }
+.hub-gridmode button.on { background: var(--primary-bg); color: var(--primary); }
+.hub-grid.cols-2 { grid-template-columns: repeat(2, 1fr); }
+.hub-grid.cols-1 { grid-template-columns: 1fr; }
 .hub-stats { margin: 0; font-size: 0.92rem; }
 .hub-error { padding: 0.85rem 1rem; border: 1px solid var(--danger); border-radius: var(--radius-card); background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--ink); }
 .hub-layout { display: flex; gap: 1rem; align-items: flex-start; min-height: 50vh; }
