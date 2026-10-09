@@ -894,7 +894,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     if (!stillActive) {
       stopPoll();
     }
-  }, [stopPoll]);
+  }, [stopPoll, copy.apiDown]);
 
   const toggleQueuePause = useCallback(async () => {
     const path = queuePaused ? "/api/try/queue/resume" : "/api/try/queue/pause";
@@ -1040,7 +1040,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     return () => {
       if (probeTimer.current) clearTimeout(probeTimer.current);
     };
-  }, [tab, urlsText, sessionid, files.length]);
+  }, [tab, urlsText, sessionid, files.length, copy.apiDown]);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();

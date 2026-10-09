@@ -111,10 +111,11 @@ export function ArticleMediaPreview({
     const prev = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     closeRef.current?.focus();
+    const video = videoRef.current;
     return () => {
       document.removeEventListener("keydown", onKey);
       document.body.style.overflow = prev;
-      videoRef.current?.pause();
+      video?.pause();
     };
   }, [open]);
 

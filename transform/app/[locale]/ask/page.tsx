@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { notFound, redirect } from "next/navigation";
+import { notFound } from "next/navigation";
 import AskPanel from "@/components/AskPanel";
 import { siteOrigin } from "@/lib/content";
 import { t } from "@/lib/copy";

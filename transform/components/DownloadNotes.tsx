@@ -1,6 +1,5 @@
 "use client";
 
-import type { ArticleCopy } from "@/lib/copy";
 import type { KeyPoint } from "@/lib/note-points";
 
 export type NotesDownloadPayload = {
