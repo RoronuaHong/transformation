@@ -4993,7 +4993,8 @@ def _clip_visual_path(m):
     src = _abs_source(m) or ""
     if m.get("kind") == "images" and src and os.path.isfile(src):
         return src, "source"
-    if m.get("kind") in VIDEO_LIKE_KINDS and src and os.path.isfile(src):
+    # anim(gif) 也走抽帧:多帧序列直读易失败,此前漏掉该分支导致 GIF 永远 how=missing
+    if (m.get("kind") in VIDEO_LIKE_KINDS or m.get("kind") == "anim") and src and os.path.isfile(src):
         # 无封面时临时抽一帧(不污染 thumbs 失败标记)
         exe = ffmpeg_path()
         if not exe:
@@ -5098,19 +5099,35 @@ def _cosine(a, b):
 
 
 def image_embed_status():
-    """图像 CLIP 索引覆盖率。"""
+    """图像向量索引覆盖率。
+
+    - `embedded` 只统计**当前模型**的行:换模型(SigLIP2 替换 ViT-B-32)后旧向量
+      不再参与检索,全表计数会让覆盖率虚高。
+    - `missing` 列出取不到画面的素材(文件损坏如 moov atom not found、无封面且
+      抽帧失败):这类缺口无法靠重跑 imgembed 解决,必须可见,否则被覆盖率掩盖。
+    """
     info = clip_probe()
+    model = info.get("model") or ""
     con = _con()
-    n = con.execute("SELECT COUNT(*) c FROM image_embeddings").fetchone()[0]
+    n = (con.execute("SELECT COUNT(*) c FROM image_embeddings WHERE model=?",
+                     (model,)).fetchone()[0] if model else 0)
     con.close()
-    visuals = sum(1 for m in all_materials() if m.get("kind") in VISUAL_KINDS)
+    ms = [m for m in all_materials() if m.get("kind") in VISUAL_KINDS]
+    visuals = len(ms)
+    missing = []
+    for m in ms:
+        path, how = _clip_visual_path(m)
+        if not path:
+            missing.append({"id": m["id"], "name": m.get("name", ""), "reason": how})
     return {
         "available": bool(info.get("ok")),
         "backend": info.get("backend", ""),
-        "model": info.get("model", ""),
+        "model": model,
         "embedded": n,
         "visual_total": visuals,
         "coverage": round(n / visuals, 3) if visuals else 0.0,
+        "missing": len(missing),
+        "missing_ids": missing[:10],
         "err": info.get("err", ""),
     }
 
@@ -5145,6 +5162,8 @@ def build_image_embeddings(force=False, limit=0, progress=None):
     if limit:
         todo = todo[:limit]
     done = 0
+    failed = 0
+    failed_ids = []
     batch = 8
     for i in range(0, len(todo), batch):
         chunk = todo[i:i + batch]
@@ -5153,6 +5172,9 @@ def build_image_embeddings(force=False, limit=0, progress=None):
         now = datetime.datetime.now().isoformat(timespec="seconds")
         for (mid, path, sig), vec in zip(chunk, vecs):
             if not vec:
+                # 失败可见:不写表(下次增量仍会重试),但计数回传便于定位坏图/不支持格式
+                failed += 1
+                failed_ids.append(mid)
                 continue
             con.execute(
                 "INSERT OR REPLACE INTO image_embeddings(mid,model,dim,sig,vec,updated_at)"
@@ -5164,9 +5186,11 @@ def build_image_embeddings(force=False, limit=0, progress=None):
         con.close()
         if progress:
             progress(min(i + batch, len(todo)), len(todo))
-    log_history("app", "imgembed", "", "embedded=%d model=%s" % (done, model))
+    log_history("app", "imgembed", "",
+                "embedded=%d failed=%d model=%s" % (done, failed, model))
     return {"available": True, "model": model, "total": total,
-            "embedded": done, "skipped": skipped, "pending": len(todo) - done}
+            "embedded": done, "skipped": skipped, "failed": failed,
+            "failed_ids": failed_ids[:20], "pending": len(todo) - done - failed}
 
 
 def _load_image_vectors(model=None):

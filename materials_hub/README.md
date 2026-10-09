@@ -77,7 +77,7 @@ sp | <platform> | job:<id> | type:<media|clip|subs|notes|benchmark|render|test>
 
 ### 分类(kind)与扩展名
 `images` · `videos` · **`silent`(无声音轨的画面)** · `docs` · `audio` · **`subs`(srt/ass/vtt/ssa/sub/sbv)** · `anim` · `other`。
-(当前 128 条:docs 73 / silent 16 / subs 19 / audio 8 / videos 5 / images 5 / anim 1 / other 1;2026-10-09 移除 256 条流水线 QA 渲染产物)
+(当前 127 条:docs 73 / silent 16 / subs 19 / audio 8 / videos 5 / images 4 / anim 1 / other 1;2026-10-09 移除 256 条流水线 QA 渲染产物 + 2 条上传测试垃圾)
 
 ### 检索打分(词法层)
 字段权重:`name 3.0` > `tags 2.5` > `description 1.5` > `rel_path 1.0`。query 与各字段 token 重叠累计得分,按分排序;无 query 时按时间倒序。
