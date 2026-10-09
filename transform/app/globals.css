@@ -34,7 +34,7 @@ html[data-theme="light"] {
   --font-mono: "IBM Plex Mono", ui-monospace, monospace;
   --touch: 2.875rem;
   --pad-x: clamp(1rem, 4.2vw, 1.75rem);
-  --content-max: 1080px;
+  --content-max: 1440px;
   --radius-sheet: 16px;
   --radius-card: 12px;
   --radius-ctrl: 8px;
@@ -1378,7 +1378,7 @@ a:hover {
   }
 }
 
-@media (max-width: 640px) {
+@media (max-width: 720px) {
   body {
     background: var(--bg-wash);
     font-size: 16px;
@@ -3794,10 +3794,6 @@ html[data-theme="dark"] .theme-toggle-track {
 
 /* Materials hub (Next /[locale]/hub) */
 .hub-page { display: flex; flex-direction: column; gap: 1rem; }
-/* 素材中心页突破全站 1080px 上限用满可用宽度:hub-aside 贴最左,sticky 随滚动(下 .hub-aside 规则) */
-.shell:has(.hub-page) {
-  width: 100%;
-}
 .hub-toolbar {
   display: flex;
   flex-wrap: wrap;
