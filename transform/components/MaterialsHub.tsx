@@ -85,6 +85,7 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
   const [toast, setToast] = useState("");
   const [upNote, setUpNote] = useState("");
   const [pendingIds, setPendingIds] = useState<Set<string>>(new Set());
+  const [maxUp, setMaxUp] = useState(HUB_UPLOAD_MAX_BYTES);
   const [detail, setDetail] = useState<HubMaterial | null>(null);
   // 步骤 1/4/5:入库链逐步状态 + 结构化理解记录(派生 sidecar,只读展示)
   const [runRec, setRunRec] = useState<HubRunRecord | null>(null);
@@ -223,6 +224,24 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
     void loadPending();
   }, [loadPending]);
 
+  // 上传上限从后端下发(与 VITUAL_UPLOAD_MAX_MB 一致);默认兜底 2GB
+  useEffect(() => {
+    hubFetch<{ upload_max_mb?: number }>("/health")
+      .then((h) => {
+        if (h?.upload_max_mb) setMaxUp(h.upload_max_mb * 1024 * 1024);
+      })
+      .catch(() => {});
+  }, []);
+
+  // 有素材在「理解中」时每 8s 轮询,auto 链跑完徽章自动消失
+  useEffect(() => {
+    if (pendingIds.size === 0) return;
+    const t = setTimeout(() => {
+      void loadPending();
+    }, 8000);
+    return () => clearTimeout(t);
+  }, [pendingIds, loadPending]);
+
   async function onUpload(files: FileList | null) {
     if (!files?.length) return;
     let added = 0;
@@ -230,7 +249,7 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
     let failed = 0;
     const failNote: string[] = [];
     for (const f of Array.from(files)) {
-      if (f.size > HUB_UPLOAD_MAX_BYTES) {
+      if (f.size > maxUp) {
         failed++;
         failNote.push(copy.tooLarge);
         continue;

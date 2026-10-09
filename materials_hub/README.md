@@ -120,7 +120,7 @@ python server.py        # 启动面板,打开 http://localhost:8000
 ## Web 面板用法
 - **搜索框**:自然语言 / 关键词,实时(输入即搜),按相关度排序(默认混合检索,可切「精确关键词 / 纯语义」)。
 - **类型下拉**:按 `kind` 筛选(图片/视频/文档/音频/其他)。
-- **上传**:点「上传」或把文件**拖拽**到页面 → 落到 `ingest/` 并整理入库。
+- **上传**:点「上传」或把文件**拖拽**到页面 → 落到 `ingest/` 并整理入库。逐文件反馈「入库 a · 重复 d · 失败 f」;处理中的素材卡片带「理解中」徽章(auto 链完成后自动消失)。单文件上限 **2048MB**(`VITUAL_UPLOAD_MAX_MB` 可调,超限走链接引用或 CLI);可执行/脚本扩展名(exe/dll/bat/cmd/msi/scr/com/ps1/vbs/sh)拒收;上传条目自动打 `upload` 来源标签,可与流水线条目区分筛选。
 - **标签 / 描述**:每张卡片可编辑,点「保存」写回索引。
 - **预览**:图片直接显示缩略图;视频内嵌播放器 + 封面;音频 / 文档显示占位。
 - **删除**:删内部素材会移入 `trash/`(不破坏原工程);删外部引用只删索引。
@@ -260,7 +260,8 @@ core.health()                       # 健康快照(总量/种类/重复/引用/�
 | GET | `/api/file/<id>` | 预览原文(外部引用读 `external_path`,支持 HTTP Range 流式) |
 | GET | `/api/thumb/<id>` | 视频封面 jpg(命中缓存直接返回,否则现场抽帧;失败返回 404 + 原因) |
 | GET | `/api/export?fmt=json\|csv` | 导出全部编目(带下载文件名;CSV 含 BOM) |
-| POST | `/api/upload` | 上传(表单 multipart) |
+| POST | `/api/upload` | 上传(表单 multipart),返回逐文件 `{results:[{name,status,id,reason}]}`;超限 413 |
+| GET | `/api/pending` | 待自动处理素材 `{id:{thumb,ocr,visual,shots,phash}}`(「理解中」徽章) |
 | POST | `/api/ingest` | 整理 `ingest/` |
 | POST | `/api/scan` | 扫描 `materials/` 全树 |
 | POST | `/api/thumbs` | `{}` 后台批量抽帧;`{"limit":N}` 限量;`{"purge":true}` 清缓存与失败标记 |

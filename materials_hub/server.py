@@ -431,6 +431,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/health":
             h = health()
+            # 上传上限随 health 下发,前端预检与后端 VITUAL_UPLOAD_MAX_MB 永远一致
+            h["upload_max_mb"] = _UPLOAD_MAX_MB
             # 告警(P1-7):失效外链超阈值时附 alerts,便于监控轮询告警。
             # 阈值用 VITUAL_ALERT_BROKEN 设(0=不告警);默认不改动 health() 本身结构。
             try:
