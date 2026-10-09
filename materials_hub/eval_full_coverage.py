@@ -181,7 +181,8 @@ except Exception as e:
 # ---- N. Agentic DAM(跑现有 Agent 评测套件) ----
 try:
     out = subprocess.run([sys.executable, os.path.join(HERE, "tests", "test_agent_eval.py")],
-                         capture_output=True, text=True, encoding="utf-8", cwd=HERE, timeout=120)
+                         capture_output=True, text=True, encoding="utf-8", errors="replace",
+                         cwd=HERE, timeout=120)
     n_pass = len(re.findall(r"PASS test_eval_\w+", out.stdout))
     check("N", "Agent 评测套件 5/5 绿(感知-推理-行动+HITL+不幻觉+诚实弃权)", n_pass == 5,
           "pass=%d/5 stdout=%s" % (n_pass, out.stdout.strip().splitlines()[-1] if out.stdout else ""))
@@ -191,7 +192,8 @@ except Exception as e:
 # ---- O. 检索质量评估(门禁回归) ----
 try:
     out = subprocess.run([sys.executable, "eval_search.py", "--mode", "lexical", "--gate"],
-                         capture_output=True, text=True, encoding="utf-8", cwd=HERE, timeout=300)
+                         capture_output=True, text=True, encoding="utf-8", errors="replace",
+                         cwd=HERE, timeout=300)
     gate_pass = "GATE: PASS" in out.stdout
     check("O", "检索门禁 PASS(16查询/427标注 GT,基线 p5.71/r20.78/mrr.85/ndcg.84)", gate_pass,
           "stdout=%s" % [l for l in out.stdout.splitlines() if "GATE" in l or "FAIL" in l][:2])
@@ -213,7 +215,7 @@ try:
     mcp_tool_count = len(_mcp.TOOLS) if hasattr(_mcp, "TOOLS") else 0
 except Exception as e:
     mcp_tool_count = 0
-check("Q", "MCP 工具数==29", mcp_tool_count == 29, "count=%d" % mcp_tool_count)
+check("Q", "MCP 工具数==31", mcp_tool_count == 31, "count=%d" % mcp_tool_count)
 # CLI 主要命令存在
 cli = open(os.path.join(HERE, "cli.py"), encoding="utf-8").read()
 cli_cmds = ["ingest", "scan", "search", "dupes", "ocr", "shots", "phash", "auto",
