@@ -189,6 +189,12 @@ function buildAgentTask(userText: string, attachments: Attachment[]): string {
 
 async function uploadMedia(file: File): Promise<Attachment> {
   const data = await hubUploadFile(file);
+  if (data.status === "rejected" || !data.id) {
+    // 拒收件没有 id,不能进入后续引用/追踪流程;blocked_ext 由调用方映射为人读文案
+    throw new Error(
+      data.reason === "blocked_ext" ? "blocked_ext" : data.error || "upload failed",
+    );
+  }
   const kind =
     data.path?.match(/materials[\\/]([^\\/]+)/)?.[1] || guessKind(file);
   const previewUrl = file.type.startsWith("image/")
@@ -470,15 +476,19 @@ export function HubAgentPanel({ copy }: { copy: HubCopy }) {
         }
         if (next.length) setPending((p) => [...p, ...next]);
       } catch (e) {
+        const msg = e instanceof Error ? e.message : "";
+        const body =
+          msg === "blocked_ext"
+            ? copy.agentUploadRejected
+            : e instanceof Error
+              ? `${copy.agentAttachFail}: ${msg}`
+              : copy.agentAttachFail;
         setTurns((prev) => [
           ...prev,
           {
             id: uid("a"),
             role: "assistant",
-            content:
-              e instanceof Error
-                ? `${copy.agentAttachFail}: ${e.message}`
-                : copy.agentAttachFail,
+            content: body,
             status: "error",
           },
         ]);
@@ -488,7 +498,7 @@ export function HubAgentPanel({ copy }: { copy: HubCopy }) {
         if (fileRef.current) fileRef.current.value = "";
       }
     },
-    [busy, copy.agentAttachFail, scrollBottom, uploading],
+    [busy, copy.agentAttachFail, copy.agentUploadRejected, scrollBottom, uploading],
   );
 
   const removePending = useCallback((localId: string) => {

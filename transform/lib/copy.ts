@@ -314,6 +314,7 @@ export type HubCopy = {
   agentAttach: string;
   agentAttachHint: string;
   agentAttachFail: string;
+  agentUploadRejected: string;
   agentUploading: string;
   agentDefaultImgAsk: string;
   agentDefaultVidAsk: string;
@@ -358,7 +359,6 @@ export type HubCopy = {
   hitOf: string;
   saved: string;
   deleted: string;
-  uploaded: string;
   uploadSummary: string;
   uploading: string;
   pendingBadge: string;
@@ -714,6 +714,7 @@ const en: UiCopy = {
     agentAttach: "Attach media",
     agentAttachHint: "Attach an image for similar-frame search, or a video for master/shot checkup (Skill D / E).",
     agentAttachFail: "Upload failed",
+    agentUploadRejected: "Executables/scripts cannot be attached as materials",
     agentUploading: "Uploading…",
     agentDefaultImgAsk: "Search the library for similar frames to this image",
     agentDefaultVidAsk: "Analyze this uploaded video (master / shots / missing cover)",
@@ -758,7 +759,6 @@ const en: UiCopy = {
     hitOf: "“{q}” · {n}",
     saved: "Saved",
     deleted: "Deleted",
-    uploaded: "Uploaded {n} file(s)",
     uploadSummary: "Added {a}, duplicates {d}, failed {f}",
     uploading: "Uploading {name} {pct}%",
     pendingBadge: "Processing",
@@ -1104,6 +1104,7 @@ const zh: UiCopy = {
     agentAttach: "上传媒体",
     agentAttachHint: "上传图片做以图搜图；上传视频按母版/镜头体检（对齐 Skill D / E）。",
     agentAttachFail: "上传失败",
+    agentUploadRejected: "可执行/脚本文件不能作为素材附件上传",
     agentUploading: "上传中…",
     agentDefaultImgAsk: "以图搜图：找出库里相似画面",
     agentDefaultVidAsk: "分析这段上传视频（母版 / 镜头 / 缺封面）",
@@ -1148,7 +1149,6 @@ const zh: UiCopy = {
     hitOf: "「{q}」· {n} 条",
     saved: "已保存",
     deleted: "已删除",
-    uploaded: "已上传 {n} 个文件",
     uploadSummary: "入库 {a} · 重复 {d} · 失败 {f}",
     uploading: "上传中 {name} {pct}%",
     pendingBadge: "理解中",
@@ -1331,6 +1331,7 @@ const zhHant: UiCopy = {
     agentAttach: "上傳媒體",
     agentAttachHint: "上傳圖片做以圖搜圖；上傳影片按母版/鏡頭體檢（對齊 Skill D / E）。",
     agentAttachFail: "上傳失敗",
+    agentUploadRejected: "可執行/腳本檔案不能作為素材附件上傳",
     agentUploading: "上傳中…",
     agentDefaultImgAsk: "以圖搜圖：找出庫裡相似畫面",
     agentDefaultVidAsk: "分析這段上傳影片（母版 / 鏡頭 / 缺封面）",
@@ -1373,7 +1374,6 @@ const zhHant: UiCopy = {
     hitOf: "「{q}」· {n} 筆",
     saved: "已儲存",
     deleted: "已刪除",
-    uploaded: "已上傳 {n} 個檔案",
     uploadSummary: "入庫 {a} · 重複 {d} · 失敗 {f}",
     uploading: "上傳中 {name} {pct}%",
     pendingBadge: "理解中",
