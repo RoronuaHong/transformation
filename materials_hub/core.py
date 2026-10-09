@@ -1016,9 +1016,16 @@ def _ranked(q="", kind="", tag="", mode="auto"):
     return rows, used
 
 
+_RAW_BODY_NAME_RE = re.compile(r"(_raw|_progress|_meta|_debug)\.(json|jsonl|txt|log)$",
+                               re.IGNORECASE)
+
+
 def _append_body_hits(q, rows, kind, tag):
     """文档和字幕的正文在 chunk_search 里,面板主检索原先只看描述。
-    命中且不在当前结果里的,附在末尾。画面类不走这里(正文通道会把 OCR 噪声带进来)。"""
+    命中且不在当前结果里的,附在末尾。画面类不走这里(正文通道会把 OCR 噪声带进来)。
+    流水线 run 产物(_raw/_progress/_meta/_debug 日志)不进正文通道:它们只是
+    撞词的原始记录(实测查「鸡腿」时 multipass_raw.json 凭转写 payload 混入),
+    仍可按名称/标签搜到。"""
     if kind and kind not in ("docs", "subs"):
         return rows
     try:
@@ -1026,7 +1033,10 @@ def _append_body_hits(q, rows, kind, tag):
     except Exception:
         return rows
     have = {m.get("id") for m in rows}
-    add = [m for m in extra if m.get("id") not in have and m.get("kind") in ("docs", "subs")]
+    add = [m for m in extra
+           if m.get("id") not in have
+           and m.get("kind") in ("docs", "subs")
+           and not _RAW_BODY_NAME_RE.search(m.get("name") or "")]
     return rows + add if add else rows
 
 
