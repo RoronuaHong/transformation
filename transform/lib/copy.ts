@@ -359,6 +359,10 @@ export type HubCopy = {
   saved: string;
   deleted: string;
   uploaded: string;
+  uploadSummary: string;
+  uploading: string;
+  pendingBadge: string;
+  tooLarge: string;
   error: string;
   backendHint: string;
   hitReason: string;
@@ -755,6 +759,10 @@ const en: UiCopy = {
     saved: "Saved",
     deleted: "Deleted",
     uploaded: "Uploaded {n} file(s)",
+    uploadSummary: "Added {a}, duplicates {d}, failed {f}",
+    uploading: "Uploading {name} {pct}%",
+    pendingBadge: "Processing",
+    tooLarge: "File too large (max 2 GB) — use link ingest or CLI",
     error: "Materials API unavailable",
     backendHint: "Start materials_hub: python server.py (:8000)",
     hitReason: "Why it matched",
@@ -1141,6 +1149,10 @@ const zh: UiCopy = {
     saved: "已保存",
     deleted: "已删除",
     uploaded: "已上传 {n} 个文件",
+    uploadSummary: "入库 {a} · 重复 {d} · 失败 {f}",
+    uploading: "上传中 {name} {pct}%",
+    pendingBadge: "理解中",
+    tooLarge: "文件过大（上限 2GB），请走链接引用或 CLI 入库",
     error: "素材中心 API 不可用",
     backendHint: "请先启动 materials_hub：python server.py（:8000）",
     hitReason: "命中说明",
@@ -1362,6 +1374,10 @@ const zhHant: UiCopy = {
     saved: "已儲存",
     deleted: "已刪除",
     uploaded: "已上傳 {n} 個檔案",
+    uploadSummary: "入庫 {a} · 重複 {d} · 失敗 {f}",
+    uploading: "上傳中 {name} {pct}%",
+    pendingBadge: "理解中",
+    tooLarge: "檔案過大（上限 2GB），請走連結引用或 CLI 入庫",
     error: "素材中心 API 不可用",
     backendHint: "請先啟動 materials_hub：python server.py（:8000）",
     hitReason: "命中說明",

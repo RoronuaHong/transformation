@@ -11,6 +11,7 @@ import {
   hubFetch,
   hubFileUrl,
   hubThumbUrl,
+  HUB_UPLOAD_MAX_BYTES,
   hubUploadFile,
   type HubMaterial,
   type HubStats,
@@ -82,6 +83,8 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [toast, setToast] = useState("");
+  const [upNote, setUpNote] = useState("");
+  const [pendingIds, setPendingIds] = useState<Set<string>>(new Set());
   const [detail, setDetail] = useState<HubMaterial | null>(null);
   // 步骤 1/4/5:入库链逐步状态 + 结构化理解记录(派生 sidecar,只读展示)
   const [runRec, setRunRec] = useState<HubRunRecord | null>(null);
@@ -206,20 +209,58 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
     return map;
   }, [tags]);
 
+  // 上传最佳实践:「理解中」徽章数据(auto 链后台跑完,下次刷新清零)
+  const loadPending = useCallback(async () => {
+    try {
+      const r = await hubFetch<Record<string, unknown>>("/pending");
+      setPendingIds(new Set(Object.keys(r || {})));
+    } catch {
+      setPendingIds(new Set());
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadPending();
+  }, [loadPending]);
+
   async function onUpload(files: FileList | null) {
     if (!files?.length) return;
-    try {
-      for (const f of Array.from(files)) {
-        await hubUploadFile(f);
+    let added = 0;
+    let dup = 0;
+    let failed = 0;
+    const failNote: string[] = [];
+    for (const f of Array.from(files)) {
+      if (f.size > HUB_UPLOAD_MAX_BYTES) {
+        failed++;
+        failNote.push(copy.tooLarge);
+        continue;
       }
-      setToast(fillCopy(copy.uploaded, { n: String(files.length) }));
-      setPage(1);
-      await load();
-    } catch (e) {
-      setToast(e instanceof Error ? e.message : copy.error);
-    } finally {
-      if (fileRef.current) fileRef.current.value = "";
+      try {
+        const r = await hubUploadFile(f, (pct) =>
+          setUpNote(fillCopy(copy.uploading, { name: f.name, pct: String(pct) })),
+        );
+        if (r.status === "duplicate") dup++;
+        else if (r.id) added++;
+        else {
+          failed++;
+          failNote.push(f.name);
+        }
+      } catch {
+        failed++;
+        failNote.push(f.name);
+      }
     }
+    setUpNote("");
+    let summary = fillCopy(copy.uploadSummary, {
+      a: String(added),
+      d: String(dup),
+      f: String(failed),
+    });
+    if (failNote.length) summary += ` — ${failNote.slice(0, 3).join(" · ")}`;
+    setToast(summary);
+    setPage(1);
+    await Promise.all([load(), loadPending()]);
+    if (fileRef.current) fileRef.current.value = "";
   }
 
   async function saveDetail() {
@@ -314,6 +355,7 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
             <option value="name">{copy.sortName}</option>
             <option value="size">{copy.sortSize}</option>
           </select>
+          {upNote ? <span className="hub-upnote">{upNote}</span> : null}
           <button type="button" className="watch-btn" onClick={() => void load()} disabled={busy}>
             {copy.refresh}
           </button>
@@ -512,6 +554,11 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
                       </p>
                     ) : null}
                     <div className="hub-chips">
+                      {pendingIds.has(m.id) ? (
+                        <span className="chip hub-pending" title={copy.pendingBadge}>
+                          {copy.pendingBadge}
+                        </span>
+                      ) : null}
                       {dedupe(chipTagsVisible(m.tags))
                         .slice(0, 4)
                         .map((x, i) => (

@@ -278,33 +278,51 @@ export function hubSetReviewed(id: string, value: boolean): Promise<HubUnderstan
 }
 
 /** Multipart upload via direct hub (avoids Next /hub-api body limit). */
-export async function hubUploadFile(
+export const HUB_UPLOAD_MAX_BYTES = 2 * 1024 * 1024 * 1024; // 与后端 VITUAL_UPLOAD_MAX_MB 默认(2048MB)一致
+
+export type HubUploadResult = {
+  status?: string;
+  id?: string;
+  path?: string;
+  error?: string;
+  reason?: string;
+};
+
+export function hubUploadFile(
   file: File,
-): Promise<{ status?: string; id?: string; path?: string; error?: string }> {
-  const fd = new FormData();
-  fd.append("file", file, file.name);
-  const r = await fetch(hubUploadUrl(), {
-    method: "POST",
-    body: fd,
+  onProgress?: (pct: number) => void,
+): Promise<HubUploadResult> {
+  return new Promise((resolve, reject) => {
+    const fd = new FormData();
+    fd.append("file", file, file.name);
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", hubUploadUrl());
+    // 真实上传进度(fetch 不暴露 upload 事件)
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) {
+        onProgress(Math.round((e.loaded / e.total) * 100));
+      }
+    };
+    xhr.onload = () => {
+      const text = xhr.responseText || "";
+      let data: HubUploadResult & { detail?: string } = {};
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        data = { error: text || `upload ${xhr.status}` };
+      }
+      if (xhr.status >= 400) {
+        reject(new Error(data.detail || data.error || text || `upload ${xhr.status}`));
+        return;
+      }
+      // rejected(可执行文件拒收)没有 id,但要 resolve 让调用方按 status 统计
+      if (data.status !== "rejected" && !data.id) {
+        reject(new Error(data.error || "upload: no id"));
+        return;
+      }
+      resolve(data);
+    };
+    xhr.onerror = () => reject(new Error("upload network error"));
+    xhr.send(fd);
   });
-  const text = await r.text().catch(() => "");
-  let data: {
-    status?: string;
-    id?: string;
-    path?: string;
-    error?: string;
-    detail?: string;
-  } = {};
-  try {
-    data = text ? JSON.parse(text) : {};
-  } catch {
-    data = { error: text || `upload ${r.status}` };
-  }
-  if (!r.ok) {
-    throw new Error(data.detail || data.error || text || `upload ${r.status}`);
-  }
-  if (!data.id) {
-    throw new Error(data.error || "upload: no id");
-  }
-  return data;
 }

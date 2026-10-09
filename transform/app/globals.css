@@ -3828,6 +3828,9 @@ html[data-theme="dark"] .theme-toggle-track {
 .hub-tag .n { opacity: 0.55; font-variant-numeric: tabular-nums; }
 .hub-tag.on, .hub-tag:hover { border-color: var(--primary); color: var(--primary); }
 .hub-clear { width: 100%; margin-top: 0.6rem; font-size: 0.8rem; padding: 0.4rem; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--ink); cursor: pointer; }
+.hub-upnote { font-size: 0.78rem; color: var(--muted); align-self: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 24rem; }
+.hub-pending { border-style: dashed; animation: hubPending 1.2s ease-in-out infinite alternate; }
+@keyframes hubPending { from { opacity: 0.45; } to { opacity: 0.95; } }
 .hub-main { flex: 1; min-width: 0; }
 .hub-empty { padding: 2.5rem 1rem; text-align: center; border: 1px dashed var(--line); border-radius: var(--radius-card); background: var(--surface); }
 .hub-empty p { margin: 0.2rem 0; }

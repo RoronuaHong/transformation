@@ -2618,11 +2618,25 @@ def _unique_dest(dest_dir, name):
     return dest
 
 
+_BLOCKED_UPLOAD_EXT = frozenset(
+    (".exe", ".dll", ".bat", ".cmd", ".msi", ".scr", ".com", ".ps1", ".vbs", ".sh")
+)
+
+
 def ingest_file(src, move=True, source=""):
     """整理单个文件:去重(按 sha256)、分类、命名规范、入索引。
-    返回 {status:'added'|'duplicate', id, path?}。"""
+    返回 {status:'added'|'duplicate'|'rejected', id, path?}。
+    - 可执行/脚本扩展名拒收(DAM 不是软件仓库;超限大文件走链接引用或 CLI);
+      拒收件同样移入 TRASH,不残留 ingest 目录。
+    - source 非空时同时落为来源标签(如 upload,面板可筛「来源·上传」)。"""
     if not os.path.exists(src):
         return None
+    ext = os.path.splitext(src)[1].lower()
+    if ext in _BLOCKED_UPLOAD_EXT:
+        if move:
+            os.makedirs(TRASH, exist_ok=True)
+            shutil.move(src, _unique_dest(TRASH, os.path.basename(src)))
+        return {"status": "rejected", "reason": "blocked_ext", "ext": ext}
     sha = compute_sha256(src)
     con = _con()
     ex = con.execute("SELECT id FROM materials WHERE sha256=?", (sha,)).fetchone()
@@ -2635,12 +2649,16 @@ def ingest_file(src, move=True, source=""):
     kind = classify(src)
     name = sanitize_name(os.path.basename(src))
     dest = _unique_dest(os.path.join(MATERIALS, kind), name)
+    # 目标类别目录可能不存在(全新安装 / 首次入库新类别):实测缺它会 FileNotFoundError
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
     if move:
         shutil.move(src, dest)
     else:
         shutil.copy2(src, dest)
     mid = sha[:12]
     tags = _merge_tag_csv("", media_facet_tags(dest if os.path.isfile(dest) else src, kind))
+    if source:
+        tags = _merge_tag_csv(tags, [source])
     add_material(
         id=mid, kind=kind, ext=os.path.splitext(name)[1].lower(), name=name,
         rel_path=os.path.relpath(dest, HUB), size=os.path.getsize(dest), sha256=sha,
@@ -5212,6 +5230,21 @@ def pending_processing(mid):
         "shots": need_shots and not (sp and os.path.isfile(sp)),
         "phash": not (pp and os.path.isfile(pp)),
     }
+
+
+def pending_map():
+    """{id: {thumb,ocr,visual,shots,phash}} — 仅有缺项的素材(面板「理解中」徽章)。
+
+    全库量级扫描(get_material + 若干存在性检查),SQLite 本地无压力;
+    auto 链后台跑完后前端下次 load 即清零。"""
+    out = {}
+    for m in all_materials():
+        if m.get("kind") not in VISUAL_KINDS:
+            continue
+        pd = pending_processing(m["id"])
+        if any(pd.values()):
+            out[m["id"]] = pd
+    return out
 
 
 # ---------- 技术元数据(Technical Metadata) ----------

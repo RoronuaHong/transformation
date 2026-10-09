@@ -22,7 +22,7 @@ from core import (
     missing_thumbnail_ids, thumb_failure_reason, health, broken_externals,
     prune_broken_externals, external_stats,     build_embeddings, embed_status, chat_models,
     ensure_ollama, external_path_allowed,
-    auto_process_all, pending_processing,
+    auto_process_all, pending_processing, pending_map,
     split_all_videos_to_silent, split_video_to_silent_and_audio,
     reclassify_video_audio_kinds, apply_media_facet_tags, link_relation_parents,
     merge_material_tags, is_system_facet_tag,
@@ -32,6 +32,9 @@ from core import (
 from gateway import proxy_target, forward as gateway_forward
 
 PORT = 8000
+# 上传大小上限(防整包请求体进内存):默认 2048MB,可用 VITUAL_UPLOAD_MAX_MB 调整。
+# 超限 413 直接拒绝(更合适走链接引用 ingest_external 或 CLI 分批入库)。
+_UPLOAD_MAX_MB = int(os.environ.get("VITUAL_UPLOAD_MAX_MB") or "2048")
 # 鉴权(可选):设置 VITUAL_HUB_TOKEN 后,所有请求(含面板)都需带 token(Bearer 头或 ?token=),
 # 否则返回 401。未设置则保持本地开放(向后兼容)。
 HUB_TOKEN = os.environ.get("VITUAL_HUB_TOKEN", "").strip()
@@ -450,6 +453,9 @@ class Handler(BaseHTTPRequestHandler):
                                 "source": m.get("source", ""),
                                 "external_path": m.get("external_path", "")}
                                for m in broken_externals()])
+        if p == "/api/pending":
+            # 「理解中」徽章数据:{id: {thumb,ocr,visual,shots,phash}},仅含有缺项的素材
+            return self._json(pending_map())
         if p == "/api/dupes":
             return self._json(duplicates())
         if p.startswith("/api/readiness/"):
@@ -579,6 +585,10 @@ class Handler(BaseHTTPRequestHandler):
         elif p == "/hub-api":
             p = "/api"
         length = int(self.headers.get("Content-Length", 0))
+        if p == "/api/upload" and length > _UPLOAD_MAX_MB * 1024 * 1024:
+            # 先于 rfile.read 拒绝:不把超限请求体读进内存;断开连接防 keepalive 残包
+            self.close_connection = True
+            return self._json({"error": "file_too_large", "max_mb": _UPLOAD_MAX_MB}, 413)
         raw = self.rfile.read(length) if length else b""
 
         if p == "/api/upload":
@@ -589,27 +599,32 @@ class Handler(BaseHTTPRequestHandler):
             boundary = bm.group(1).strip().strip('"').encode()
             try:
                 files = parse_multipart(raw, boundary)
-                res = None
-                added = False
+                results = []
+                any_added = False
                 for _, (filename, content) in files.items():
                     if not filename:
                         continue
-                    os.makedirs(os.path.join(HUB, "ingest"), exist_ok=True)
-                    tmp = os.path.join(HUB, "ingest", sanitize_name(filename))
-                    with open(tmp, "wb") as o:
-                        o.write(content)
-                    r = ingest_file(tmp, move=True)
-                    if r and r.get("status") == "added":
-                        added = True
-                    res = r or res
-                if added:
+                    try:  # 单文件失败不拖垮整批(逐文件结果反馈给前端)
+                        os.makedirs(os.path.join(HUB, "ingest"), exist_ok=True)
+                        tmp = os.path.join(HUB, "ingest", sanitize_name(filename))
+                        with open(tmp, "wb") as o:
+                            o.write(content)
+                        r = ingest_file(tmp, move=True, source="upload")
+                        if r and r.get("status") == "added":
+                            any_added = True
+                        results.append({"name": filename,
+                                        **(r or {"status": "error", "reason": "ingest_none"})})
+                    except Exception as e:  # noqa: BLE001
+                        results.append({"name": filename, "status": "error",
+                                        "reason": "%s: %s" % (type(e).__name__, e)})
+                if any_added:
                     enqueue_autoproc(kicked_by="upload")
-                return self._json(res or {"status": "empty"})
+                return self._json({"results": results})
             except Exception as e:  # noqa: BLE001
                 return self._json({"error": "%s: %s" % (type(e).__name__, e)}, 500)
 
         if p == "/api/ingest":
-            r = ingest_dir(os.path.join(HUB, "ingest"))
+            r = ingest_dir(os.path.join(HUB, "ingest"), source="upload")
             if r:
                 enqueue_autoproc(kicked_by="ingest")
             return self._json({"ingested": len(r)})
