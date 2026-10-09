@@ -361,6 +361,7 @@ export type HubCopy = {
   saved: string;
   deleted: string;
   uploadSummary: string;
+  asideFilter: string;
   uploading: string;
   pendingBadge: string;
   tooLarge: string;
@@ -762,6 +763,7 @@ const en: UiCopy = {
     saved: "Saved",
     deleted: "Deleted",
     uploadSummary: "Added {a}, duplicates {d}, failed {f}",
+    asideFilter: "Filters",
     uploading: "Uploading {name} {pct}%",
     pendingBadge: "Processing",
     tooLarge: "File too large (max 2 GB) — use link ingest or CLI",
@@ -1153,6 +1155,7 @@ const zh: UiCopy = {
     saved: "已保存",
     deleted: "已删除",
     uploadSummary: "入库 {a} · 重复 {d} · 失败 {f}",
+    asideFilter: "筛选",
     uploading: "上传中 {name} {pct}%",
     pendingBadge: "理解中",
     tooLarge: "文件过大（上限 2GB），请走链接引用或 CLI 入库",
@@ -1379,6 +1382,7 @@ const zhHant: UiCopy = {
     saved: "已儲存",
     deleted: "已刪除",
     uploadSummary: "入庫 {a} · 重複 {d} · 失敗 {f}",
+    asideFilter: "篩選",
     uploading: "上傳中 {name} {pct}%",
     pendingBadge: "理解中",
     tooLarge: "檔案過大（上限 2GB），請走連結引用或 CLI 入庫",

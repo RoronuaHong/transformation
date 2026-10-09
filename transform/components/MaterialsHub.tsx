@@ -85,6 +85,7 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
   const [toast, setToast] = useState("");
   const [upNote, setUpNote] = useState("");
   const [pendingIds, setPendingIds] = useState<Set<string>>(new Set());
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [maxUp, setMaxUp] = useState(HUB_UPLOAD_MAX_BYTES);
   const [detail, setDetail] = useState<HubMaterial | null>(null);
   // 步骤 1/4/5:入库链逐步状态 + 结构化理解记录(派生 sidecar,只读展示)
@@ -241,6 +242,11 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
     }, 8000);
     return () => clearTimeout(t);
   }, [pendingIds, loadPending]);
+
+  // 移动端筛选抽屉:应用筛选后自动收起,让结果区可见
+  useEffect(() => {
+    setFiltersOpen(false);
+  }, [kind, tag]);
 
   async function onUpload(files: FileList | null) {
     if (!files?.length) return;
@@ -402,7 +408,21 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
       ) : null}
 
       <div className="hub-layout">
-        <aside className="hub-aside">
+        <button
+          type="button"
+          className="hub-aside-toggle"
+          aria-expanded={filtersOpen}
+          aria-controls="hub-aside-body"
+          onClick={() => setFiltersOpen((v) => !v)}
+        >
+          <span className="nav-burger-box" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </span>
+          {copy.asideFilter}
+        </button>
+        <aside id="hub-aside-body" className={`hub-aside${filtersOpen ? " open" : ""}`}>
           <h3>{copy.statTotal}</h3>
           <div className="hub-facets" id="kindFacets">
             {facets.map((f) => (
