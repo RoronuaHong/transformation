@@ -588,7 +588,13 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
                         void removeMaterial(m);
                       }}
                     >
-                      {copy.del}
+                      {/* 垃圾桶图标:aria-label 已含「删除 + 文件名」,无障碍不丢 */}
+                      <svg viewBox="0 0 16 16" aria-hidden="true">
+                        <path d="M2.5 4h11" />
+                        <path d="M5.5 4V2.8c0-.44.36-.8.8-.8h3.4c.44 0 .8.36.8.8V4" />
+                        <path d="M4 4l.7 9.2c.04.44.4.8.85.8h4.9c.45 0 .81-.36.85-.8L12 4" />
+                        <path d="M6.5 6.8v4.4M9.5 6.8v4.4" />
+                      </svg>
                     </button>
                     {m.missing ? (
                       <span className="pill bad">{copy.missing}</span>

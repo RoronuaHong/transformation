@@ -3908,15 +3908,25 @@ html[data-theme="dark"] .theme-toggle-track {
   top: 0.35rem;
   right: 0.35rem;
   z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: 0;
   border-radius: 8px;
-  padding: 0.2rem 0.45rem;
-  font: inherit;
-  font-size: 0.72rem;
-  line-height: 1.2;
+  padding: 0.3rem;
   cursor: pointer;
   color: #fff;
   background: rgba(0, 0, 0, 0.62);
+}
+.hub-card-del svg {
+  display: block;
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 .hub-card-del:hover {
   background: var(--danger);
