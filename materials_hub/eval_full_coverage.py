@@ -203,6 +203,17 @@ def main():
     except Exception as e:
         check("O", "检索门禁 PASS", False, "err: %s" % e)
 
+    # ---- O2. 语义(auto)门禁:语义是默认主路径,必须与词法同等受门禁保护 ----
+    try:
+        out = subprocess.run([sys.executable, "eval_search.py", "--mode", "auto", "--gate"],
+                             capture_output=True, text=True, encoding="utf-8", errors="replace",
+                             cwd=HERE, timeout=300)
+        gate_pass = "GATE: PASS" in out.stdout
+        check("O2", "语义(auto)门禁 PASS(主路径同等受保护)", gate_pass,
+              "stdout=%s" % [l for l in out.stdout.splitlines() if "GATE" in l or "FAIL" in l][:2])
+    except Exception as e:
+        check("O2", "语义(auto)门禁 PASS", False, "err: %s" % e)
+
     # ---- P. 可观测性 ----
     try:
         import obs as _obs  # noqa
