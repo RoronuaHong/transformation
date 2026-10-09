@@ -24,23 +24,21 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import core
 
 # 固化查询集(取自 README 实测场景)。新增查询直接在下面加一行即可。
+# 2026-10-09 语料重构(移除 256 条 mode-renders QA 渲染):5 个死亡查询移除
+# (对比渲染结果/用 Lama 补全的画面/字形检测的渲染输出/视觉语言模型抽的关键帧/
+#  去台标 delogo 处理的片段——其 GT 目标全部随语料移除),余 11 查询。
 EVAL_QUERIES = [
     "去除字幕只留背景",
     "把模糊画面变清晰",
     "按时间切的片段",
     "字幕文本文件",
-    "对比渲染结果",
     "人脸修复",
     "基准测试视频",
     "b站下载的字幕",
     "修好的成品",
     # 窄查询(2026-09-28 补):相关集 1-6 条,大相关性集下 P@5 饱和无法区分排序,靠这些恢复区分度
     "去马赛克处理结果",
-    "用 Lama 补全的画面",
-    "字形检测的渲染输出",
-    "视觉语言模型抽的关键帧",
     "繁体中文字幕 srt",
-    "去台标 delogo 处理的片段",
     "b站视频的音频文件",
 ]
 
@@ -97,7 +95,16 @@ def load_ground_truth(path=None):
 #   故仅作备选(`eval_ground_truth.all.json`),未采纳。详见《最佳实践》§15.4。
 #   门禁用途:任何检索/同义词改动跑 `--gate`,均值掉出基线(容差 0.02)即失败(退出码 1)。
 # ---------------------------------------------------------------------------
-GATE_BASELINE = {"p5": 0.71, "r20": 0.78, "mrr": 0.85, "ndcg": 0.84}
+# 2026-10-09 语料重构后重测(384->128,移除 256 条 mode-renders QA 渲染;GT 427->109 标注/11 查询)。
+# lexical 为门禁主基线;auto 单列基线(重构后稠密 RRF 在小语料+小 GT 上实测低于 lexical,
+# 如实记录,重构前 auto lift≈0 的结论在新语料上不成立,待 GT 重新充实后再评估)。
+# 2026-10-10 二次收口:清除 3 个语义已死查询(按时间切的片段/基准测试视频/去马赛克处理结果
+# ——真目标在 10-09 mode-renders 手术中被删,幸存标注与现库命名错位;备份 backup-20261010.json),
+# GT 11→8 查询、98→82 标注。基线随实测收紧(lexical p5 .59→.78 / mrr .73→.93)。
+GATE_BASELINE = {"p5": 0.78, "r20": 0.92, "mrr": 0.93, "ndcg": 0.92}
+# 2026-10-10:多模型栈(SigLIP2+bge-reranker-v2-m3 ONNX 精排+受控词表 autotags 通道)落地后,
+# auto 模式随实测收紧(r20 .70→.84 / ndcg .66→.75)。
+AUTO_GATE_BASELINE = {"p5": 0.49, "r20": 0.84, "mrr": 0.80, "ndcg": 0.75}
 GATE_TOL = 0.02          # 容差:允许浮点/排序稳定性带来的微小波动
 GATE_METRICS = ("p5", "r20", "mrr", "ndcg")
 
@@ -222,7 +229,8 @@ def main():
 
     if args.gate:
         _per, p5, r20, mrr, ndcg = evaluate(args.mode, gt)
-        ok, details = check_gate(p5, r20, mrr, ndcg)
+        base = AUTO_GATE_BASELINE if args.mode == "auto" else None
+        ok, details = check_gate(p5, r20, mrr, ndcg, baseline=base)
         print(f"\n=== 回归门禁 (mode={args.mode}, oracle={oracle}) ===")
         print(f"{'metric':<8}{'baseline':>10}{'actual':>9}{'delta':>9}  result")
         for d in details:

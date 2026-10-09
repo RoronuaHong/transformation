@@ -77,7 +77,7 @@ sp | <platform> | job:<id> | type:<media|clip|subs|notes|benchmark|render|test>
 
 ### 分类(kind)与扩展名
 `images` · `videos` · **`silent`(无声音轨的画面)** · `docs` · `audio` · **`subs`(srt/ass/vtt/ssa/sub/sbv)** · `anim` · `other`。
-(当前 384 条:images 157 / docs 105 / silent 77 / subs 19 / videos 16 / audio 8 / anim 1 / other 1)
+(当前 128 条:docs 73 / silent 16 / subs 19 / audio 8 / videos 5 / images 5 / anim 1 / other 1;2026-10-09 移除 256 条流水线 QA 渲染产物)
 
 ### 检索打分(词法层)
 字段权重:`name 3.0` > `tags 2.5` > `description 1.5` > `rel_path 1.0`。query 与各字段 token 重叠累计得分,按分排序;无 query 时按时间倒序。
@@ -206,7 +206,7 @@ python bridge_subtitle.py --thumbs --prune               # 推荐:一次跑完 �
 ```
 - **幂等**:重复运行会跳过已登记(同 sha256)的素材。
 - **重做**:想清空重建,删 `index/hub.db` 后重跑 `python bridge_subtitle.py`(仅重建外部引用;`materials/` 下的内部素材需再 `python cli.py scan`)。
-- **当前状态**(2026-10-06 实测,重建后):共 **384** 条,其中 **370** 条为外部引用、14 条内部素材(外部引用 0 项失效);
+- **当前状态**(2026-10-09 语料重构后):共 **128** 条(2026-10-09 移除 256 条 mode-renders QA 渲染产物并堵扫描源头,GT 同步重标 427→109 标注/11 查询,门禁重测重基线);
   按 kind:images 157 / docs 105 / silent 77 / subs 19 / videos 16 / audio 8 / anim 1 / other 1。
   *(2026-10-05 曾因索引重置掉到 23 条、评估门禁失效;重跑 `python bridge_subtitle.py` 后恢复为 384 条,语义向量覆盖率 0/384 待重建。)*
 - **定时 / 流水线触发**:可在 batch 跑完后定时执行 bridge;进阶可在 subtitle_pipeline 收尾调用 `--scope batch`,或经其 `vitual_mcp` 推送(MCP 阶段二)。
@@ -364,7 +364,8 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 | `VITUAL_EMBED_MODEL` | 自动发现 | 指定 embedding 模型 |
 | `VITUAL_EMBED_MIN_COS` | `0.25` | 稠密相似度入选阈值(居中后) |
 | `VITUAL_RRF_K` / `VITUAL_HYBRID_WLEX` | `60` / `1.0` | RRF 常数 / 词法权重(调大更偏精确关键词) |
-| `VITUAL_RERANK_MODEL` | 空(关闭) | 可选 stage-2 重排:`_ollama_rerank` 调 ollama `/api/rerank`。**注意:本机 ollama 0.34.0 不暴露该端点(实测 404),故该路径静默降级为原 RRF 融合**;设 `DENGCAO/BGE-RERANKER-V2-M3` 等模型名仅当端点可用时生效。`lexical` 为内置离线弱基线(实测会劣化排序,勿用于生产);`VITUAL_RERANK_TOP` 控制精排候选量(默认 60) |
+| `VITUAL_RERANK_MODEL` | `auto` | stage-2 重排。**`auto`(默认):`models/rerank/model.onnx` 存在即走本地 bge-reranker-v2-m3 ONNX(rerank_runner.py 子进程,SP venv onnxruntime+tokenizers,2026-10-10 起可用)**;`__none__` 显式关闭;`lexical` 内置离线弱基线(实测会劣化排序,勿用);其余值=ollama `/api/rerank`(本机 ollama 0.34.0 不暴露该端点,实测 404 会静默降级 RRF)。`VITUAL_RERANK_TOP` 控制精排候选量(默认 60) |
+| `VITUAL_RERANK_PROVIDERS` | `CPUExecutionProvider` | reranker 推理 provider(本机 CUDA EP 初始化有 GBK 日志雷,默认 CPU;top-60 数秒完成) |
 | `VITUAL_CACHE_SEARCH` / `VITUAL_CACHE_PERSIST` | 关 / 关 | 查询内存缓存 / 额外落盘 `index/search_cache.pkl`(跨会话复用) |
 | `VITUAL_OCR_PYTHON` | 自动发现 | 画面 OCR 用的 python(需装 rapidocr;默认自动找 `subtitle_pipeline/.venv`) |
 
@@ -372,7 +373,10 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 - **语义模型已是多语**:默认 `bge-m3`(中文进多语向量空间),非中文查询经本地 `translategemma:4b` 译中后中英合并检索(跨语桥接)。
   但**窄面召回仍由同义词表主导**——16 查询 GT 上 `auto` 相对 `lexical` 仅 +0.01(因 GT 已被 lexical+同义词覆盖)。
   (旧结论「`nomic-embed-text` 英文单语、别指望多语」属换模型前的历史状态。)
-- **rerank 暂不可用**:cross-encoder 重排需 ollama 暴露 `/api/rerank`,当前版本不暴露,自动降级 RRF(见上表 `VITUAL_RERANK_MODEL`)。
+- **rerank 已可用(2026-10-10)**:不再依赖 ollama `/api/rerank`——本地 `bge-reranker-v2-m3` ONNX
+  (`models/rerank/`,568M 参数 fp32)+ `rerank_runner.py` 子进程(SP venv onnxruntime+tokenizers),
+  `semantic_rank` 默认 `auto` 自动启用:top-60 召回 → cross-encoder 精排。冒烟:查询 "chicken wings"
+  对「braised chicken wings…」打 0.33、「car on street」打 -11.0,区分度极大。
 - 中文单字匹配会带来少量误召回(例如查询里的「赛」命中了无关的中文文件名)。
 - 语义检索需要 ollama 常驻;关掉后自动回退词法,不影响使用。
 - 想只用精确关键词:面板检索方式切「精确关键词」,或 `?mode=lexical`。
@@ -452,8 +456,17 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 | `VITUAL_HUB_EXT_ROOTS` | 工作区根 | 允许登记/读取外部引用的额外根目录(分号分隔) |
 
 **已落地(原列在「后续可扩展」,现已完成)**
-- **多语 embedding**:默认已切 `bge-m3`,文本向量覆盖率 **384/384 = 1.0**;非中文查询经 `translategemma:4b` 跨语桥接。
-- **图片语义(CLIP)**:`models/clip/ViT-B-32.pt` 已就位,图像向量覆盖率 **241/251 = 0.960**,支持以图搜图(cosine 0.89+)与以文搜图(偏弱——零样本 CLIP 对垂类内容)。
+- **多语 embedding**:默认已切 `bge-m3`;非中文查询经 `translategemma:4b` 跨语桥接。
+- **图片语义升级为 SigLIP 2(2026-10-10)**:`ViT-B-32/openai`(2021) → `ViT-B-16-SigLIP2-256/webli`
+  (Google 2025,375M 参数,HF 缓存在 `models/clip/`,离线可复用;zero-shot 图文检索/分类高约 8-10 个点)。
+  图像向量 + 多帧向量已按新模型重建;以文搜图阈值随模型自适应(`_clip_text_floor`,SigLIP2 分布整体压低)。
+- **受控词表 zero-shot 自动标签(2026-10-10)**:`tag_vocab.py`(168 个人工维护中英标签,零幻觉)
+  + SigLIP2 softmax(scale=100) 概率阈值(默认 0.02,实测相关标签 40-93%、噪声 <3%)
+  + **VLM∩SigLIP 互验闸门**(双模型互认 → verified)。落 `index/autotags/<id>.json`,
+  检索三路收录(0.35 词法通道/稠密 doc_text/全文),CLI `vtag` 全量跑。
+- **画面 VLM 升级 qwen2.5vl:3b(2026-10-10)**:物体/菜名命名精度优于 gemma4:e2b
+  (ollama Q4 ~3GB 显存,6GB 卡可跑);`visual_runner.py` 自动选型,env `VITUAL_VISUAL_MODEL` 可覆盖。
+- **cross-encoder 重排(2026-10-10)**:本地 `bge-reranker-v2-m3` ONNX(见语义检索一节)。
 
 **后续可扩展**
 - **转码代理**(依赖 ffmpeg):为超大视频生成低码率预览版,提速浏览。

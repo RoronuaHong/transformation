@@ -28,6 +28,7 @@ ASR_DIR = os.path.join(INDEX_DIR, "asr")        # 视频/音轨转写 sidecar(�
 SHOT_DIR = os.path.join(INDEX_DIR, "shots")    # 视频镜头索引 sidecar(派生数据,可随时重建)
 PHASH_DIR = os.path.join(INDEX_DIR, "phash")   # dHash 感知哈希 sidecar(派生数据,可随时重建)
 TECH_DIR = os.path.join(INDEX_DIR, "tech")     # 技术元数据 sidecar(时长/分辨率/编码/帧率…,派生可重建)
+AUTOTAG_DIR = os.path.join(INDEX_DIR, "autotags")  # 受控词表 zero-shot 自动标签 sidecar(SigLIP2,派生可重建)
 INDEX_DB = os.path.join(INDEX_DIR, "hub.db")
 STATIC = os.path.join(HUB, "static")
 THUMBS = os.path.join(INDEX_DIR, "thumbs")  # 视频封面缓存(派生数据,可随时删)
@@ -899,6 +900,52 @@ def _asr_text(mid):
     return t
 
 
+# 受控词表自动标签(SigLIP2 zero-shot + VLM 互验)文本的词法权重:与 OCR/visual 同构。
+# 标签出自人工维护词表(tag_vocab.py),比自由文本可信,但仍低于 name/tags——
+# 一帧可以同时"像"很多标签,阈值过滤后仍可能混入近邻词(如查鸡腿出鸡翅)。
+_AUTOTAG_FIELD_WEIGHT = 0.35
+_AUTOTAG_TEXT_CACHE = {}
+
+
+def autotag_sidecar_path(mid):
+    """素材的自动标签 sidecar 路径(index/autotags/<id>.json;派生数据,可随时重建)。"""
+    mid = str(mid or "").strip()
+    if not mid or any(c in mid for c in "\\/.:"):
+        return None                              # 防路径拼接注入(同 ocr_sidecar_path)
+    return os.path.join(AUTOTAG_DIR, mid + ".json")
+
+
+def _autotags_text(mid):
+    """读自动标签 sidecar 并压平成可检索文本(每标签「中文 英文」一行),带进程内缓存。
+    无 sidecar 返回 ''。缓存按 (mtime,size) 校验,与 _ocr_text 同构。"""
+    sc = autotag_sidecar_path(mid or "")
+    st = None
+    if sc:
+        try:
+            st = (os.path.getmtime(sc), os.path.getsize(sc))
+        except OSError:
+            st = None
+    cached = _AUTOTAG_TEXT_CACHE.get(mid)
+    if cached is not None and cached[0] == st:
+        return cached[1]
+    t = ""
+    if sc and os.path.isfile(sc):
+        try:
+            with open(sc, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            lines = []
+            for key in ("verified", "auto"):
+                for tg in data.get(key) or []:
+                    zh, en = (tg.get("zh") or "").strip(), (tg.get("en") or "").strip()
+                    if zh or en:
+                        lines.append(" ".join(x for x in (zh, en) if x))
+            t = "\n".join(lines)
+        except Exception:
+            t = ""
+    _AUTOTAG_TEXT_CACHE[mid] = (st, t)
+    return t
+
+
 def _score_sidecar_channel(q_tokens, text, q_bigram_count):
     """画面/OCR/转写侧通道打分(步骤 11 噪声收紧)。
 
@@ -959,6 +1006,12 @@ def _score(q_tokens, m):
         s = _score_sidecar_channel(q_tokens, _asr_text(m.get("id", "")), q_bigram)
         if s:
             sc += _ASR_FIELD_WEIGHT * s
+    # 受控词表自动标签(SigLIP2 zero-shot):独立低权重通道,与 OCR/visual 同构。
+    gt = _tokens(_autotags_text(m.get("id", "")))
+    if gt:
+        s = _score_sidecar_channel(q_tokens, _autotags_text(m.get("id", "")), q_bigram)
+        if s:
+            sc += _AUTOTAG_FIELD_WEIGHT * s
     return sc
 
 
@@ -1053,11 +1106,31 @@ def _query_intent(q):
     return "text"
 
 
+def _clip_text_floor():
+    """以文搜图的命中分数线(模型自适应)。
+
+    分数分布因模型而异,不能一把尺子量到底:
+    * ViT-B-32/openai(旧):无关画面挤在 0.28 附近,相关 ≥0.32;
+    * SigLIP2(2026-10-10 起):sigmoid 损失使余弦整体压低,实测无关 top≈0.089、
+      相关 top≈0.127-0.146(翅鱼类)、半相关 0.10-0.12 → 分数线 0.11。
+    可用 VITUAL_CLIP_TEXT_FLOOR 覆盖。"""
+    env = os.environ.get("VITUAL_CLIP_TEXT_FLOOR", "").strip()
+    if env:
+        try:
+            return float(env)
+        except ValueError:
+            pass
+    model = (clip_probe().get("model") or "").lower()
+    return 0.11 if "siglip2" in model else 0.32
+
+
 def _append_clip_hits(q, rows, kind):
     """以文搜图只在文字几乎没命中时补画面。
 
-    实测无关画面的 CLIP 分挤在 0.28 附近、彼此拉不开。平坦的一串高分不当命中,
-    否则红印章会排到鸡翅前面。要顶部明显高于第二名,且不低于 0.32。
+    实测无关画面的向量分彼此拉不开(ViT-B-32 挤在 0.28,SigLIP2 挤在 0.089 附近),
+    平坦的一串高分不当命中,否则红印章会排到鸡翅前面。要顶部不低于模型自适应分数线
+    (_clip_text_floor)且明显高于第二名。注意 SigLIP2 下多条同主题素材分数几乎相同
+    (0.127/0.127/0.122),gap 阈值须相应放宽到 0.01,否则多命中会被误杀。
     """
     if _query_intent(q) in ("id", "speech"):
         return rows
@@ -1065,15 +1138,16 @@ def _append_clip_hits(q, rows, kind):
         return rows
     if sum(1 for m in rows if _score(_tokens(q), m) > 0) >= 3:
         return rows
+    floor = _clip_text_floor()
     try:
-        found = search_by_text_image(q, limit=8, min_score=0.15)
+        found = search_by_text_image(q, limit=8, min_score=max(0.05, floor - 0.03))
     except Exception:
         return rows
     matches = found.get("matches") or []
     if len(matches) < 2:
         return rows
     top, second = matches[0]["score"], matches[1]["score"]
-    if top < 0.32 or (top - second) < 0.03:
+    if top < floor or (top - second) < 0.01:
         return rows
     have = {m.get("id") for m in rows}
     add = []
@@ -1320,6 +1394,9 @@ def _material_text(m):
                 parts.append(f.read())
         except Exception:
             pass
+    at = _autotags_text(m.get("id", ""))
+    if at:
+        parts.append(at)
     return "\n".join(x for x in parts if x)
 
 
@@ -1434,6 +1511,64 @@ def _ollama_rerank(q, docs, model=None):
         return [x["index"] for x in order]
     except Exception:
         return None
+
+
+def _rerank_dir():
+    """本地 reranker ONNX 模型目录(models/rerank;model.onnx + model.onnx_data + tokenizer.json)。"""
+    return os.path.join(HUB, "models", "rerank")
+
+
+def onnx_rerank_available(refresh=False):
+    """本地 bge-reranker-v2-m3 ONNX 是否就位(文件级探测,毫秒级,不加载模型)。"""
+    d = _rerank_dir()
+    return (os.path.isfile(os.path.join(d, "model.onnx"))
+            and os.path.isfile(os.path.join(d, "model.onnx_data"))
+            and os.path.isfile(os.path.join(d, "tokenizer.json")))
+
+
+def rerank_status():
+    """重排链路状态(auto/lexical/ollama/onnx/关闭),供 CLI/状态栏展示。"""
+    env = os.environ.get("VITUAL_RERANK_MODEL", "").strip()
+    if env == "__none__":
+        return {"mode": "off", "available": False}
+    if env == "lexical":
+        return {"mode": "lexical", "available": True}
+    if env and env not in ("", "auto"):
+        return {"mode": "ollama", "model": env, "available": True}
+    if onnx_rerank_available():
+        return {"mode": "onnx", "model": "bge-reranker-v2-m3", "available": True,
+                "dir": _rerank_dir()}
+    return {"mode": "none", "available": False,
+            "hint": "models/rerank 缺 model.onnx/model.onnx_data/tokenizer.json"}
+
+
+def _onnx_rerank(q, docs, timeout=600):
+    """本地 cross-encoder 重排:rerank_runner.py 子进程(SP venv onnxruntime + tokenizers)。
+
+    返回按相关性降序的文档下标列表;任何异常都返回 None(调用方降级为原 RRF 融合)。
+    文本经 **stdin JSON** 传入——60 条 × 1.2KB 会超 Windows 32KB argv 上限,不能用命令行传。"""
+    py = _clip_python()
+    runner = os.path.join(HUB, "rerank_runner.py")
+    if not py or not os.path.isfile(runner) or not docs:
+        return None
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    flags = 0x08000000 if os.name == "nt" else 0
+    try:
+        p = subprocess.run([py, runner], input=json.dumps(
+            {"query": q, "texts": list(docs)}, ensure_ascii=False).encode("utf-8"),
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=timeout, env=env, creationflags=flags)
+    except Exception:
+        return None
+    try:
+        raw = (p.stdout or b"").decode("utf-8", "replace").strip()
+        r = json.loads(raw.splitlines()[-1])
+    except Exception:
+        return None
+    scores = r.get("scores")
+    if r.get("error") or not isinstance(scores, list) or len(scores) != len(docs):
+        return None
+    return sorted(range(len(docs)), key=lambda i: -float(scores[i]))
 
 
 def _lexical_rerank(q, docs, model=None):
@@ -1862,8 +1997,12 @@ def embed_texts(texts, model=None):
         return None
     model = model or info["model"]
     url = _embed_url()
+    # keep_alive:模型常驻(默认 30m)——否则并发任务(gemma4 describe 等)挤掉
+    # bge-m3 后,每次 embed 都要重载 1.2GB 模型(实测单查 auto 0.1s->35s)。
+    ka = os.environ.get("VITUAL_EMBED_KEEP_ALIVE", "30m")
     try:
-        r = _http_json(url + "/api/embed", {"model": model, "input": list(texts)})
+        r = _http_json(url + "/api/embed", {"model": model, "input": list(texts),
+                                            "keep_alive": ka})
         if isinstance(r.get("embeddings"), list) and len(r["embeddings"]) == len(texts):
             return r["embeddings"]
     except Exception:
@@ -1871,7 +2010,8 @@ def embed_texts(texts, model=None):
     out = []
     for t in texts:                      # 老版本 ollama:逐条
         try:
-            r = _http_json(url + "/api/embeddings", {"model": model, "prompt": t})
+            r = _http_json(url + "/api/embeddings", {"model": model, "prompt": t,
+                                                     "keep_alive": ka})
             out.append(r["embedding"])
         except Exception:
             return None
@@ -1921,7 +2061,9 @@ def doc_text(m):
     ocr = _ocr_text(m.get("id", ""))
     visual = _visual_text(m.get("id", ""))
     asr = _asr_text(m.get("id", ""))
-    parts = [words, " ".join(tags), m.get("description", ""), ocr, visual, asr, m.get("kind", ""), stage]
+    autotags = _autotags_text(m.get("id", ""))
+    parts = [words, " ".join(tags), m.get("description", ""), ocr, visual, asr,
+             autotags, m.get("kind", ""), stage]
     doc_p, _ = _embed_prefixes()
     return doc_p + " | ".join(x for x in parts if x)
 
@@ -2121,8 +2263,14 @@ def semantic_rank(q, base_rows, lexical_rows=None):
         return (lexical_rows or []), True
 
     # 可选 stage-2 重排(cross-encoder):只对召回的 Top-N 精排,其余保持 RRF 顺序附后。
-    # 默认关闭(VITUAL_RERANK_MODEL 未设即跳过),零模型依赖下行为与旧版完全一致。
+    # 2026-10-10 起默认 auto:models/rerank/model.onnx 存在即走本地 bge-reranker-v2-m3
+    # ONNX(rerank_runner.py 子进程,SP venv onnxruntime);无模型自动降级,行为同旧版。
+    # VITUAL_RERANK_MODEL="__none__" 显式关闭;="lexical" 内置弱基线;其余值=ollama 模型名。
     rerank_model = os.environ.get("VITUAL_RERANK_MODEL", "").strip()
+    if rerank_model == "__none__":
+        rerank_model = ""
+    elif rerank_model in ("", "auto"):
+        rerank_model = "onnx" if onnx_rerank_available() else ""
     if rerank_model:
         top_n = min(len(keep), int(os.environ.get("VITUAL_RERANK_TOP", "60")))
         top, rest = keep[:top_n], keep[top_n:]
@@ -2133,6 +2281,8 @@ def semantic_rank(q, base_rows, lexical_rows=None):
                 f"{_asr_text(m.get('id', ''))[:400]}" for m in top]
         if rerank_model == "lexical":
             order = _lexical_rerank(q, docs, rerank_model)   # 内置离线弱基线,无需 ollama
+        elif rerank_model == "onnx":
+            order = _onnx_rerank(q, docs)    # 本地 bge-reranker-v2-m3(rerank_runner.py)
         else:
             order = _ollama_rerank(q, docs, rerank_model)   # 真目标:ollama cross-encoder
         if order is not None:
@@ -4197,6 +4347,15 @@ def visual_material(mid, frames=3, force=False):
         f.write("\n".join(lines))
     _VISUAL_TEXT_CACHE.pop(mid, None)     # sidecar 已更新,失效进程内缓存
     _sync_material_vector(mid)            # 向量失效闭环:画面描述变了立即重嵌
+    # VLM∩SigLIP 互验闸门:画面描述刚更新,立刻对该素材重跑受控词表 zero-shot 打标
+    # (VLM 标签与 SigLIP2 打分交叉验证)。失败静默——自动链不能被附加步骤拖死;
+    # image 向量未建时 build_auto_tags 会记 missing_vec,下次 vtag 全量跑会兜底。
+    if os.environ.get("VITUAL_AUTOTAG_ON_VISUAL", "1").strip().lower() not in (
+            "0", "false", "no"):
+        try:
+            build_auto_tags(mids=[mid], force=True)   # visual 文本已变,verified 闸门须重算
+        except Exception:
+            pass
     # 画面描述只落 sidecar(index/visual/<id>.txt),由语义 doc_text / 词法低权重 / 全文分块三路
     # 径收录;不写进 DB description 列(否则自由描述文本稀释精确 token 排序,同 OCR 教训)。
     log_history("app", "visual", mid, f"frames={len(imgs)} chars={total}")
@@ -4216,6 +4375,121 @@ def visual_all(limit=0, force=False):
             continue
         out.append(visual_material(m["id"], force=force))
     return out
+
+
+# ---------- 受控词表 zero-shot 自动标签(SigLIP2,2026-10-10 多模型改造) ----------
+def build_auto_tags(force=False, limit=0, progress=None, mids=None):
+    """受控词表 zero-shot 打标:SigLIP2 图文相似度过阈值 → index/autotags/<id>.json。
+
+    铁律:标签**只能**出自 tag_vocab.TAG_VOCAB(人工维护的中英词表)——由 SigLIP2
+    对封面图打分挑选,阈值过滤,零幻觉;这解决了 VLM 自由发挥标签的精度问题。
+
+    **VLM∩SigLIP 互验闸门**:同一标签同时出现在 VLM 画面描述(visual sidecar,
+    含 VLM 自产标签)→ 记 verified(双模型互认,高可信);仅 SigLIP2 认可 → 记 auto
+    (单方证据,低权重语义)。两侧都是受控词表内的词,交叉即验证。
+
+    检索三路收录(与 OCR/visual 同构):`_score` 独立 0.35 低权重通道、doc_text 稠密、
+    `_material_text` 全文;绝不写 description 列(排序稀释铁律)。
+    幂等:未 force 时跳过已有 sidecar。依赖:CLIP/SigLIP2 后端 + image_embeddings 索引。
+    """
+    try:
+        import tag_vocab
+    except Exception:
+        return {"available": False, "reason": "no_tag_vocab"}
+    info = clip_probe(refresh=force)
+    if not info.get("ok"):
+        return {"available": False, "reason": "clip_unavailable", "err": info.get("err", "")}
+    vocab = list(tag_vocab.TAG_VOCAB)
+    if not vocab:
+        return {"available": False, "reason": "empty_vocab"}
+    prompts = [tag_vocab.TAG_PROMPT.format(en) for _, en in vocab]
+    tvecs = _clip_embed_texts(prompts)
+    if not tvecs or not tvecs[0]:
+        return {"available": False, "reason": "text_embed_failed"}
+    model = info.get("model") or "clip"
+    try:
+        min_prob = float(os.environ.get("VITUAL_AUTOTAG_MIN_PROB", "0.02"))
+    except ValueError:
+        min_prob = 0.02
+    try:
+        topk = max(1, int(os.environ.get("VITUAL_AUTOTAG_TOPK", "12") or "12"))
+    except ValueError:
+        topk = 12
+    import math
+    nv = []
+    for v in tvecs:
+        n = math.sqrt(sum(x * x for x in v)) or 1.0
+        nv.append([x / n for x in v])
+    ms = [m for m in all_materials() if m.get("kind") in VISUAL_KINDS]
+    if mids:
+        want = set(str(x) for x in mids)
+        ms = [m for m in ms if m["id"] in want]
+    if limit:
+        ms = ms[:limit]
+    con = _con()
+    con.row_factory = sqlite3.Row
+    have = {r["mid"]: _blob_to_vec(r["vec"]) for r in con.execute(
+        "SELECT mid, vec FROM image_embeddings WHERE model=?", (model,)).fetchall()}
+    con.close()
+    done = skipped = miss = 0
+    for m in ms:
+        mid = m["id"]
+        sc_path = autotag_sidecar_path(mid)
+        if not sc_path:
+            miss += 1
+            continue
+        if not force and os.path.isfile(sc_path):
+            skipped += 1
+            continue
+        img = have.get(mid)
+        if not img:
+            miss += 1
+            continue
+        n = math.sqrt(sum(x * x for x in img)) or 1.0
+        # SigLIP2 的图文余弦分布整体压低(实测相关对仅 0.10-0.14,CLIP 是 0.25+),
+        # 绝对余弦阈值必然全灭/全混。走标准 zero-shot 分类协议:
+        # softmax(100·cos) 在受控词表上归一,相关标签概率 40-93%、噪声 <3%,区分度极好。
+        sims = []
+        for i, v in enumerate(nv):
+            sims.append([sum(a * b for a, b in zip(img, v)) / n,
+                         vocab[i][0], vocab[i][1]])
+        mx = max(s[0] for s in sims)
+        exps = [math.exp(100.0 * (s[0] - mx)) for s in sims]
+        z = sum(exps) or 1.0
+        for s, e in zip(sims, exps):
+            s[0] = e / z
+        sims.sort(key=lambda x: -x[0])
+        hits = [(p, zh, en) for p, zh, en in sims[:topk] if p >= min_prob]
+        if not hits:
+            miss += 1
+            continue
+        vlm = _visual_text(mid)
+        verified, auto = [], []
+        for p, zh, en in hits:
+            item = {"zh": zh, "en": en, "score": round(p, 4)}
+            if (zh and zh in vlm) or (en and en.lower() in vlm.lower()):
+                verified.append(item)
+            else:
+                auto.append(item)
+        data = {"model": model, "min_prob": min_prob,
+                "verified": verified, "auto": auto}
+        os.makedirs(AUTOTAG_DIR, exist_ok=True)
+        with open(sc_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+        _AUTOTAG_TEXT_CACHE.pop(mid, None)
+        try:
+            _sync_material_vector(mid)      # 向量失效闭环:标签变了立即重嵌 doc_text
+        except Exception:
+            pass
+        done += 1
+        if progress:
+            try:
+                progress(mid, done)
+            except Exception:
+                pass
+    return {"available": True, "model": model, "embedded": done,
+            "skipped": skipped, "missing_vec": miss, "vocab": len(vocab),
+            "min_prob": min_prob}
 
 
 # ---------- 镜头索引(ffmpeg 场景检测,片段级输出,供下游剪辑 Agent 按片段调用) ----------
@@ -4929,8 +5203,12 @@ def search_by_clip_vector(qv, *, limit=20, skip_id="", min_score=0.15):
     return scored[:limit]
 
 
-def search_by_text_image(text, *, limit=20, min_score=0.15):
-    """以文搜图(CLIP 共空间)。无后端/无索引 → status unavailable/empty。"""
+def search_by_text_image(text, *, limit=20, min_score=None):
+    """以文搜图(CLIP 共空间)。无后端/无索引 → status unavailable/empty。
+    min_score 默认按模型自适应(SigLIP2 余弦分布整体压低,0.15 会把相关命中全滤没,
+    实测 2026-10-10:鸡翅查询 top 0.13-0.15,无关 0.089);显式传值仍优先。"""
+    if min_score is None:
+        min_score = max(0.05, _clip_text_floor() - 0.03)
     text = (text or "").strip()
     if not text:
         return {"status": "error", "mode": "clip-text", "matches": [],

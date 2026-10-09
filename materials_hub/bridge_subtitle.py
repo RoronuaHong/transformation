@@ -45,10 +45,12 @@ DEFAULT_ROOT = os.path.normpath(os.path.join(core.HUB, "..", "subtitle_pipeline"
 STATE_FILE = os.path.join(core.INDEX_DIR, "bridge_state.json")
 
 # scope -> (相对根的子目录)
+# 注:mode-renders(QA 渲染预览)已于 2026-10-09 移出扫描范围——用户确认此类
+# 质检产物不入库;存量 256 条已清理,GT 已同步重标(见 eval_ground_truth 备份)。
+# 需要临时录入时用 `python bridge_subtitle.py --scope mode-renders` 前先把本条加回。
 SCOPES = {
     "batch": "downloads/batch",
     "benchmarks": "downloads/benchmarks",
-    "mode-renders": "downloads/mode-renders",
     "instances": "instances",
 }
 SKIP_EXT = {".db", ".pyc", ".py", ".log", ".err", ".example"}
@@ -108,8 +110,6 @@ def type_from_rel(rel):
         return ""
     if "benchmarks" in low:
         return "benchmark"
-    if "mode-renders" in low:
-        return "render"
     if "instances" in low:
         return "test"
     return "other"
