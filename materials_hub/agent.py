@@ -28,6 +28,13 @@ LLM 后端:本机 ollama chat 模型(与 auto_tag 同一发现逻辑 core.chat_m
 import os
 import re
 import json
+
+_CJK_RE = re.compile(r"[㐀-䶿一-鿿豈-﫿]")  # 汉字(含繁体)范围;日/韩/西里尔/阿拉伯不在内,会走翻译桥
+
+
+def _has_cjk(s):
+    """是否含汉字(简/繁)。步骤 2/11:含汉字则不走翻译桥;日/韩/俄等仍译到简体再匹配。"""
+    return bool(_CJK_RE.search(s or ""))
 import time
 import hashlib
 
@@ -1363,6 +1370,8 @@ def _assemble_package(goal, model=None, kind="", limit=12, scope="all",
           if queries else _decompose_goal(goal, model))
     if not qs:
         qs = [(goal or "素材").strip()]
+    # 步骤 10:否决按译后词生效——跨语言对齐(英文/简体否决同一条)
+    qs = [q for q in qs if not _is_vetoed(q)]
 
     # Librarian: 多查询检索,只收真实命中
     seen, candidates = set(), []
@@ -1391,12 +1400,20 @@ def _assemble_package(goal, model=None, kind="", limit=12, scope="all",
             dropped.append(mid); continue
         verified.append(rec)
     verified = verified[:limit]
+    translated_goal = _translate_q(goal)
+    lang = _interface_lang(goal)
+    speech_lang = _package_speech_lang(verified)
 
     # Executor: 组装 manifest 并落盘
     manifest = {
         "goal": goal, "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "schema": "materials-hub/package@1",
+        # 步骤 2/10:brief 同时留原文与译后检索词;界面语言跟随用户,内部简体计划不外露
+        "original_query": goal, "translated_query": translated_goal,
+        "lang": lang,
         "queries": qs, "scope": scope, "kind": kind or "all",
+        # 步骤 6:交付说明带挂接源语;用户点名 lang: 时交付该语种子幕(不把 16 语打进视频)
+        "speech_lang": speech_lang,
         "asset_count": len(verified),
         "assets": [_brief_pkg(r) for r in verified],
         "dropped_ids": dropped, "source": "assemble_package",
@@ -1426,6 +1443,100 @@ def _extract_package_goal(task):
     t = (task or "").strip()
     g = _PKG_PREFIX_RE.sub("", t).strip(" ：:，,。.、")
     return g or t
+
+
+def _interface_lang(task):
+    """界面语言(步骤 2/12):CJK 问句按简/繁粗分,拉丁字母按 en;其余西里尔/阿拉伯等离线不细分,回退 en。"""
+    t = task or ""
+    if not t:
+        return "zh"
+    if _has_cjk(t):
+        trad = "說話題體們這個來時會東車馬鳥魚點頭頁門關開題"
+        if any(c in t for c in trad):
+            return "zh-Hant"
+        return "zh"
+    return "en"
+
+
+def _package_speech_lang(verified):
+    """步骤 6:从已核验素材里取首个有声母版/音轨的挂接源语,作为素材包 speech_lang。"""
+    for r in verified or []:
+        if r.get("kind") in ("videos", "audio"):
+            info = core.job_transcript_info(r.get("id", ""))
+            lg = info.get("attached_lang")
+            if lg:
+                return lg
+    return None
+
+
+# 语言名(中/英)→ 站点受控代码(步骤 11:认 lang: 与语言名,收口到 16 码)
+_LANG_WORD = {
+    "japanese": "ja", "日本語": "ja", "日文": "ja", "japan": "ja",
+    "korean": "ko", "韓文": "ko", "韩语": "ko", "한국어": "ko",
+    "english": "en", "英文": "en", "英语": "en",
+    "chinese": "zh", "中文": "zh", "简体": "zh", "简体中文": "zh",
+    "traditional": "zh-Hant", "繁體": "zh-Hant", "繁体": "zh-Hant", "繁文": "zh-Hant",
+    "russian": "ru", "俄文": "ru", "俄语": "ru",
+    "french": "fr", "法文": "fr", "法语": "fr",
+    "german": "de", "德文": "de", "德语": "de",
+    "spanish": "es", "西文": "es", "西班牙语": "es",
+    "portuguese": "pt", "葡文": "pt", "葡萄牙语": "pt",
+    "arabic": "ar", "阿文": "ar", "阿拉伯语": "ar",
+    "hindi": "hi", "印地语": "hi",
+    "indonesian": "id", "印尼语": "id", "印尼文": "id",
+    "vietnamese": "vi", "越南语": "vi", "越南文": "vi",
+    "thai": "th", "泰语": "th", "泰文": "th",
+    "turkish": "tr", "土耳其语": "tr", "土语": "tr",
+}
+
+
+def _parse_lang_filter(task):
+    """步骤 11:任务里认 `lang:<code>` 或语言名(中/英),收口到站点的 16 个受控代码;无则 None。
+
+    日语、韩语、俄语等问句靠翻译桥 + 语义检索,不靠汉字 bigram 卡它们;这里只负责把
+    用户点名的语种收口成 `lang:` 受控词表,用于按语种过滤字幕文件。"""
+    t = task or ""
+    m = re.search(r"lang[:：]\s*([A-Za-z\-]{2,8})", t, re.I)
+    if m:
+        code = core.normalize_lang_tag(m.group(1))
+        if code:
+            return code
+    low = t.lower()
+    for word, code in _LANG_WORD.items():
+        if word in t or word in low:
+            return code
+    return None
+
+
+# ---------- 步骤 10:反馈带界面语言 + 译后词;否决按译后词生效(跨语言对齐) ----------
+
+
+def _record_feedback(action, accepted, *, task=""):
+    """记录采纳/否决,带界面语言与译后检索词(否决只对译后词生效,英文/简体否决同一条)。"""
+    task = task or ""
+    lang = _interface_lang(task)
+    translated = _translate_q(task)
+    return core.log_feedback(action, accepted, by="agent", lang=lang,
+                             orig_query=task, translated_query=translated)
+
+
+def _add_veto(goal):
+    """把某目标(经翻译桥)登记为否决;后续同目标(任一语言)组装时跳过该译后查询。"""
+    g = _translate_q(goal).strip()
+    if g:
+        core.add_veto(g)
+
+
+def _is_vetoed(goal):
+    """某目标是否被否决(译后词双向子串匹配,跨语言对齐)。
+
+    只认显式否决:feedback 入口(reject/明确否决)或 CLI/MCP ``add_veto`` 写入的词,
+    不把 deliver/publish 的「未授权不写」确认护栏误当成检索词否决(步骤 10)。"""
+    tg = _translate_q(goal).strip()
+    if not tg:
+        return False
+    vetoes = set(core.list_vetoes())
+    return any((g in tg or tg in g) for g in vetoes)
 
 
 def _run_package_skill(state, ws, ctx, call):
@@ -1468,6 +1579,17 @@ def _run_deliver_skill(state, ws, ctx, call):
             break
     ids = re.findall(r"\b[0-9a-f]{12}\b", task)
     allow_write = bool(ctx.get("allow_write"))
+    # 步骤 2/10:记录采纳/否决,带界面语言与译后检索词(否决按译后词生效)
+    _record_feedback("deliver", allow_write, task=task)
+    # 步骤 6/11:任务点名 lang: 时,补搜该语种子幕并并入导出(不把 16 语打进视频)
+    lang = _parse_lang_filter(task)
+    if lang:
+        try:
+            for m in core.search("", tag="lang:" + lang, limit=200):
+                if m.get("kind") == "subs" and m["id"] not in ids:
+                    ids.append(m["id"])
+        except Exception:                         # noqa: BLE001
+            pass
     res = core.deliver_package(
         manifest_path=manifest or None, ids=ids or None,
         confirm=allow_write, fmt="mp4", res="720")
@@ -1512,6 +1634,7 @@ def _run_publish_skill(state, ws, ctx, call):
     goal = _extract_package_goal(task)
     model = state.get("model")
     n = len(state.get("steps") or [])
+    _record_feedback("publish", bool(ctx.get("allow_write")), task=task)
 
     # 步骤 1:组装素材包(Librarian→Critic→Executor)
     pkg = _assemble_package(goal, model=model, ws=ws)
@@ -1813,12 +1936,48 @@ def _focus_crop_windows(crops, task):
     return picked or crops
 
 
+def _translate_q(t):
+    """步骤 2:非中文问句先走与检索相同的翻译桥译成简体,再用于技能匹配/意图判定。
+
+    缓存结果;中文问句原样返回(翻译桥只处理非 CJK)。失败时回退原文,不阻断主流程。"""
+    t = t or ""
+    if not t or _has_cjk(t):
+        return t
+    cache = getattr(_translate_q, "_cache", None)
+    if cache is None:
+        cache = _translate_q._cache = {}
+    if t in cache:
+        return cache[t]
+    try:
+        tr = core._maybe_translate(t)        # 返回 "译中 + 原文" 合并串
+    except Exception:                          # noqa: BLE001
+        tr = t
+    cache[t] = tr
+    return tr
+
+
 def _match_named_skill(task):
     """明确技能走确定性工作流;模糊任务(如只说「镜头」)仍走开放循环。
 
     按钮文案有简体/繁体/英文三套,必须都能命中同一条技能。
+    步骤 2:日文/俄文等整句没有技能词时,先译到简体再匹配(与检索同一座翻译桥),
+    这样英文 "package 3 indoor dialogue shots" 也能命中 package/publish 技能。
     """
     t = task or ""
+    s = _match_named_skill_on(t)
+    if s:
+        return s
+    tr = _translate_q(t)
+    if tr and tr != t:
+        s2 = _match_named_skill_on(tr)
+        if s2:
+            return s2
+    return ""
+
+
+def _match_named_skill_on(t):
+    """_match_named_skill 的实际匹配体(参数已是待匹配文本)。"""
+    t = t or ""
     # 裁剪意图优先:显式「裁剪/切/crop」且点名素材 id 时,即便含「导出成」也走 crop
     # (crop 技能只产出时间窗,编码导出由 deliver/工作台接管,避免误导向 deliver)。
     if _wants_crop(t) and _crop_material_ids(t):

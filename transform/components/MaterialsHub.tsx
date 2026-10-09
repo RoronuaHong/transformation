@@ -15,7 +15,19 @@ import {
   type HubMaterial,
   type HubStats,
   type HubTag,
+  type HubRunRecord,
+  type HubUnderstand,
+  type HubReadiness,
+  type HubDeliverResult,
+  hubRunRecord,
+  hubUnderstand,
+  hubReadiness,
+  hubDeliver,
+  hubDeliverUrl,
+  hubSetReviewed,
 } from "@/lib/hub-api";
+
+const dedupe = (arr: string[]): string[] => Array.from(new Set(arr));
 
 const KINDS = [
   "images",
@@ -72,9 +84,44 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
   const [err, setErr] = useState("");
   const [toast, setToast] = useState("");
   const [detail, setDetail] = useState<HubMaterial | null>(null);
+  // 步骤 1/4/5:入库链逐步状态 + 结构化理解记录(派生 sidecar,只读展示)
+  const [runRec, setRunRec] = useState<HubRunRecord | null>(null);
+  const [understandRec, setUnderstandRec] = useState<HubUnderstand | null>(null);
+  // 步骤 5/7:该素材所属 job 的分发渠道就绪度
+  const [readiness, setReadiness] = useState<HubReadiness | null>(null);
+  // 步骤 6:按需交付(计划 → 确认导出 → 下载)
+  const [exportLang, setExportLang] = useState<string>("");
+  const [exportResult, setExportResult] = useState<HubDeliverResult | null>(null);
+  const [exportBusy, setExportBusy] = useState(false);
   const [editTags, setEditTags] = useState("");
   const [editDesc, setEditDesc] = useState("");
+  const [zoom, setZoom] = useState(false);
+  const [one2one, setOne2One] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const loadSeq = useRef(0);
+
+  useEffect(() => {
+    if (!detail) {
+      setZoom(false);
+      setOne2One(false);
+    }
+  }, [detail]);
+  useEffect(() => {
+    // Esc 关闭:有 lightbox 时先退 lightbox,否则关详情弹窗。
+    // 原实现只在 zoom(lightbox)打开时才挂监听,详情弹窗按 Esc 无任何反应。
+    if (!detail) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (zoom) {
+        setZoom(false);
+        setOne2One(false);
+      } else {
+        setDetail(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [detail, zoom]);
 
   const kindLabel = useCallback(
     (k: string) => {
@@ -85,6 +132,7 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
   );
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     setBusy(true);
     setErr("");
     try {
@@ -95,6 +143,7 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
       if (mode) qs.set("mode", mode);
       if (sort) qs.set("sort", sort);
       const count = await hubFetch<{ total: number }>(`/count?${qs}`);
+      if (loadSeq.current !== seq) return;
       const tTotal = count.total || 0;
       setTotal(tTotal);
       const pages = Math.max(1, Math.ceil(tTotal / pageSize));
@@ -103,22 +152,30 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
       qs.set("offset", String((p - 1) * pageSize));
       qs.set("limit", String(pageSize));
       const list = await hubFetch<HubMaterial[]>(`/list?${qs}`);
+      if (loadSeq.current !== seq) return;
       const st = await hubFetch<HubStats>("/stats");
       setRows(Array.isArray(list) ? list : []);
       setStats(st);
       const tg = await hubFetch<HubTag[]>(`/tags?ui=1&lang=${encodeURIComponent(locale.startsWith("zh") ? "zh" : "en")}`).catch(() => [] as HubTag[]);
+      if (loadSeq.current !== seq) return;
       setTags(Array.isArray(tg) ? tg : []);
     } catch (e) {
+      if (loadSeq.current !== seq) return;
       setRows([]);
       setStats(null);
       setErr(e instanceof Error ? e.message : copy.error);
     } finally {
-      setBusy(false);
+      if (loadSeq.current === seq) setBusy(false);
     }
   }, [q, kind, tag, mode, sort, page, copy.error, locale]);
 
   useEffect(() => {
-    void load();
+    // 250ms 防抖:搜索框每敲一个字不再立刻发 count/list/stats/tags 四个请求
+    // (count+list 各做一次全量排序,auto 模式还要过 embedding,连续击键会堆积请求)。
+    // busy 立即置 true:防抖窗口内不能闪现「没有匹配的素材」空态。
+    setBusy(true);
+    const t = window.setTimeout(() => void load(), 250);
+    return () => window.clearTimeout(t);
   }, [load]);
 
   useEffect(() => {
@@ -204,6 +261,19 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
     setDetail(m);
     setEditTags(m.tags || "");
     setEditDesc(m.description || "");
+    // 派生记录随素材切换重取,避免看到上一条的残留
+    setRunRec(null);
+    setUnderstandRec(null);
+    void hubRunRecord(m.id).then(setRunRec);
+    void hubUnderstand(m.id).then(setUnderstandRec);
+    // 步骤 5/7:该素材所属 job 的渠道就绪度(英文命名空间 blocking,界面按语言呈现)
+    const jobTag = (m.tags || "").split(",").find((t) => t.startsWith("job:"));
+    setReadiness(null);
+    setExportLang("");
+    setExportResult(null);
+    if (jobTag) {
+      void hubReadiness(jobTag.slice(4)).then(setReadiness);
+    }
   }
 
   return (
@@ -231,23 +301,27 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
             setPage(1);
           }}
           placeholder={copy.searchPh}
+          aria-label={copy.searchPh}
         />
-        <select value={mode} onChange={(e) => { setMode(e.target.value); setPage(1); }}>
-          <option value="auto">{copy.modeAuto}</option>
-          <option value="lexical">{copy.modeLex}</option>
-          <option value="semantic">{copy.modeSem}</option>
-        </select>
-        <select value={sort} onChange={(e) => { setSort(e.target.value); setPage(1); }}>
-          <option value="">{copy.sortNewest}</option>
-          <option value="name">{copy.sortName}</option>
-          <option value="size">{copy.sortSize}</option>
-        </select>
-        <button type="button" className="watch-btn" onClick={() => void load()} disabled={busy}>
-          {copy.refresh}
-        </button>
-        <button type="button" className="watch-btn" onClick={() => fileRef.current?.click()}>
-          {copy.upload}
-        </button>
+        <div className="hub-toolbar-actions">
+          <select value={mode} onChange={(e) => { setMode(e.target.value); setPage(1); }} aria-label={copy.modeAuto}>
+            <option value="auto">{copy.modeAuto}</option>
+            <option value="lexical">{copy.modeLex}</option>
+            <option value="semantic">{copy.modeSem}</option>
+          </select>
+          <select value={sort} onChange={(e) => { setSort(e.target.value); setPage(1); }} aria-label={copy.sortDefault}>
+            <option value="">{copy.sortDefault}</option>
+            <option value="newest">{copy.sortNewest}</option>
+            <option value="name">{copy.sortName}</option>
+            <option value="size">{copy.sortSize}</option>
+          </select>
+          <button type="button" className="watch-btn" onClick={() => void load()} disabled={busy}>
+            {copy.refresh}
+          </button>
+          <button type="button" className="watch-btn hub-upload" onClick={() => fileRef.current?.click()}>
+            {copy.upload}
+          </button>
+        </div>
         <input
           ref={fileRef}
           type="file"
@@ -322,21 +396,38 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
         </aside>
 
         <div className="hub-main">
-          <p className="hub-stats muted">
-            {copy.statTotal} {stats?.total ?? "—"}
-            {stats
-              ? ` · ${Object.entries(stats.kinds || {})
-                  .map(([k, v]) => `${kindLabel(k)}:${v}`)
-                  .join("  ")}`
-              : ""}
-          </p>
-          {!rows.length && !busy ? (
-            <div className="hub-empty">
-              <p>{copy.empty}</p>
-              <p className="muted">{copy.emptyHint}</p>
+          <div className="hub-resultbar">
+            {q.trim() ? (
+              <p className="hub-stats">
+                {fillCopy(copy.hitOf, { q: q.trim(), n: String(total) })}
+              </p>
+            ) : (
+              <p className="hub-stats muted">
+                {copy.statTotal} {stats?.total ?? "—"}
+                {stats
+                  ? ` · ${Object.entries(stats.kinds || {})
+                      .map(([k, v]) => `${kindLabel(k)} ${v}`)
+                      .join(" · ")}`
+                  : ""}
+              </p>
+            )}
+          </div>
+          {!rows.length ? (
+            <div className="hub-empty" role="status">
+              {busy ? (
+                <>
+                  <span className="hub-spin" aria-hidden />
+                  <p>{copy.loading}</p>
+                </>
+              ) : (
+                <>
+                  <p>{copy.empty}</p>
+                  <p className="muted">{copy.emptyHint}</p>
+                </>
+              )}
             </div>
           ) : (
-            <div className="hub-grid">
+            <div className={"hub-grid" + (busy ? " busy" : "")}>
               {rows.map((m) => (
                 <article key={m.id} className="hub-card">
                   <div className="hub-thumb">
@@ -372,6 +463,9 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
                           controls
                           preload="metadata"
                           poster={m.thumb ? hubThumbUrl(m.id) : undefined}
+                          onLoadedMetadata={(e) => {
+                            if (m.hit_t) e.currentTarget.currentTime = m.hit_t;
+                          }}
                           onClick={(e) => e.stopPropagation()}
                           onPointerDown={(e) => e.stopPropagation()}
                           onMouseDown={(e) => e.stopPropagation()}
@@ -396,6 +490,20 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
                     onClick={() => openDetail(m)}
                   >
                     <strong title={displayName(m)}>{displayName(m)}</strong>
+                    {m.hit_t != null ? (
+                      <span className="hub-hit" title={copy.hitReason}>
+                        {m.hit_via === "asr"
+                          ? copy.hitBadgeSpeech
+                          : m.hit_via === "clip"
+                            ? copy.hitBadgeSim
+                            : copy.hitBadgeFrame}
+                        {" "}
+                        {m.hit_t.toFixed(1)}s
+                        {m.hit_shot != null
+                          ? ` · ${copy.hitShot} ${m.hit_shot.toFixed(1)}s`
+                          : ""}
+                      </span>
+                    ) : null}
                     <span className="muted">
                       {kindLabel(m.kind)} · {fmtSize(m.size || 0)}
                     </span>
@@ -405,10 +513,10 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
                       </p>
                     ) : null}
                     <div className="hub-chips">
-                      {chipTagsVisible(m.tags)
+                      {dedupe(chipTagsVisible(m.tags))
                         .slice(0, 4)
-                        .map((x) => (
-                          <span key={x} className="chip" title={x}>
+                        .map((x, i) => (
+                          <span key={`${x}-${i}`} className="chip" title={x}>
                             {tagLabelMap[x] ?? formatHubTag(x, locale)}
                           </span>
                         ))}
@@ -448,13 +556,34 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
       {detail ? (
         <div className="hub-modal" role="dialog" onClick={() => setDetail(null)}>
           <div className="hub-modal-box" onClick={(e) => e.stopPropagation()}>
-            <h2>{displayName(detail)}</h2>
-            <div className="hub-prev">
+            <div className="hub-modal-head">
+              <h2>{displayName(detail)}</h2>
+              <button
+                type="button"
+                className="hub-modal-x"
+                aria-label="close"
+                onClick={() => setDetail(null)}
+              >
+                ✕
+              </button>
+            </div>
+            <div
+              className={
+                "hub-prev" +
+                (detail.kind === "images" || detail.kind === "anim" ? " checker" : "")
+              }
+            >
               {detail.missing ? (
                 <span className="ph">⚠</span>
               ) : detail.kind === "images" || detail.kind === "anim" ? (
                 // eslint-disable-next-line @next/next/no-img-element
-                <img src={hubFileUrl(detail.id)} alt="" />
+                <img
+                  src={hubFileUrl(detail.id)}
+                  alt=""
+                  className="zoomable"
+                  title={copy.zoomTitle}
+                  onClick={() => setZoom(true)}
+                />
               ) : detail.kind === "videos" || detail.kind === "silent" ? (
                 <video
                   key={detail.id}
@@ -464,6 +593,9 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
                   preload="metadata"
                   muted={detail.kind === "silent"}
                   poster={detail.thumb ? hubThumbUrl(detail.id) : undefined}
+                  onLoadedMetadata={(e) => {
+                    if (detail.hit_t) e.currentTarget.currentTime = detail.hit_t;
+                  }}
                 />
               ) : detail.kind === "audio" ? (
                 <audio src={hubFileUrl(detail.id)} controls />
@@ -477,11 +609,123 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
                 {kindLabel(detail.kind)} · {fmtSize(detail.size || 0)}
               </dd>
               <dt>{copy.path}</dt>
-              <dd title={detail.external_path || detail.rel_path || ""}>
+              <dd className="hub-path" title={detail.external_path || detail.rel_path || ""}>
                 {detail.external_path || detail.rel_path || "—"}
                 {detail.missing ? ` (${copy.missing})` : ""}
               </dd>
             </dl>
+            {runRec || understandRec ? (
+              <div className="hub-run">
+                {understandRec ? (
+                  <button
+                    type="button"
+                    className={`chip${understandRec.reviewed ? " ok" : ""}`}
+                    onClick={() => {
+                      void hubSetReviewed(detail.id, !understandRec.reviewed)
+                        .then(setUnderstandRec)
+                        .catch(() => undefined);
+                    }}
+                  >
+                    {understandRec.reviewed ? copy.reviewedYes : copy.reviewedNo}
+                  </button>
+                ) : null}
+                {understandRec?.speech?.lang ? (
+                  <span className="chip">
+                    {copy.hitBadgeSpeech} · {understandRec.speech.lang}
+                  </span>
+                ) : null}
+                {runRec?.steps
+                  ? Object.entries(runRec.steps).map(([k, v]) => (
+                      <span key={k} className={`chip${v === "ok" ? "" : " warn"}`}>
+                        {k}
+                        {v === "ok" ? "" : ` · ${copy.missingStep}`}
+                      </span>
+                    ))
+                  : null}
+                {runRec?.bad_reason ? (
+                  <span className="chip warn">{runRec.bad_reason}</span>
+                ) : null}
+              </div>
+            ) : null}
+            {readiness ? (
+              <div className="hub-run">
+                <span className={`chip${readiness.channel_ready ? " ok" : " warn"}`}>
+                  {readiness.channel_ready ? copy.readyYes : copy.readyNo}
+                </span>
+                {readiness.blocking && readiness.blocking.length ? (
+                  <span className="chip warn">
+                    {copy.readyReason}: {readiness.blocking.join(" · ")}
+                  </span>
+                ) : null}
+                {readiness.subs_langs && readiness.subs_langs.length ? (
+                  <span className="chip">lang: {readiness.subs_langs.join(",")}</span>
+                ) : null}
+              </div>
+            ) : null}
+            {/* 步骤 6:按需交付(计划 → 确认 → 下载) */}
+            <div className="hub-run hub-export">
+              <div className="hub-export-title">{copy.exportTitle}</div>
+              <div className="hub-export-row">
+                <label className="hub-export-label">{copy.exportPickLang}:</label>
+                <select
+                  className="hub-select"
+                  value={exportLang}
+                  onChange={(e) => setExportLang(e.target.value)}
+                >
+                  <option value="">{copy.exportOnlySource}</option>
+                  {(readiness?.subs_langs || []).map((lg) => (
+                    <option key={lg} value={lg}>{lg}</option>
+                  ))}
+                </select>
+                <button
+                  className="btn"
+                  disabled={exportBusy || !!detail.missing}
+                  onClick={async () => {
+                    setExportBusy(true);
+                    try {
+                      const r = await hubDeliver({ ids: [detail.id], lang: exportLang || null, confirm: false });
+                      setExportResult(r);
+                    } finally { setExportBusy(false); }
+                  }}
+                >{copy.exportPlan}</button>
+                <button
+                  className="btn"
+                  disabled={exportBusy || !exportResult || exportResult.dry_run === false}
+                  onClick={async () => {
+                    setExportBusy(true);
+                    try {
+                      const r = await hubDeliver({ ids: [detail.id], lang: exportLang || null, confirm: true });
+                      setExportResult(r);
+                    } finally { setExportBusy(false); }
+                  }}
+                >{copy.exportConfirm}</button>
+              </div>
+              {exportResult ? (
+                <div className="hub-export-result">
+                  {exportResult.dry_run ? (
+                    <span className="chip warn">{copy.exportResult}: {copy.exportPlan}</span>
+                  ) : (
+                    <span className="chip ok">{copy.exportResult}</span>
+                  )}
+                  {(exportResult.written && exportResult.written.length
+                    ? exportResult.written
+                    : (exportResult.plan || [])).map((e, i) => (
+                    <div key={i} className="hub-export-file">
+                      <span className="chip">{e.mode || e.status || "file"}</span>
+                      <span className="hub-export-name">
+                        {e.dst ? e.dst.split(/[\\/]/).pop() : e.id}
+                      </span>
+                      {e.url ? (
+                        <a className="chip" href={e.url} download>{copy.exportDownload}</a>
+                      ) : null}
+                    </div>
+                  ))}
+                  {(exportResult.errors && exportResult.errors.length) ? (
+                    <span className="chip warn">{exportResult.errors.length} error(s)</span>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
             <input
               className="hub-field"
               value={editTags}
@@ -520,6 +764,32 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
                 {copy.close}
               </button>
             </div>
+          </div>
+        </div>
+      ) : null}
+
+      {zoom && detail && !detail.missing && (detail.kind === "images" || detail.kind === "anim") ? (
+        <div
+          className="hub-lightbox"
+          onClick={() => {
+            setZoom(false);
+            setOne2One(false);
+          }}
+        >
+          <div
+            className={"hub-lb-view" + (one2one ? " one2one" : "")}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={hubFileUrl(detail.id)}
+              alt=""
+              className={one2one ? "one2one" : ""}
+              onClick={() => setOne2One((v) => !v)}
+            />
+          </div>
+          <div className="hub-lb-hint" onClick={(e) => e.stopPropagation()}>
+            {one2one ? copy.img1to1 : copy.imgFit}
           </div>
         </div>
       ) : null}

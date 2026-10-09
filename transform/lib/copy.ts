@@ -333,6 +333,7 @@ export type HubCopy = {
   agentSaveFail: string;
   empty: string;
   emptyHint: string;
+  loading: string;
   statTotal: string;
   tags: string;
   clear: string;
@@ -350,14 +351,37 @@ export type HubCopy = {
   modeAuto: string;
   modeLex: string;
   modeSem: string;
+  sortDefault: string;
   sortNewest: string;
   sortName: string;
   sortSize: string;
+  hitOf: string;
   saved: string;
   deleted: string;
   uploaded: string;
   error: string;
   backendHint: string;
+  hitReason: string;
+  hitBadgeSpeech: string;
+  hitBadgeFrame: string;
+  hitBadgeSim: string;
+  hitShot: string;
+  zoomTitle: string;
+  img1to1: string;
+  imgFit: string;
+  missingStep: string;
+  reviewedYes: string;
+  reviewedNo: string;
+  readyYes: string;
+  readyNo: string;
+  readyReason: string;
+  exportTitle: string;
+  exportPickLang: string;
+  exportOnlySource: string;
+  exportPlan: string;
+  exportConfirm: string;
+  exportDownload: string;
+  exportResult: string;
 };
 
 export type UiCopy = {
@@ -656,7 +680,7 @@ const en: UiCopy = {
     kicker: "Materials",
     headline: "Materials hub",
     lede: "Browse pipeline outputs — videos, silent clips, audio tracks, captions, notes — in one catalog.",
-    searchPh: "Search name, tags, description…",
+    searchPh: "Search name, tags, or what’s in the frame…",
     all: "All",
     kindImages: "Images",
     kindVideos: "Videos",
@@ -705,6 +729,7 @@ const en: UiCopy = {
     agentSaveFail: "Failed to save chat",
     empty: "No matching materials",
     emptyHint: "Finish a try job, or upload files here.",
+    loading: "Loading…",
     statTotal: "Items",
     tags: "Tags",
     clear: "Clear filters",
@@ -722,14 +747,37 @@ const en: UiCopy = {
     modeAuto: "Search: auto",
     modeLex: "Search: lexical",
     modeSem: "Search: semantic",
+    sortDefault: "Relevance",
     sortNewest: "Newest",
     sortName: "Name",
     sortSize: "Size",
+    hitOf: "“{q}” · {n}",
     saved: "Saved",
     deleted: "Deleted",
     uploaded: "Uploaded {n} file(s)",
     error: "Materials API unavailable",
     backendHint: "Start materials_hub: python server.py (:8000)",
+    hitReason: "Why it matched",
+    hitBadgeSpeech: "Speech",
+    hitBadgeFrame: "Frame",
+    hitBadgeSim: "Similar frame",
+    hitShot: "shot",
+    zoomTitle: "Click to enlarge",
+    img1to1: "1:1 original size — scroll to view",
+    imgFit: "Fit to window · click image for 1:1",
+    missingStep: "Missing step",
+    reviewedYes: "Reviewed",
+    reviewedNo: "Not reviewed",
+    readyYes: "Ready",
+    readyNo: "Not ready",
+    readyReason: "Ready because",
+    exportTitle: "Export",
+    exportPickLang: "Subtitle language",
+    exportOnlySource: "Source only (no subtitle)",
+    exportPlan: "Preview plan",
+    exportConfirm: "Confirm export",
+    exportDownload: "Download",
+    exportResult: "Result",
   },
 };
 
@@ -1018,7 +1066,7 @@ const zh: UiCopy = {
     kicker: "素材",
     headline: "素材中心",
     lede: "流水线产物与上传文件统一编目：有声视频、无声画面、音轨、字幕、笔记。",
-    searchPh: "搜索文件名、标签、描述…",
+    searchPh: "搜索文件名、标签，或画面里的东西…",
     all: "全部",
     kindImages: "图片",
     kindVideos: "视频",
@@ -1067,6 +1115,7 @@ const zh: UiCopy = {
     agentSaveFail: "对话保存失败",
     empty: "没有匹配的素材",
     emptyHint: "先跑完试一试，或在此上传文件。",
+    loading: "加载中…",
     statTotal: "共",
     tags: "标签",
     clear: "清除筛选",
@@ -1084,14 +1133,37 @@ const zh: UiCopy = {
     modeAuto: "检索：自动",
     modeLex: "检索：词法",
     modeSem: "检索：语义",
+    sortDefault: "相关",
     sortNewest: "最新",
     sortName: "名称",
     sortSize: "大小",
+    hitOf: "「{q}」· {n} 条",
     saved: "已保存",
     deleted: "已删除",
     uploaded: "已上传 {n} 个文件",
     error: "素材中心 API 不可用",
     backendHint: "请先启动 materials_hub：python server.py（:8000）",
+    hitReason: "命中说明",
+    hitBadgeSpeech: "台词",
+    hitBadgeFrame: "画面",
+    hitBadgeSim: "画面相似",
+    hitShot: "镜头",
+    zoomTitle: "点击放大",
+    img1to1: "1:1 原始尺寸，滚动查看",
+    imgFit: "适应窗口 · 点击图片切换 1:1",
+    missingStep: "缺步",
+    reviewedYes: "已复核",
+    reviewedNo: "未复核",
+    readyYes: "就绪",
+    readyNo: "未就绪",
+    readyReason: "就绪原因",
+    exportTitle: "导出",
+    exportPickLang: "字幕语言",
+    exportOnlySource: "仅源视频(无字幕)",
+    exportPlan: "预览计划",
+    exportConfirm: "确认导出",
+    exportDownload: "下载",
+    exportResult: "结果",
   },
 };
 
@@ -1221,7 +1293,7 @@ const zhHant: UiCopy = {
     kicker: "素材",
     headline: "素材中心",
     lede: "流水線產物與上傳檔案統一編目：有聲影片、無聲畫面、音軌、字幕、筆記。",
-    searchPh: "搜尋檔名、標籤、描述…",
+    searchPh: "搜尋檔名、標籤，或畫面裡的東西…",
     kindVideos: "影片",
     kindSilent: "無聲",
     kindAudio: "音軌",
@@ -1266,6 +1338,7 @@ const zhHant: UiCopy = {
     agentSaveFail: "對話儲存失敗",
     empty: "沒有符合的素材",
     emptyHint: "先跑完試一試，或在此上傳檔案。",
+    loading: "載入中…",
     clear: "清除篩選",
     save: "儲存",
     close: "關閉",
@@ -1281,14 +1354,37 @@ const zhHant: UiCopy = {
     modeAuto: "檢索：自動",
     modeLex: "檢索：詞法",
     modeSem: "檢索：語意",
+    sortDefault: "相關",
     sortNewest: "最新",
     sortName: "名稱",
     sortSize: "大小",
+    hitOf: "「{q}」· {n} 筆",
     saved: "已儲存",
     deleted: "已刪除",
     uploaded: "已上傳 {n} 個檔案",
     error: "素材中心 API 不可用",
     backendHint: "請先啟動 materials_hub：python server.py（:8000）",
+    hitReason: "命中說明",
+    hitBadgeSpeech: "台詞",
+    hitBadgeFrame: "畫面",
+    hitBadgeSim: "畫面相似",
+    hitShot: "鏡頭",
+    zoomTitle: "點擊放大",
+    img1to1: "1:1 原始尺寸，捲動檢視",
+    imgFit: "適應視窗 · 點擊圖片切換 1:1",
+    missingStep: "缺步",
+    reviewedYes: "已覆核",
+    reviewedNo: "未覆核",
+    readyYes: "就緒",
+    readyNo: "未就緒",
+    readyReason: "就緒原因",
+    exportTitle: "匯出",
+    exportPickLang: "字幕語言",
+    exportOnlySource: "僅源視頻(無字幕)",
+    exportPlan: "預覽計劃",
+    exportConfirm: "確認匯出",
+    exportDownload: "下載",
+    exportResult: "結果",
   },
 };
 

@@ -41,6 +41,10 @@ export type HubMaterial = {
   created_at?: string;
   thumb?: boolean;
   missing?: boolean;
+  hit_t?: number;
+  hit_shot?: number;
+  hit_end?: number;
+  hit_via?: string;
 };
 
 export type HubStats = {
@@ -57,6 +61,35 @@ export type HubTag = {
   label?: string;
   group?: string;
   hint?: string;
+};
+
+/** index/run/<id>.json — 入库链逐步状态。键是稳定英文键(thumb/visual/asr…),
+ *  由界面按语言解释,避免 16 套流程文案(步骤 1/12)。 */
+export type HubRunRecord = {
+  id?: string;
+  steps?: Record<string, string>;
+  transcript?: {
+    attached_lang?: string | null;
+    other_langs?: string[];
+  } | null;
+  bad_file?: boolean;
+  bad_reason?: string;
+};
+
+/** index/understand/<id>.json — 结构化理解记录(派生,绝不进 description)。 */
+export type HubUnderstand = {
+  id?: string;
+  speech?: {
+    lang?: string | null;
+    start_sec?: number | null;
+    end_sec?: number | null;
+    other_langs?: string[];
+  } | null;
+  visual_zh?: { description?: string; tags?: string } | null;
+  visual_en?: { description?: string; tags?: string } | null;
+  visual_bilingual?: boolean;
+  quality?: string;
+  reviewed?: boolean;
 };
 
 /** 系统面标签人读文案(与 core.tag_ui_meta 对齐;卡片 chip 用)。 */
@@ -169,6 +202,79 @@ export async function hubFetch<T>(
   const ct = r.headers.get("content-type") || "";
   if (ct.includes("application/json")) return (await r.json()) as T;
   return undefined as T;
+}
+
+/** 某 job 分发渠道就绪度(步骤 5/7):channel_ready + 命名空间化 blocking。 */
+export type HubReadiness = {
+  job?: string;
+  channel_ready?: boolean;
+  reason?: string;
+  blocking?: string[];
+  masters?: number;
+  subs_langs?: string[];
+};
+
+/** 只读:某 job 分发渠道就绪度(步骤 5/7)。无记录返回 null。 */
+export async function hubReadiness(job: string): Promise<HubReadiness | null> {
+  const r = await hubFetch<HubReadiness>(`/readiness/${encodeURIComponent(job)}`).catch(() => null);
+  return r && typeof r === "object" ? r : null;
+}
+
+/** 步骤 6:按需交付结果(计划 / 已写文件,均带可下载 url)。 */
+export interface HubDeliverEntry {
+  id: string;
+  mode?: string;
+  dst?: string;
+  url?: string;
+  status?: string;
+}
+export interface HubDeliverResult {
+  dry_run: boolean;
+  out_dir?: string;
+  speech_lang?: string | null;
+  plan?: HubDeliverEntry[];
+  written?: HubDeliverEntry[];
+  skipped?: HubDeliverEntry[];
+  errors?: HubDeliverEntry[];
+  error?: string;
+}
+
+/** 步骤 6:按需交付。confirm=false 只回计划,confirm=true 真正写文件(后端护栏)。 */
+export async function hubDeliver(body: {
+  ids: string[]; lang?: string | null; fmt?: string; res?: string;
+  copy_only?: boolean; confirm?: boolean;
+}): Promise<HubDeliverResult> {
+  return hubFetch<HubDeliverResult>("/deliver", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** 交付产物下载(沙箱在 index/agent_workspace 内)。 */
+export function hubDeliverUrl(path: string): string {
+  return `${hubApiBase()}/deliver_file?path=${encodeURIComponent(path)}`;
+}
+
+/** 只读:某素材的入库链逐步状态(步骤 1/12)。无记录返回 null。 */
+export async function hubRunRecord(id: string): Promise<HubRunRecord | null> {
+  const r = await hubFetch<HubRunRecord>(`/run/${encodeURIComponent(id)}`).catch(() => null);
+  return r && Object.keys(r).length ? r : null;
+}
+
+/** 只读:某素材的结构化理解记录(步骤 4/5)。无记录返回 null。 */
+export async function hubUnderstand(id: string): Promise<HubUnderstand | null> {
+  const r = await hubFetch<HubUnderstand>(`/understand/${encodeURIComponent(id)}`).catch(() => null);
+  return r && Object.keys(r).length ? r : null;
+}
+
+/** 写:人工复核(步骤 5)。后端要求 confirm=true,否则拒绝;只落 sidecar 不进主排序。 */
+export function hubSetReviewed(id: string, value: boolean): Promise<HubUnderstand> {
+  return hubFetch<HubUnderstand>("/review", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id, value, confirm: true }),
+  });
 }
 
 /** Multipart upload via direct hub (avoids Next /hub-api body limit). */

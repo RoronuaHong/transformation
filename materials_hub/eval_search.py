@@ -129,9 +129,12 @@ def evaluate(mode, gt=None):
         for q in EVAL_QUERIES:
             total_rel[q] = len(heuristic_rel(q, corpora))
 
+    queries = EVAL_QUERIES
+    if gt and not set(gt).intersection(EVAL_QUERIES):
+        queries = list(gt)
     per_q = []
     p5_sum = r20_sum = mrr_sum = ndcg_sum = 0.0
-    for q in EVAL_QUERIES:
+    for q in queries:
         rows = core.search(q, limit=20, mode=mode)
         ids = [m["id"] for m in rows]
         if gt and q in gt:
@@ -159,8 +162,26 @@ def evaluate(mode, gt=None):
         mrr_sum += mrr
         ndcg_sum += ndcg
         per_q.append((q, p5, r20, mrr, ndcg, len(ids)))
-    n = len(EVAL_QUERIES)
+    n = len(queries)
     return per_q, p5_sum / n, r20_sum / n, mrr_sum / n, ndcg_sum / n
+
+
+# ---------------------------------------------------------------------------
+# 步骤 9:不进旧中文门禁分母的两条多语言检查(独立报告,不影响门禁均值)
+#   ① 英文问句(经翻译桥)应命中画面是鸡翅的素材;② lang:ja 过滤应命中日文字幕文件。
+# ---------------------------------------------------------------------------
+def evaluate_extra():
+    """返回 {english_chicken_wings_top5, lang_ja_subs_count, lang_ja_subs_sample}。"""
+    eng = core.search("chicken wings", limit=5)
+    eng_top = [{"id": m["id"], "name": m.get("name", ""), "kind": m.get("kind")}
+               for m in eng]
+    ja = core.search("", tag="lang:ja", limit=200)
+    ja_subs = [m for m in ja if m.get("kind") == "subs"]
+    return {
+        "english_chicken_wings_top5": eng_top,
+        "lang_ja_subs_count": len(ja_subs),
+        "lang_ja_subs_sample": [m["id"] for m in ja_subs[:8]],
+    }
 
 
 def main():
@@ -173,7 +194,19 @@ def main():
     ap.add_argument("--gt", default=None,
                     help="指定 ground-truth JSON(默认 eval_ground_truth.json);"
                          "用于 A/B 不同的 GT 标注方案")
+    ap.add_argument("--extra", action="store_true",
+                    help="步骤 9:额外跑两条多语言检查(英文 chicken wings + lang:ja 过滤),"
+                         "只报告不影响旧中文门禁")
     args = ap.parse_args()
+
+    if args.extra:
+        ex = evaluate_extra()
+        print("=== 步骤 9 多语言额外检查(不进中文门禁分母) ===")
+        print("英文 chicken wings 前 5:")
+        for r in ex["english_chicken_wings_top5"]:
+            print(f"  {r['id']}  [{r['kind']}]  {r['name']}")
+        print(f"lang:ja 字幕命中数: {ex['lang_ja_subs_count']}  样本: {ex['lang_ja_subs_sample']}")
+        return
 
     gt = load_ground_truth(args.gt)
     oracle = "human-ground-truth" if gt else "heuristic(synonym-expansion)"

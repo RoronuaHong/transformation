@@ -88,6 +88,14 @@ def _resources_list():
         {"uri": "hub://related", "name": "素材关系反查",
          "description": "hub://related/{id}/{rel} 沿 parent:/role:/job: 等面标签一跳遍历;rel 取 all(默认)/parent/children/job/role/kind",
          "mimeType": "application/json"},
+        {"uri": "hub://understand", "name": "素材结构化理解记录",
+         "description": "hub://understand/{id} 返回该素材的理解记录(画面中英/台词语种与起止/画质/人物/版权/复核),"
+                        "汇总自 sidecar;lang 字段与库内 lang: 一致",
+         "mimeType": "application/json"},
+        {"uri": "hub://run", "name": "素材入库链路状态",
+         "description": "hub://run/{id} 返回该素材的入库逐步状态(thumb/tech/describe/ocr/visual/shots/phash/asr "
+                        "等英文步骤键)+ 字幕挂接语种 + 同 job 未挂语种;未跑则返回 {status:missing}",
+         "mimeType": "application/json"},
     ]
 
 
@@ -123,6 +131,18 @@ def _resource_read(uri):
             raise ValueError("hub://related/{id}/{rel} requires material id")
         import agent
         return agent._tool_related({"id": mid, "rel": rel})
+    if p[0] == "understand":
+        mid = p[1] if len(p) > 1 else ""
+        if not mid:
+            raise ValueError("hub://understand/{id} requires material id")
+        d = core.read_understand_record(mid)
+        return d if d is not None else {"id": mid, "status": "missing"}
+    if p[0] == "run":
+        mid = p[1] if len(p) > 1 else ""
+        if not mid:
+            raise ValueError("hub://run/{id} requires material id")
+        d = core.read_run_record(mid)
+        return d if d is not None else {"id": mid, "status": "missing"}
     raise ValueError("unknown resource: " + uri)
 
 
@@ -196,6 +216,19 @@ def t_run_ocr(a):
                              force=bool(a.get("force")))
 
 
+def t_run_visual(a):
+    """写(派生数据):对视频/图片做画面描述(本地多模态 VLM gemma4:e2b via ollama),
+    描述/标签落 sidecar `index/visual/<id>.txt`(可检索)。不写 description:画面描述走
+    "语义 doc_text + 词法低权重通道 + 全文分块"三条可检索路径,写进 description 会稀释常规排序。
+    仍需 confirm=true;已有结果幂等返回 cached(不重跑)。"""
+    _require_confirm(a)
+    mid = a.get("id", "")
+    if not core.get_material(mid):
+        raise ValueError("not found: " + mid)
+    return core.visual_material(mid, frames=int(a.get("frames") or 3),
+                                force=bool(a.get("force")))
+
+
 def t_shots(a):
     """只读:返回视频镜头索引(片段 start/end 时间轴),供下游剪辑 Agent 按片段调用。
     未建索引 → {"status":"none"}(不主动建,保持本工具纯只读零副作用)。"""
@@ -229,6 +262,15 @@ def t_missing_covers(a):
 def t_job_checkup(a):
     """只读:某 job 资产体检(kinds/封面/镜头/asr/失效引用)。"""
     return core.job_checkup(a.get("job_id") or a.get("job") or "")
+
+
+def t_job_lang_readiness(a):
+    """只读:某 job 是否具备用户点名的 `lang:` 字幕(步骤 7)。
+
+    缺某一种译文只是「说明」(blocking=missing_lang:<code>),任务仍可按已有语言导出,
+    不整体判死。返回 available_langs 供 Agent 说明「有哪几种」。"""
+    return core.job_lang_readiness(a.get("job_id") or a.get("job") or "",
+                                   a.get("lang") or "")
 
 
 def t_near_dupes(a):
@@ -436,13 +478,27 @@ def t_readiness(a):
 
 
 def t_feedback(a):
-    """写(追加,非资产):记录一次 Agent 动作被采纳/采纳否决(持续学习闭环)。"""
-    return core.log_feedback(
+    """写(追加,非资产):记录一次 Agent 动作被采纳/否决(持续学习闭环)。
+
+    步骤 10:否决某检索词时传 ``translated_query``(经翻译桥后的译后词)+ ``orig_query``,
+    这样英文与简体否决的是同一条;后续 assemble 会按译后词排除该查询。"""
+    accepted = bool(a.get("accepted"))
+    r = core.log_feedback(
         action=str(a.get("action") or ""),
-        accepted=bool(a.get("accepted")),
+        accepted=accepted,
         note=str(a.get("note") or ""),
         by=str(a.get("by") or "agent"),
+        lang=str(a.get("lang") or ""),
+        orig_query=str(a.get("orig_query") or ""),
+        translated_query=str(a.get("translated_query") or ""),
     )
+    # 显式否决某检索词 → 登记跨语言 veto(后续组装跳过该译后词)
+    if not accepted:
+        for _q in (a.get("translated_query"), a.get("orig_query")):
+            _q = (str(_q or "")).strip()
+            if _q:
+                core.add_veto(_q)
+    return r
 
 
 def t_learning(a):
@@ -491,8 +547,9 @@ HANDLERS = {"search_materials": t_search, "get_material": t_get,
             "list_tags": t_tags, "hub_stats": t_stats,
             "update_tags": t_update_tags, "register_asset": t_register,
             "read_text_preview": t_text_preview, "chunk_search_materials": t_chunk_search,
-            "run_ocr": t_run_ocr, "get_shots": t_shots, "find_similar": t_similar,
+            "run_ocr": t_run_ocr, "run_visual": t_run_visual, "get_shots": t_shots, "find_similar": t_similar,
             "list_missing_covers": t_missing_covers, "job_checkup": t_job_checkup,
+            "job_lang_readiness": t_job_lang_readiness,
             "near_duplicate_report": t_near_dupes, "search_by_image": t_imgsearch,
             "related": t_related,
             "build_image_embeddings": t_imgembed,
@@ -546,6 +603,11 @@ TOOLS = [
          "id": {"type": "string"}, "frames": {"type": "integer"},
          "force": {"type": "boolean"}, "confirm": {"type": "boolean"}},
          "required": ["id", "confirm"]}},
+    {"name": "run_visual", "description": "写(派生数据):视频/图片画面描述(本地多模态 VLM gemma4:e2b via ollama,ffmpeg 采样帧),生成「画面描述+标签」入 sidecar 使画面内容/物体/场景可被文本检索(语义+词法+全文三条路径),不写 description。已有结果幂等返回;需 confirm=true",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string"}, "frames": {"type": "integer"},
+         "force": {"type": "boolean"}, "confirm": {"type": "boolean"}},
+         "required": ["id", "confirm"]}},
     {"name": "get_shots", "description": "只读:返回视频镜头索引(片段 start/end 时间轴, 供下游剪辑 Agent 按片段调用)",
      "inputSchema": {"type": "object", "properties": {
          "id": {"type": "string"}}, "required": ["id"]}},
@@ -563,6 +625,9 @@ TOOLS = [
     {"name": "job_checkup", "description": "只读:某 subtitle_pipeline job 资产体检(kinds/封面/镜头/asr/失效引用)",
      "inputSchema": {"type": "object", "properties": {
          "job_id": {"type": "string"}}, "required": ["job_id"]}},
+    {"name": "job_lang_readiness", "description": "只读:某 job 是否具备点名的 lang: 字幕;缺该语种只是说明不整体判死,返回 available_langs",
+     "inputSchema": {"type": "object", "properties": {
+         "job_id": {"type": "string"}, "lang": {"type": "string"}}, "required": ["job_id"]}},
     {"name": "near_duplicate_report", "description": "只读:全库画面近重复报告(dHash 汉明距离≤max_dist 的对+并查集簇,一实体多引用)",
      "inputSchema": {"type": "object", "properties": {
          "max_dist": {"type": "integer"}, "limit": {"type": "integer"}}}},
@@ -570,10 +635,13 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer"}}}},
     {"name": "distribution_readiness", "description": "只读:某 job 分发渠道就绪度评估(封面/镜头/clip 父链/标签齐备→channel_ready+blocking)",
      "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}}},
-    {"name": "agent_feedback", "description": "写(追加,非资产):记录 Agent 动作被采纳/否决(持续学习闭环)。action=动作名,accepted=采纳",
+    {"name": "agent_feedback", "description": "写(追加,非资产):记录 Agent 动作被采纳/否决(持续学习闭环)。否决某检索词时传 translated_query(经翻译桥后的译后词)+ orig_query,使英文与简体否决同一条;后续 assemble 按译后词排除该查询(步骤 10)。",
      "inputSchema": {"type": "object", "properties": {
          "action": {"type": "string"}, "accepted": {"type": "boolean"},
-         "note": {"type": "string"}, "by": {"type": "string"}},
+         "note": {"type": "string"}, "by": {"type": "string"},
+         "lang": {"type": "string", "description": "界面语言码(zh/zh-Hant/en...)"},
+         "orig_query": {"type": "string", "description": "原文检索词(否决时填)"},
+         "translated_query": {"type": "string", "description": "译后检索词(翻译桥输出;否决按此词跨语言生效)"}},
          "required": ["action", "accepted"]}},
     {"name": "learning_summary", "description": "只读:汇总 Agent 反馈学习日志(各动作采纳率+近期记录)",
      "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer"}}}},

@@ -47,6 +47,7 @@
 """
 import sys
 import os
+import json
 from core import (
     init_hub, HUB, ingest_dir, scan_materials, search,
     all_materials, duplicates, make_thumb, missing_thumbnail_ids,
@@ -55,18 +56,24 @@ from core import (
     auto_tag_all, chat_models, rule_tag_all, rule_tag_cleanup,
     autotag_undo, AUTOTAG_BACKUP,
     ocr_material, ocr_all, _ocr_python,
+    visual_material, visual_all,
     build_shot_index, shots_all, shot_index_path,
     phash_material, phash_all, similar_assets, phash_path, near_duplicate_report,
     search_by_image, search_by_text_image, clip_probe,
-    build_image_embeddings, image_embed_status,
+    build_image_embeddings, image_embed_status, build_clip_frame_embeddings,
     auto_process_all, pending_processing,
     apply_media_facet_tags, link_relation_parents, scrub_deprecated_from_tags,
 )
 from core import (
-    governance_report, distribution_readiness, log_feedback, learning_summary,
+    governance_report, distribution_readiness, log_feedback, learning_summary, add_veto,
     normalize_name, normalize_all_names,
     tech_material, tech_all, tech_stats, read_tech,
     describe_material, describe_all,
+    write_run_record, read_run_record,
+    write_understand_record, ops_summary,
+    backfill_lang_tags,
+    job_lang_readiness,
+    SITE_LANGS, normalize_lang_tag, VISUAL_KINDS,
 )
 
 
@@ -168,6 +175,81 @@ def main():
             print("usage: python cli.py ocr <id> [--force] | ocr --all")
             return
         print(ocr_material(mid, force="--force" in args))
+
+    elif cmd == "visual":
+        # 画面描述:python cli.py visual <id> [--force] | visual --all [--limit N]
+        rest = args[1:]                       # 去掉命令 token,避免把 "visual" 当成 id
+        if "--all" in rest:
+            rest.remove("--all")
+            limit = 0
+            if "--limit" in rest:
+                i = rest.index("--limit")
+                limit = int(rest[i + 1])
+                del rest[i:i + 2]
+            res = visual_all(limit=limit, force="--force" in rest)
+            ok = sum(1 for r in res if r.get("status") == "ok")
+            print(f"visual done: {ok}/{len(res)} ok")
+            for r in res:
+                print(" ", r)
+            return
+        mid = next((a for a in rest if not a.startswith("-")), "")
+        if not mid:
+            print("usage: python cli.py visual <id> [--force] | visual --all")
+            return
+        print(visual_material(mid, force="--force" in rest))
+
+    elif cmd == "understand":
+        # 理解记录:python cli.py understand <id> [--force] | understand --all
+        rest = args[1:]
+        if "--all" in rest:
+            n = 0
+            for m in all_materials():
+                write_understand_record(m["id"])
+                n += 1
+            print(f"understand done: wrote {n} records")
+            return
+        mid = next((a for a in rest if not a.startswith("-")), "")
+        if not mid:
+            print("usage: python cli.py understand <id> [--force] | understand --all")
+            return
+        print(json.dumps(write_understand_record(mid), ensure_ascii=False, indent=2))
+
+    elif cmd == "run":
+        # 入库链路状态:python cli.py run <id> [--force] | run --all
+        rest = args[1:]
+        if "--all" in rest:
+            n = 0
+            for m in all_materials():
+                if m.get("kind") in VISUAL_KINDS or m.get("kind") == "audio":
+                    write_run_record(m["id"])
+                    n += 1
+            print(f"run done: wrote {n} records")
+            return
+        mid = next((a for a in rest if not a.startswith("-")), "")
+        if not mid:
+            print("usage: python cli.py run <id> [--force] | run --all")
+            return
+        rec = read_run_record(mid)
+        print(json.dumps(rec, ensure_ascii=False, indent=2) if rec else "no run record")
+
+    elif cmd == "ops":
+        # 运营汇总(按语种拆开计数):python cli.py ops
+        print(json.dumps(ops_summary(), ensure_ascii=False, indent=2))
+
+    elif cmd == "langs":
+        # 受控语种词表:python cli.py langs
+        print("SITE_LANGS:", ", ".join(SITE_LANGS))
+        print("normalize_lang_tag('zh-hant') ->", normalize_lang_tag("zh-hant"))
+        print("normalize_lang_tag('Japanese') ->", normalize_lang_tag("Japanese"))
+        print("normalize_lang_tag('chinese') ->", normalize_lang_tag("chinese"))
+
+    elif cmd == "langtags":
+        # 回填 lang: 标签(历史字幕缺标签):python cli.py langtags --apply
+        rest = args[1:]
+        if "--apply" in rest:
+            print(json.dumps(backfill_lang_tags(), ensure_ascii=False))
+        else:
+            print("dry-run: 加 --apply 执行回填(只增 lang:,不动其它标签)")
 
     elif cmd == "shots":
         # 镜头索引:python cli.py shots <id> [--force] | shots --all [--limit N]
@@ -305,6 +387,14 @@ def main():
             print("clip probe:", clip_probe(refresh=True))
             return
         limit = int(args[args.index("--limit") + 1]) if "--limit" in args else 0
+        if "--frames" in args:
+            # 通道 B:视频多帧 CLIP 索引(以文搜帧);frames 数可 --frames N 覆盖默认 5
+            fr = 5
+            if "--fr" in args:
+                fr = int(args[args.index("--fr") + 1])
+            r = build_clip_frame_embeddings(frames=fr, force="--force" in args, limit=limit)
+            print("clip-frame-embed done:", r)
+            return
         r = build_image_embeddings(force="--force" in args, limit=limit)
         print("imgembed done:", r)
         print("imgembed status:", image_embed_status())
@@ -393,12 +483,30 @@ def main():
         r = distribution_readiness(job_id=jid)
         print(_j.dumps(r, ensure_ascii=False, indent=2))
 
+    elif cmd == "langready":
+        # 步骤 7:该 job 是否具备点名语种字幕(缺某译文只是「说明」,不整体判死)
+        import json as _j
+        jid = args[args.index("--job") + 1] if "--job" in args else ""
+        lg = args[args.index("--lang") + 1] if "--lang" in args else ""
+        r = job_lang_readiness(job_id=jid, lang=lg)
+        print(_j.dumps(r, ensure_ascii=False, indent=2))
+
     elif cmd == "feedback":
         import json as _j
         action = args[args.index("--action") + 1] if "--action" in args else ""
         accept = "--reject" not in args
         note = args[args.index("--note") + 1] if "--note" in args else ""
-        r = log_feedback(action=action, accepted=accept, note=note)
+        lang = args[args.index("--lang") + 1] if "--lang" in args else ""
+        orig = args[args.index("--query") + 1] if "--query" in args else ""
+        trans = args[args.index("--translated") + 1] if "--translated" in args else ""
+        r = log_feedback(action=action, accepted=accept, note=note, lang=lang,
+                        orig_query=orig, translated_query=trans)
+        # 步骤 10:显式否决某检索词时,把译后词登记为跨语言 veto(后续组装跳过)
+        if not accept:
+            for _q in (trans or orig,):
+                _q = (_q or "").strip()
+                if _q:
+                    add_veto(_q)
         print(_j.dumps(r, ensure_ascii=False))
 
     elif cmd == "learning":

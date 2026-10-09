@@ -47,8 +47,10 @@ _STAGE_RULES = [
     ("glyph_black", "字形黑底"),
     ("glyph_tbe", "字形渲染"),
     ("old_sttn", "原片去字幕"),
-    ("narrow_box", "窄区"),
-    ("out_sttn_combined", "去字幕合并成品"),
+    # 注:`narrow_box`(窄区) 是**空间/区域描述**而非处理阶段,且与 stem 内的 `narrow`
+    # 重复,违反「描述性=具体处理阶段」原则,已从本表剔除 —— 描述词回退到真正的处理
+    # 阶段 token `clean`→降噪。同类区域描述 `roi`/`found`/`band` 同理,待统一清理。
+    ("out_sttn_combined", "去字幕合并"),   # 不写「成品」:泛化词会与「修好的成品」类查询碰撞
     ("hs_r", "去硬字幕"),
     ("general", "通用"),          # 必须早于 "gen",否则 general_meta 会被误判为「生成」
     # --- 音频优先(否则会被 clean/source 抢先) ---
@@ -84,9 +86,9 @@ _STAGE_RULES = [
     ("frame", "关键帧"),
     ("final", "成品"),
     ("poster", "封面"),
-    ("found", "检出区"),
-    ("roi", "区域"),
-    ("band", "字幕带"),
+    # 区域/空间描述不入处理阶段表(同 narrow_box 前例):`found`(检出区)/`roi`(区域)/
+    # `band`(字幕带) 均为空间描述,且与 stem 内 token 重复,违反「描述性=具体处理阶段」。
+    # 已剔除;剔除后描述回退到真实处理阶段 token(src→源帧)或留空(如 fw 无对应阶段)。
     ("gen2", "生成v2"),
     ("gen", "生成"),
     ("gpu_batch", "批量GPU"),
@@ -195,6 +197,20 @@ def canonical_name(name, kind="", tags="", mid="", description=""):
 def unique_name(name, mid=""):
     """二次消歧:同名时追加素材 id 片段,保证全局唯一。"""
     return "%s_%s%s" % (os.path.splitext(name)[0], (mid or "")[:4], os.path.splitext(name)[1])
+
+
+def stage_zh(name, kind=""):
+    """返回名字里匹配到的**具体**处理阶段中文词;无则返回 ''。
+
+    供描述性元数据复用同一套受控映射(保证"名字里写什么、描述里就说什么",口径一致)。
+    刻意不返回 kind 泛化类目词(视频/图/文档…),原因见 canonical_name 内注释。
+    """
+    stem, _ = os.path.splitext(name or "")
+    low = (stem or "").lower()
+    for pat, z in _STAGE_RULES:
+        if pat in low:
+            return z
+    return "字幕" if kind == "subs" else ""
 
 
 def plan_renames(materials):

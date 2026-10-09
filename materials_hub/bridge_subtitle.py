@@ -52,7 +52,9 @@ SCOPES = {
     "instances": "instances",
 }
 SKIP_EXT = {".db", ".pyc", ".py", ".log", ".err", ".example"}
-LANGS = {"zh", "en", "ja", "ko", "ru", "fr", "de", "es", "pt", "ar", "th", "vi", "id", "ms"}
+# 站点 16 语(与 subtitle_pipeline/langs.py PACKS["site"]、transform/lib/locales.ts 严格同步)。
+# `lang:` 受控词表只认这些代码(zh-Hant 保留连字符),ms(马来语)等不在站点集内。
+LANGS = {"zh", "zh-Hant", "en", "ja", "ko", "es", "fr", "de", "pt", "ru", "ar", "hi", "id", "vi", "th", "tr"}
 
 
 def find_meta(path):
@@ -83,8 +85,9 @@ def load_meta(path):
 
 def detect_lang(name):
     stem = os.path.splitext(name)[0]
-    for lng in LANGS:
-        if re.search(r"[._\-]" + lng + r"([._\-]|$)", stem, re.IGNORECASE):
+    # 长代码优先(zh-Hant 要先于 zh 匹配);允许语种码位于文件名开头(如 zh.srt)
+    for lng in sorted(LANGS, key=len, reverse=True):
+        if re.search(r"(?:^|[._\-])" + re.escape(lng) + r"(?:[._\-]|$)", stem, re.IGNORECASE):
             return lng
     return ""
 
@@ -238,6 +241,7 @@ def run_job_dir(job_dir, root=None, dry_run=False, *, platform="", video_id="", 
         write_state(st)
         # 方案 A: clip/组件 → parent:<母版>
         link = core.link_relation_parents(mids=st.get("new_ids") or [])
+        st["transcripts"] = core.attach_job_transcripts()
         st["link_parents"] = link
         if link.get("linked"):
             print(f"[link-parents] linked={link['linked']} "
@@ -411,6 +415,7 @@ def sync_once(scope, root, dry, limit, want_thumbs, want_prune, want_embed=False
     st = run(scope, root, dry, limit)
     if not dry:
         link = core.link_relation_parents(mids=st.get("new_ids") or [])
+        st["transcripts"] = core.attach_job_transcripts()
         st["link_parents"] = link
         if link.get("linked"):
             print(f"[link-parents] linked={link['linked']}")

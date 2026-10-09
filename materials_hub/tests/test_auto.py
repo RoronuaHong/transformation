@@ -60,7 +60,7 @@ def _stub_pipeline(calls, fail_ocr=False):
     返回 (还原函数, embed 调用次数列表)。"""
     orig = (core.make_thumb, core.ocr_material, core.build_shot_index,
             core.phash_material, core.build_embeddings, core.tech_material,
-            core.describe_material)
+            core.describe_material, core.visual_material)
     embed_calls = []
 
     def fake_thumb(mid, *a, **kw):
@@ -91,6 +91,13 @@ def _stub_pipeline(calls, fail_ocr=False):
         calls.append("describe")
         return {"id": mid, "status": "ok", "desc": "1920x1080 h264 1.0s"}
 
+    def fake_visual(mid, *a, **kw):
+        calls.append("visual")
+        os.makedirs(core.VISUAL_DIR, exist_ok=True)
+        with open(core.visual_sidecar_path(mid), "w", encoding="utf-8") as f:
+            f.write("visual text")
+        return {"id": mid, "status": "ok", "chars": 11}
+
     def fake_shots(mid, *a, **kw):
         calls.append("shots")
         os.makedirs(core.SHOT_DIR, exist_ok=True)
@@ -113,12 +120,12 @@ def _stub_pipeline(calls, fail_ocr=False):
     core.make_thumb, core.ocr_material = fake_thumb, fake_ocr
     core.build_shot_index, core.phash_material = fake_shots, fake_phash
     core.build_embeddings, core.tech_material = fake_embed, fake_tech
-    core.describe_material = fake_describe
+    core.describe_material, core.visual_material = fake_describe, fake_visual
 
     def restore():
         core.make_thumb, core.ocr_material, core.build_shot_index = orig[0], orig[1], orig[2]
         core.phash_material, core.build_embeddings, core.tech_material = orig[3], orig[4], orig[5]
-        core.describe_material = orig[6]
+        core.describe_material, core.visual_material = orig[6], orig[7]
     return restore, embed_calls
 
 
@@ -126,7 +133,7 @@ def test_pending_processing():
     _mk_material("p1")
     # videos 缺全部 → 4 True
     p = core.pending_processing("p1")
-    assert p == {"thumb": True, "ocr": True, "shots": True, "phash": True}, p
+    assert p == {"thumb": True, "ocr": True, "visual": True, "shots": True, "phash": True}, p
     # 建 OCR sidecar 后 → ocr False,其余仍 True
     os.makedirs(core.OCR_DIR, exist_ok=True)
     with open(core.ocr_sidecar_path("p1"), "w", encoding="utf-8") as f:
@@ -137,7 +144,7 @@ def test_pending_processing():
     # docs 素材 → 全 False(docs/subs 等不需要画面类派生数据)
     _mk_material("p2", kind="docs", name="d.md")
     p3 = core.pending_processing("p2")
-    assert p3 == {"thumb": False, "ocr": False, "shots": False, "phash": False}, p3
+    assert p3 == {"thumb": False, "ocr": False, "visual": False, "shots": False, "phash": False}, p3
     # 不存在的素材 → 全 False(安全缺省)
     assert not any(core.pending_processing("no_such_id").values())
     print("PASS test_pending_processing")
@@ -151,21 +158,24 @@ def test_auto_process_material_order_and_isolation():
         r = core.auto_process_material("a1")
     finally:
         restore()
-    # 顺序:thumb → tech → describe → ocr → shots → phash(tech/describe 于 2026-10-08 接入)
-    assert calls == ["thumb", "tech", "describe", "ocr", "shots", "phash"], calls
+    # 顺序:thumb → tech → describe → ocr → visual → shots → phash
+    # (tech/describe/visual 于 2026-10-08 接入,链共 7 步)
+    assert calls == ["thumb", "tech", "describe", "ocr", "visual", "shots", "phash"], calls
     st = r["steps"]
     assert st["thumb"]["status"] == "ok", st
     assert st["tech"]["status"] == "ok", st
     assert st["describe"]["status"] == "ok", st
     assert st["ocr"]["status"] == "error" and "RuntimeError" in st["ocr"]["reason"], st
+    assert st["visual"]["status"] == "ok", st
     assert st["shots"]["status"] == "ok" and st["phash"]["status"] == "ok", st
-    # ocr 抛异常不中断:shots/phash/tech 的 sidecar 仍然落盘
+    # ocr 抛异常不中断:shots/phash/tech/visual 的 sidecar 仍然落盘
     assert os.path.isfile(core.shot_index_path("a1")), st
     assert os.path.isfile(core.phash_path("a1")), st
     assert os.path.isfile(core.tech_path("a1")), st
-    # history 有 auto_process 审计(ok=5/6:thumb/tech/describe/shots/phash 成功,ocr 失败)
+    assert os.path.isfile(core.visual_sidecar_path("a1")), st
+    # history 有 auto_process 审计(ok=6/7:7 步中仅 ocr 失败)
     hs = core.get_history(limit=10, target_id="a1")
-    assert any(h["action"] == "auto_process" and h["detail"] == "ok=5/6" for h in hs), hs
+    assert any(h["action"] == "auto_process" and h["detail"] == "ok=6/7" for h in hs), hs
     print("PASS test_auto_process_material_order_and_isolation")
 
 
@@ -195,6 +205,25 @@ def test_auto_process_all_pending_and_limit():
     print("PASS test_auto_process_all_pending_and_limit")
 
 
+def test_search_auto_reads_subtitle_body():
+    """字幕正文不在 description 里。自动检索仍应命中 .srt 原文,词法模式保持只看元数据。"""
+    _setup(reset=True)
+    _mk_material("s1", kind="subs", name="demo.srt")
+    m = core.get_material("s1")
+    with open(m["external_path"], "w", encoding="utf-8") as f:
+        f.write("1\n00:00:01,000 --> 00:00:03,000\n红烧鸡翅出锅了\n")
+    orig = core.embed_probe
+    core.embed_probe = lambda *a, **k: {"ok": False, "model": "", "url": "", "err": "off"}
+    try:
+        lex = core.search("红烧鸡翅", mode="lexical")
+        auto = core.search("红烧鸡翅", mode="auto")
+        assert [x["id"] for x in lex] == [], lex
+        assert [x["id"] for x in auto] == ["s1"], auto
+    finally:
+        core.embed_probe = orig
+    print("PASS test_search_auto_reads_subtitle_body")
+
+
 def test_all_done_then_zero_processed():
     _setup(reset=True)                        # 用例间隔离
     _mk_material("c1")
@@ -205,7 +234,7 @@ def test_all_done_then_zero_processed():
         r1 = core.auto_process_all()
         assert r1["processed"] == 1, r1
         # 全部处理完 → pending 全 False
-        assert core.pending_processing("c1") == {"thumb": False, "ocr": False,
+        assert core.pending_processing("c1") == {"thumb": False, "ocr": False, "visual": False,
                                                  "shots": False, "phash": False}
         # 再跑一次 → 幂等,处理 0 条
         r2 = core.auto_process_all()
@@ -220,6 +249,7 @@ if __name__ == "__main__":
         test_pending_processing()
         test_auto_process_material_order_and_isolation()
         test_auto_process_all_pending_and_limit()
+        test_search_auto_reads_subtitle_body()
         test_all_done_then_zero_processed()
     finally:
         _teardown()

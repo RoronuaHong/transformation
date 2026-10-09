@@ -26,6 +26,8 @@ from core import (
     split_all_videos_to_silent, split_video_to_silent_and_audio,
     reclassify_video_audio_kinds, apply_media_facet_tags, link_relation_parents,
     merge_material_tags, is_system_facet_tag,
+    read_run_record, read_understand_record, set_reviewed, distribution_readiness,
+    deliver_package,
 )
 from gateway import proxy_target, forward as gateway_forward
 
@@ -336,11 +338,16 @@ class Handler(BaseHTTPRequestHandler):
             return
         u = urllib.parse.urlparse(self.path)
         p = u.path
+        # 兼容直连 :8000 的 /hub-api/* 调用(绕过 transform 代理重写时),剥前缀统一走 /api/*
+        if p.startswith("/hub-api/"):
+            p = "/api/" + p[len("/hub-api/"):]
+        elif p == "/hub-api":
+            p = "/api"
         if p in ("/", "/index.html"):
             return self._serve_static("index.html", "text/html; charset=utf-8")
         if p.startswith("/static/"):
             return self._serve_static(p[len("/static/"):])
-        if p == "/api/list":
+        if p in ("/api/list", "/api/materials", "/api/search"):
             q = urllib.parse.parse_qs(u.query)
             kind = q.get("kind", [""])[0]
             tag = q.get("tag", [""])[0]
@@ -445,6 +452,31 @@ class Handler(BaseHTTPRequestHandler):
                                for m in broken_externals()])
         if p == "/api/dupes":
             return self._json(duplicates())
+        if p.startswith("/api/readiness/"):
+            # 步骤 5/7:某 job 分发渠道就绪度(channel_ready + 命名空间化 blocking)
+            return self._json(distribution_readiness(p[len("/api/readiness/"):]))
+        if p.startswith("/api/run/"):
+            # 步骤 1/12:入库链逐步状态。JSON 的键是稳定英文键(thumb/tech/describe/ocr/
+            # visual/shots/phash/asr),由界面按语言解释,避免 16 套流程文案。
+            return self._json(read_run_record(p[len("/api/run/"):]) or {})
+        if p.startswith("/api/understand/"):
+            # 步骤 4/5:结构化理解记录(speech/visual_zh/visual_en/quality/reviewed)。
+            # 派生数据,只读;绝不进 description 主排序字段。
+            return self._json(read_understand_record(p[len("/api/understand/"):]) or {})
+        if p == "/api/deliver_file":
+            # 步骤 6:交付产物下载(沙箱在 index/agent_workspace 内)
+            qp = urllib.parse.parse_qs(u.query)
+            rawp = (qp.get("path") or [""])[0]
+            if not rawp:
+                return self._send(400, b"missing path")
+            fp = os.path.realpath(urllib.parse.unquote(rawp))
+            root = os.path.realpath(os.path.join(HUB, "index", "agent_workspace"))
+            if fp != root and not fp.startswith(root + os.sep):
+                return self._send(403, b"forbidden")
+            if not os.path.isfile(fp):
+                return self._send(404, b"missing")
+            mt = mimetypes.guess_type(fp)[0] or "application/octet-stream"
+            return self._serve_file(fp, mt, head_only=False)
         if p == "/api/tags":
             qs = urllib.parse.parse_qs(u.query)
             lang = (qs.get("lang") or ["zh"])[0]
@@ -541,6 +573,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         u = urllib.parse.urlparse(self.path)
         p = u.path
+        # 兼容直连 :8000 的 /hub-api/* 调用(绕过 transform 代理重写时),剥前缀统一走 /api/*
+        if p.startswith("/hub-api/"):
+            p = "/api/" + p[len("/hub-api/"):]
+        elif p == "/hub-api":
+            p = "/api"
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length) if length else b""
 
@@ -643,6 +680,54 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/describe":
             update_description(body.get("id"), body.get("description", ""))
             return self._json({"ok": True})
+        if p == "/api/review":
+            # 步骤 5:只有人确认后才置复核(默认 false)。写操作需 confirm,
+            # 且只落理解记录 sidecar,不进主排序。
+            if not body.get("confirm"):
+                return self._json({"ok": False, "error": "confirm required"})
+            _mid = str(body.get("id") or "").strip()
+            if not get_material(_mid):
+                return self._json({"ok": False, "error": "not found: " + _mid})
+            return self._json(set_reviewed(_mid, bool(body.get("value", True))))
+        if p == "/api/deliver":
+            # 步骤 6:按需交付(只读计划 / 确认后写文件)。confirm 护栏:未确认只给计划。
+            ids = [str(x).strip() for x in (body.get("ids") or []) if str(x).strip()]
+            lang = (body.get("lang") or "").strip() or None
+            if not ids:
+                return self._json({"error": "ids required"}, 400)
+            # 点名语种:把该 job 下同 lang 的字幕文件一起交付(复制)
+            speech_lang = lang
+            if lang:
+                job_tag = None
+                for mid in ids:
+                    mm = get_material(mid)
+                    if mm:
+                        for t in (mm.get("tags") or "").split(","):
+                            if t.startswith("job:"):
+                                job_tag = t
+                                break
+                    if job_tag:
+                        break
+                if job_tag:
+                    subs = search("", tag="%s,lang:%s" % (job_tag, lang), limit=20)
+                    for s in subs:
+                        if s.get("kind") == "subs" and s["id"] not in ids:
+                            ids.append(s["id"])
+            res = deliver_package(
+                ids=ids, confirm=bool(body.get("confirm")),
+                fmt=str(body.get("fmt") or "mp4"),
+                res=str(body.get("res") or "720"),
+                copy_only=bool(body.get("copy_only")),
+            )
+            # 把绝对路径转成可下载 URL(沙箱内)
+            for ent in (res.get("written") or []):
+                if ent.get("dst"):
+                    ent["url"] = "/api/deliver_file?path=" + urllib.parse.quote(ent["dst"])
+            for ent in (res.get("plan") or []):
+                if ent.get("dst"):
+                    ent["url"] = "/api/deliver_file?path=" + urllib.parse.quote(ent["dst"])
+            res["speech_lang"] = speech_lang
+            return self._json(res)
         if p == "/api/embed":
             # {} 增量构建语义索引;{"force":true} 全量重建;{"limit":N} 限量
             try:

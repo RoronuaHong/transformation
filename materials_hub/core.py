@@ -5,6 +5,7 @@
 """
 import os
 import re
+import sys
 import json
 import time
 import obs                                   # 可观测:结构化日志 + 指标埋点(§8 G 维度)
@@ -22,12 +23,29 @@ INGEST = os.path.join(HUB, "ingest")
 TRASH = os.path.join(HUB, "trash")
 INDEX_DIR = os.path.join(HUB, "index")
 OCR_DIR = os.path.join(INDEX_DIR, "ocr")       # 视频画面 OCR 文本 sidecar(派生,可重建)
+VISUAL_DIR = os.path.join(INDEX_DIR, "visual")  # 视频/图片画面描述 sidecar(VLM 生成,派生可重建)
+ASR_DIR = os.path.join(INDEX_DIR, "asr")        # 视频/音轨转写 sidecar(来自同 job 字幕,派生可重建)
 SHOT_DIR = os.path.join(INDEX_DIR, "shots")    # 视频镜头索引 sidecar(派生数据,可随时重建)
 PHASH_DIR = os.path.join(INDEX_DIR, "phash")   # dHash 感知哈希 sidecar(派生数据,可随时重建)
 TECH_DIR = os.path.join(INDEX_DIR, "tech")     # 技术元数据 sidecar(时长/分辨率/编码/帧率…,派生可重建)
 INDEX_DB = os.path.join(INDEX_DIR, "hub.db")
 STATIC = os.path.join(HUB, "static")
 THUMBS = os.path.join(INDEX_DIR, "thumbs")  # 视频封面缓存(派生数据,可随时删)
+RUN_DIR = os.path.join(INDEX_DIR, "run")              # 入库链路逐步状态记录(每次自动处理更新,派生可重建)
+UNDERSTAND_DIR = os.path.join(INDEX_DIR, "understand")  # 结构化理解记录(汇总 sidecar,派生可重建)
+
+# 站点 16 语(与 subtitle_pipeline/langs.py PACKS["site"]、transform/lib/locales.ts 严格同步)。
+# `lang:` 受控词表只认这些代码(zh-Hant 保留连字符),模型不能发明别名(见步骤 3)。
+SITE_LANGS = ("zh", "zh-Hant", "en", "ja", "ko", "es", "fr", "de",
+              "pt", "ru", "ar", "hi", "id", "vi", "th", "tr")
+SITE_LANG_SET = set(SITE_LANGS)
+_LANG_ALIASES = {
+    "zh-cn": "zh", "zh-hans": "zh",
+    "zh-tw": "zh-Hant", "zh-hk": "zh-Hant",
+    "pt-br": "pt", "pt-pt": "pt",
+    "es-mx": "es", "fr-ca": "fr", "fr-fr": "fr",
+}
+
 
 # 外部引用允许的根目录(防路径穿越/越权读取)。素材中心与 subtitle_pipeline 同处一个工作区,
 # 默认只允许登记/读取该工作区内的文件;跨工作区的素材可用 VITUAL_HUB_EXT_ROOTS 追加(分号分隔,绝对路径)。
@@ -57,7 +75,8 @@ def external_path_allowed(p):
 
 # kinds that get ffmpeg thumbs / visual auto-process
 VIDEO_LIKE_KINDS = ("videos", "silent")
-VISUAL_KINDS = ("videos", "silent", "images")
+# 画面描述(VLM)覆盖的种类:视频/无声/图片/动画(GIF 等动态片段,单帧会漏内容→按多帧采样)
+VISUAL_KINDS = ("videos", "silent", "images", "anim")
 # 按扩展名分类。video 容器再按「是否有音轨」拆成 videos / silent（无声）。
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".flv", ".ts"}
 KINDS = {
@@ -74,7 +93,7 @@ KINDS = {
 
 def init_hub():
     """创建标准目录结构并初始化数据库。幂等。"""
-    for d in [MATERIALS, INGEST, TRASH, INDEX_DIR, OCR_DIR, SHOT_DIR, PHASH_DIR, STATIC]:
+    for d in [MATERIALS, INGEST, TRASH, INDEX_DIR, OCR_DIR, VISUAL_DIR, ASR_DIR, SHOT_DIR, PHASH_DIR, STATIC]:
         os.makedirs(d, exist_ok=True)
     for k in list(KINDS) + ["other"]:
         os.makedirs(os.path.join(MATERIALS, k), exist_ok=True)
@@ -619,6 +638,19 @@ def _init_db():
             updated_at TEXT
         )"""
     )
+    # 帧级 CLIP 向量(通道 B:视频多帧;主键 (mid,idx);以文搜帧时用各帧最大值召回)
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS clip_frame_embeddings(
+            mid TEXT,
+            idx INTEGER,
+            model TEXT,
+            dim INTEGER,
+            sig TEXT,
+            vec BLOB,
+            updated_at TEXT,
+            PRIMARY KEY (mid, idx)
+        )"""
+    )
     for col, ddl in [("location", "TEXT DEFAULT 'internal'"),
                      ("external_path", "TEXT DEFAULT ''"),
                      ("ai_tags", "TEXT DEFAULT ''")]:
@@ -744,14 +776,31 @@ def _path_tokens(p):
 
 
 def _tok_w(t):
-    """token 类型权重:英文/数字意图词全权;中文 bigram 噪声大降权;中文单字更弱。
+    """token 类型权重:英文/数字意图词全权;中文 bigram 噪声大降权;中文单字最弱。
     必要性:本库元数据是英文,中文问句真正起作用的是同义词表扩出的英文词;
     而中文描述(如 bilibili 视频标题)与查询中文 bigram 任意重叠会造成大量误召回、
-    把真正命中的英文素材挤下前排。降权中文后,英文意图词重新主导排序。"""
+    把真正命中的英文素材挤下前排。降权中文后,英文意图词重新主导排序。
+
+    单字权重 0.3→0.1(2026-10-08):实测查「印章」时,`字幕_印地文_hi.srt` 仅凭
+    name 里一个「印」字在 3.0 权重通道拿 0.9 分,压过 visual sidecar 里真含
+    「印章」的素材(0.35 通道)。单字重叠是词素级巧合而非词级命中,必须压到
+    即使乘 name 的 3.0 也低于 sidecar 的精确 bigram(3.0*0.1=0.3 < 0.35*1.0=0.35)。"""
     if t[:2] == "b:":
         return 0.5
     if t[:2] == "c:":
-        return 0.3
+        return 0.1
+    return 1.0
+
+
+def _sc_tok_w(t):
+    """sidecar 自由文本(OCR/画面描述)通道的 token 权重,与 _tok_w 刻意不同:
+    * 中文 bigram 给全权 1.0——sidecar 是中文自由文本,bigram 在这里就是「词」,
+      精确命中是强信号(查「印章」命中描述里的「印章」标签);
+    * 中文单字直接剔除(返回 0)——大段字幕/描述里出现任意单字太常见,
+      「排骨」的 31 条 0.105 平分噪声全部来自单字重叠,是纯噪声源。
+    """
+    if t[:2] == "c:":
+        return 0.0
     return 1.0
 
 
@@ -790,6 +839,85 @@ def _ocr_text(mid):
     return t
 
 
+# 画面描述(VLM 生成)文本的词法权重:与 OCR 同构,刻意远低于 name(3.0)/tags(2.5)/
+# description(1.5)。画面描述是自由文本(物体/场景/动作),若与 description 同权参与会稀释
+# 基于精确 token 的排序。低权重既保留稀有画面词(如"排骨""红烧肉")的精确命中,
+# 又不足以扰动常规查询排序。
+_VISUAL_FIELD_WEIGHT = 0.35
+_ASR_FIELD_WEIGHT = 0.35
+_VISUAL_TEXT_CACHE = {}
+_ASR_TEXT_CACHE = {}
+
+
+def _visual_text(mid):
+    """读素材的画面描述 sidecar 文本(index/visual/<id>.txt),带进程内缓存。无则 ''。
+
+    与 `_ocr_text` 同构:缓存按 sidecar 的 (mtime, size) 校验,长驻进程(MCP server /
+    --watch 守护)若在另一进程重跑 visual(cli.py visual 写新 sidecar)后继续工作,只按 id
+    命中会永远返回旧文本。"""
+    sc = visual_sidecar_path(mid or "")
+    st = None
+    if sc:
+        try:
+            st = (os.path.getmtime(sc), os.path.getsize(sc))
+        except OSError:
+            st = None
+    cached = _VISUAL_TEXT_CACHE.get(mid)
+    if cached is not None and cached[0] == st:
+        return cached[1]
+    t = ""
+    if sc and os.path.isfile(sc):
+        try:
+            with open(sc, "r", encoding="utf-8", errors="ignore") as f:
+                t = f.read().strip()
+        except Exception:
+            pass
+    _VISUAL_TEXT_CACHE[mid] = (st, t)
+    return t
+
+
+def _asr_text(mid):
+    """读视频/音轨的转写 sidecar(index/asr/<id>.txt)。无则 ''。按 mtime 校验缓存。"""
+    sc = asr_sidecar_path(mid or "")
+    st = None
+    if sc:
+        try:
+            st = (os.path.getmtime(sc), os.path.getsize(sc))
+        except OSError:
+            st = None
+    cached = _ASR_TEXT_CACHE.get(mid)
+    if cached is not None and cached[0] == st:
+        return cached[1]
+    t = ""
+    if sc and os.path.isfile(sc):
+        try:
+            with open(sc, "r", encoding="utf-8", errors="ignore") as f:
+                t = f.read().strip()
+        except Exception:
+            pass
+    _ASR_TEXT_CACHE[mid] = (st, t)
+    return t
+
+
+def _score_sidecar_channel(q_tokens, text, q_bigram_count):
+    """画面/OCR/转写侧通道打分(步骤 11 噪声收紧)。
+
+    仅在中文 bigram 重叠达到阈值时计分。query 有多个 bigram 时要求 ≥2 个 bigram 重叠,
+    避免单一 bigram 与大量画面描述/字幕碰撞(汉字 bigram 噪声把无关素材拉进前排);
+    单 bigram 短查询(如「台词」)仍正常计分,不误伤。拉丁词权重保持 1,不被汉字规则误伤。"""
+    toks = _tokens(text)
+    if not toks:
+        return 0.0
+    ov = q_tokens & toks
+    ov = {t for t in ov if _sc_tok_w(t) > 0}
+    if not ov:
+        return 0.0
+    bigrams = [t for t in ov if t.startswith("b:")]
+    if q_bigram_count >= 2 and len(bigrams) < 2:
+        return 0.0
+    return sum(_sc_tok_w(t) for t in ov)
+
+
 def _score(q_tokens, m):
     """加权近似打分:query token 与素材各字段 token 重叠累计(按类型加权,见 _tok_w)。
 
@@ -811,12 +939,26 @@ def _score(q_tokens, m):
                 loose += _tok_w(qt) * 0.6
         if loose:
             sc += w * loose
-    # 画面 OCR 文本:独立低权重通道(见 _OCR_FIELD_WEIGHT)
+    # 画面 OCR 文本:独立低权重通道(见 _OCR_FIELD_WEIGHT)。
+    # 权重走 _sc_tok_w:bigram 全权、单字剔除(sidecar 大段自由文本里单字重叠是纯噪声)
+    q_bigram = sum(1 for t in q_tokens if t.startswith("b:"))
     ot = _tokens(_ocr_text(m.get("id", "")))
     if ot:
-        ov = q_tokens & ot
-        if ov:
-            sc += _OCR_FIELD_WEIGHT * sum(_tok_w(t) for t in ov)
+        s = _score_sidecar_channel(q_tokens, _ocr_text(m.get("id", "")), q_bigram)
+        if s:
+            sc += _OCR_FIELD_WEIGHT * s
+    # 画面描述(VLM 生成):独立低权重通道(见 _VISUAL_FIELD_WEIGHT),与 OCR 同构
+    vt = _tokens(_visual_text(m.get("id", "")))
+    if vt:
+        s = _score_sidecar_channel(q_tokens, _visual_text(m.get("id", "")), q_bigram)
+        if s:
+            sc += _VISUAL_FIELD_WEIGHT * s
+    # 转写(同 job 字幕挂到视频/音轨):与 OCR 同权重。不写 description。
+    at = _tokens(_asr_text(m.get("id", "")))
+    if at:
+        s = _score_sidecar_channel(q_tokens, _asr_text(m.get("id", "")), q_bigram)
+        if s:
+            sc += _ASR_FIELD_WEIGHT * s
     return sc
 
 
@@ -847,7 +989,9 @@ def query_materials(q="", kind="", tag=""):
 
     scored = [(_score(qt, m), m) for m in rows]
     scored = [(s, m) for s, m in scored if s > 0]
-    scored.sort(key=lambda x: x[0], reverse=True)
+    # 平分确定性 tie-break:同分按创建时间倒序,避免 SQL 无序导致的
+    # 「同分结果每次刷新顺序乱跳」(实测查「印章」27 条 0.385 平分)。
+    scored.sort(key=lambda x: (x[0], x[1].get("created_at") or ""), reverse=True)
     return [m for _, m in scored]
 
 
@@ -858,11 +1002,142 @@ def _ranked(q="", kind="", tag="", mode="auto"):
         return query_materials("", kind, tag), False
     q2 = expand_query(q)                 # 中文问句补上语料英文词汇
     lex = query_materials(q2, kind, tag)
-    if mode == "lexical" or not embed_probe()["ok"]:
+    if mode == "lexical":
         return lex, False
+    if not embed_probe()["ok"]:
+        rows = _append_body_hits(q2, lex, kind, tag)
+        return _append_clip_hits(q2, rows, kind), False
     # 语义检索在「kind/tag 过滤后的整个语料」上排名,才能召回词法完全没命中的条目
     base = query_materials("", kind, tag)
-    return semantic_rank(q2, base, lex)
+    rows, used = semantic_rank(q2, base, lex)
+    # 字幕/文档正文只追加在已有排序之后,不改词法名次(门禁看的是 lexical 路径)。
+    rows = _append_body_hits(q2, rows, kind, tag)
+    rows = _append_clip_hits(q2, rows, kind)
+    return rows, used
+
+
+def _append_body_hits(q, rows, kind, tag):
+    """文档和字幕的正文在 chunk_search 里,面板主检索原先只看描述。
+    命中且不在当前结果里的,附在末尾。画面类不走这里(正文通道会把 OCR 噪声带进来)。"""
+    if kind and kind not in ("docs", "subs"):
+        return rows
+    try:
+        extra = chunk_search(q, limit=20, kind=kind or "", tag=tag or "")
+    except Exception:
+        return rows
+    have = {m.get("id") for m in rows}
+    add = [m for m in extra if m.get("id") not in have and m.get("kind") in ("docs", "subs")]
+    return rows + add if add else rows
+
+
+def _query_intent(q):
+    """文件名、编号、type:/job: 走精确检索;问台词不拿画面向量补。"""
+    s = (q or "").strip()
+    low = s.lower()
+    if low.startswith(("type:", "job:", "tag:", "id:")) or "\\" in s or "/" in s:
+        return "id"
+    if re.fullmatch(r"[0-9a-f]{8,}", low):
+        return "id"
+    if any(k in s for k in ("台词", "字幕", "说了", "听到", "这句话")):
+        return "speech"
+    return "text"
+
+
+def _append_clip_hits(q, rows, kind):
+    """以文搜图只在文字几乎没命中时补画面。
+
+    实测无关画面的 CLIP 分挤在 0.28 附近、彼此拉不开。平坦的一串高分不当命中,
+    否则红印章会排到鸡翅前面。要顶部明显高于第二名,且不低于 0.32。
+    """
+    if _query_intent(q) in ("id", "speech"):
+        return rows
+    if kind and kind not in ("images", "videos", "silent", "anim"):
+        return rows
+    if sum(1 for m in rows if _score(_tokens(q), m) > 0) >= 3:
+        return rows
+    try:
+        found = search_by_text_image(q, limit=8, min_score=0.15)
+    except Exception:
+        return rows
+    matches = found.get("matches") or []
+    if len(matches) < 2:
+        return rows
+    top, second = matches[0]["score"], matches[1]["score"]
+    if top < 0.32 or (top - second) < 0.03:
+        return rows
+    have = {m.get("id") for m in rows}
+    add = []
+    for h in matches:
+        if h["score"] < top - 0.01 or h["id"] in have:
+            continue
+        m = get_material(h["id"])
+        if not m:
+            continue
+        m = dict(m)
+        m["hit_via"] = "clip"
+        add.append(m)
+        have.add(h["id"])
+    return rows + add if add else rows
+
+
+def _clock_sec(stamp):
+    """00:00:05,760 或 12.5s → 秒。解析失败返回 None。"""
+    s = (stamp or "").strip().rstrip("s")
+    if re.fullmatch(r"\d+(?:\.\d+)?", s):
+        return float(s)
+    m = re.match(r"(?:(\d+):)?(\d+):(\d+)[,.](\d+)", s)
+    if not m:
+        return None
+    hh = int(m.group(1) or 0)
+    return hh * 3600 + int(m.group(2)) * 60 + int(m.group(3)) + int(m.group(4)) / 1000.0
+
+
+def _scene_bounds(mid, t):
+    data = get_shots(mid) or {}
+    for sc in data.get("scenes") or []:
+        try:
+            a, b = float(sc["start"]), float(sc["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if a <= t <= b + 0.05:
+            return a, b
+    return None, None
+
+
+def _mark_hit(q, m):
+    """台词或带时间的画面描述命中时,标出秒数和所在镜头起点。"""
+    qt = {t for t in _tokens(q) if _sc_tok_w(t) > 0}
+    if not qt:
+        return m
+    for line in _asr_text(m.get("id", "")).splitlines():
+        if not (_tokens(line) & qt):
+            continue
+        times = re.findall(r"\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}", line)
+        if not times:
+            continue
+        t = _clock_sec(times[0])
+        if t is None:
+            continue
+        m["hit_via"] = "asr"
+        m["hit_t"] = round(t, 3)
+        a, b = _scene_bounds(m.get("id", ""), t)
+        if a is not None:
+            m["hit_shot"] = a
+            m["hit_end"] = b
+        return m
+    for line in _visual_text(m.get("id", "")).splitlines():
+        mm = re.match(r"\[(\d+(?:\.\d+)?)s\]", line.strip())
+        if not mm or not (_tokens(line) & {t for t in qt if _sc_tok_w(t) > 0}):
+            continue
+        t = float(mm.group(1))
+        m["hit_via"] = m.get("hit_via") or "visual"
+        m["hit_t"] = round(t, 3)
+        a, b = _scene_bounds(m.get("id", ""), t)
+        if a is not None:
+            m["hit_shot"] = a
+            m["hit_end"] = b
+        return m
+    return m
 
 
 def _has_cjk(s):
@@ -938,6 +1213,8 @@ def search(q="", kind="", tag="", limit=None, offset=0, mode="auto", sort=""):
                        zero_hit=not _hit, mode=mode, cached=True)
             return _hit
     rows, _ = _ranked(q, kind, tag, mode)
+    if q:
+        rows = [_mark_hit(q, m) for m in rows]
     if sort in ("newest", "oldest", "name", "size"):
         if sort == "name":
             rows = sorted(rows, key=lambda m: (m.get("name") or "").lower())
@@ -1016,6 +1293,20 @@ def _material_text(m):
     if sc and os.path.isfile(sc):
         try:
             with open(sc, "r", encoding="utf-8", errors="ignore") as f:
+                parts.append(f.read())
+        except Exception:
+            pass
+    vsc = visual_sidecar_path(m.get("id", ""))
+    if vsc and os.path.isfile(vsc):
+        try:
+            with open(vsc, "r", encoding="utf-8", errors="ignore") as f:
+                parts.append(f.read())
+        except Exception:
+            pass
+    asc = asr_sidecar_path(m.get("id", ""))
+    if asc and os.path.isfile(asc):
+        try:
+            with open(asc, "r", encoding="utf-8", errors="ignore") as f:
                 parts.append(f.read())
         except Exception:
             pass
@@ -1618,7 +1909,9 @@ def doc_text(m):
     # 不挤占 description 的 1.5 权重——避免自由字幕文本稀释精确 token 排序
     # (实测 240 条批量 OCR 写进 description 后门禁 ndcg 0.84→0.80)。
     ocr = _ocr_text(m.get("id", ""))
-    parts = [words, " ".join(tags), m.get("description", ""), ocr, m.get("kind", ""), stage]
+    visual = _visual_text(m.get("id", ""))
+    asr = _asr_text(m.get("id", ""))
+    parts = [words, " ".join(tags), m.get("description", ""), ocr, visual, asr, m.get("kind", ""), stage]
     doc_p, _ = _embed_prefixes()
     return doc_p + " | ".join(x for x in parts if x)
 
@@ -1682,6 +1975,43 @@ def build_embeddings(force=False, limit=0, progress=None):
             progress(done, len(todo))
     return {"available": True, "model": model, "total": total,
             "embedded": done, "skipped": skipped, "pending": len(todo) - done}
+
+
+def _sync_material_vector(mid):
+    """单素材向量同步(语义索引新鲜度闭环,业界 hybrid search 最佳实践:
+    vector index 必须与源内容失效联动,否则出现「新 sidecar + 旧向量」的错位召回)。
+
+    触发点:visual/OCR sidecar 写入、update_tags 等 doc_text 组成部分变更后。
+    与 build_embeddings 同一套失效判据(doc_text 的 _text_sig 签名),只处理单条,
+    开销一次 embed 调用;embed 不可用或失败时静默返回——绝不影响主写路径,
+    下次 build_embeddings 仍会兜底。"""
+    try:
+        info = embed_probe()
+        if not info["ok"]:
+            return
+        m = get_material(mid)
+        if not m:
+            return
+        txt = doc_text(m)
+        sig = _text_sig(txt)
+        con = _con()
+        row = con.execute("SELECT sig FROM embeddings WHERE mid=? AND model=?",
+                          (mid, info["model"])).fetchone()
+        con.close()
+        if row and row[0] == sig:
+            return                                    # 内容未变,零成本返回
+        vecs = embed_texts([txt], model=info["model"])
+        if not vecs:
+            return
+        con = _con()
+        con.execute("INSERT OR REPLACE INTO embeddings(mid,model,dim,sig,vec,updated_at)"
+                    " VALUES(?,?,?,?,?,?)",
+                    (mid, info["model"], len(vecs[0]), sig, _vec_to_blob(vecs[0]),
+                     datetime.datetime.now().isoformat(timespec="seconds")))
+        con.commit()
+        con.close()
+    except Exception:
+        pass
 
 
 def embed_status():
@@ -1787,7 +2117,10 @@ def semantic_rank(q, base_rows, lexical_rows=None):
         top_n = min(len(keep), int(os.environ.get("VITUAL_RERANK_TOP", "60")))
         top, rest = keep[:top_n], keep[top_n:]
         docs = [f"{m.get('name', '')} {m.get('description', '')} "
-                f"{m.get('tags', '')} {m.get('ai_tags', '')}" for m in top]
+                f"{m.get('tags', '')} {m.get('ai_tags', '')} "
+                f"{_visual_text(m.get('id', ''))[:400]} "
+                f"{_ocr_text(m.get('id', ''))[:400]} "
+                f"{_asr_text(m.get('id', ''))[:400]}" for m in top]
         if rerank_model == "lexical":
             order = _lexical_rerank(q, docs, rerank_model)   # 内置离线弱基线,无需 ollama
         else:
@@ -1977,6 +2310,7 @@ def update_tags(mid, tags, purge_ai_tags=True):
     con.commit()
     con.close()
     log_history("app", "update_tags", mid, f"tags: {old!r} -> {tags!r}")
+    _sync_material_vector(mid)          # 向量失效闭环:tags 是 doc_text 组成部分
     kept, removed = [], []
     if purge_ai_tags:
         m = get_material(mid)
@@ -2197,6 +2531,48 @@ def update_description(mid, desc):
     con.close()
     log_history("app", "update_description", mid,
                 f"desc: {old!r} -> {desc!r}")
+    _sync_material_vector(mid)      # 向量失效闭环:description 是 doc_text 组成部分
+
+
+def _purge_material_derived(mid):
+    """素材删除后的派生数据级联清理(最佳实践:主记录删除必须联动向量索引失效)。
+
+    覆盖:三张向量表(embeddings/image_embeddings/clip_frame_embeddings)、
+    OCR/视觉/镜头/phash/tech sidecar、缩略图及其 .fail 失败标记、进程内文本缓存。
+    否则 embed_status 覆盖率虚高、孤儿 sidecar 随删除累积。全部尽力而为不抛错。"""
+    try:
+        con = _con()
+        for tbl in ("embeddings", "image_embeddings", "clip_frame_embeddings"):
+            try:
+                con.execute(f"DELETE FROM {tbl} WHERE mid=?", (mid,))
+            except Exception:
+                pass
+        con.commit()
+        con.close()
+    except Exception:
+        pass
+    files = []
+    for mk in (visual_sidecar_path, ocr_sidecar_path, asr_sidecar_path, shot_index_path,
+               phash_path, tech_path, thumb_path):
+        try:
+            p = mk(mid)
+            if p:
+                files.append(p)
+        except Exception:
+            pass
+    files.append(os.path.join(THUMBS, mid + ".jpg.fail"))
+    for p in files:
+        try:
+            if p and os.path.isfile(p):
+                os.remove(p)
+        except OSError:
+            pass
+    try:
+        _VISUAL_TEXT_CACHE.pop(mid, None)
+        _ASR_TEXT_CACHE.pop(mid, None)
+        _OCR_TEXT_CACHE.pop(mid, None)
+    except Exception:
+        pass
 
 
 def remove_material(mid):
@@ -2214,6 +2590,7 @@ def remove_material(mid):
     con.execute("DELETE FROM materials WHERE id=?", (mid,))
     con.commit()
     con.close()
+    _purge_material_derived(mid)    # 向量/sidecar/缩略图级联清理,不留孤儿
     log_history("app", "remove", mid,
                 f"removed: {m.get('name', '')} (location={m.get('location', '')})")
 
@@ -2622,11 +2999,12 @@ def broken_externals():
 def prune_broken_externals():
     """删除失效外部引用的索引记录(只删索引,绝不触碰磁盘文件)。返回被清理的记录。"""
     broken = broken_externals()
-    if broken:
+    for m in broken:
         con = _con()
-        con.executemany("DELETE FROM materials WHERE id=?", [(m["id"],) for m in broken])
+        con.execute("DELETE FROM materials WHERE id=?", (m["id"],))
         con.commit()
         con.close()
+        _purge_material_derived(m["id"])   # 同步清理向量与派生索引,不留孤儿
     return broken
 
 
@@ -2915,7 +3293,8 @@ def make_thumb(mid, retry_failed=False):
             return dst                            # 等待期间别人已生成
         for ss in (seek, "0"):
             cmd = [exe, "-v", "error", "-y", "-ss", str(ss), "-i", src,
-                   "-frames:v", "1", "-vf", "scale=480:-2", "-q:v", "4", dst]
+                   "-frames:v", "1", "-vf", "scale=480:-2", "-strict", "unofficial",
+                   "-q:v", "4", dst]
             try:
                 p = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                    timeout=60, creationflags=flags)
@@ -2955,6 +3334,516 @@ def ocr_sidecar_path(mid):
     if not mid or any(c in mid for c in "\\/.:"):
         return None                              # 防路径拼接注入
     return os.path.join(OCR_DIR, mid + ".txt")
+
+
+def asr_sidecar_path(mid):
+    """视频/音轨的转写 sidecar(index/asr/<id>.txt)。由同 job 的字幕挂过来,不写 description。"""
+    mid = str(mid or "").strip()
+    if not mid or any(c in mid for c in "\\/.:"):
+        return None
+    return os.path.join(ASR_DIR, mid + ".txt")
+
+
+def visual_sidecar_path(mid):
+    """素材的画面描述 sidecar 路径(index/visual/<id>.txt;派生数据,可随时重建)。"""
+    mid = str(mid or "").strip()
+    if not mid or any(c in mid for c in "\\/.:"):
+        return None                              # 防路径拼接注入
+    return os.path.join(VISUAL_DIR, mid + ".txt")
+
+
+def run_record_path(mid):
+    """入库链路逐步状态记录(index/run/<id>.json;派生数据,可随时重建)。"""
+    mid = str(mid or "").strip()
+    if not mid or any(c in mid for c in "\\/.:"):
+        return None
+    return os.path.join(INDEX_DIR, "run", mid + ".json")
+
+
+def understand_record_path(mid):
+    """结构化理解记录(index/understand/<id>.json;汇总 sidecar,派生可重建)。"""
+    mid = str(mid or "").strip()
+    if not mid or any(c in mid for c in "\\/.:"):
+        return None
+    return os.path.join(INDEX_DIR, "understand", mid + ".json")
+
+
+def normalize_lang_tag(code):
+    """把任意语种写法收口到站点的 16 个受控代码(zh-Hant 保留连字符)。
+
+    仅用于 `lang:` 受控词表:模型自由发挥的「中文/Chinese/japanese」一律不认,
+    返回 None;只有站点代码或其标准别名才收口成功(见步骤 3)。"""
+    raw = (code or "").strip().lower().replace("_", "-")
+    if not raw:
+        return None
+    if raw in SITE_LANG_SET:
+        return raw
+    if raw in _LANG_ALIASES:
+        return _LANG_ALIASES[raw]
+    # 站点代码本身带大小写(如 zh-Hant):小写归一后与受控代码小写比较
+    for c in SITE_LANGS:
+        if c.lower() == raw:
+            return c
+    return None
+
+
+_SRT_TIME = re.compile(
+    r"(\d{1,2}:\d{2}:\d{2}[,.]\d{1,3})\s*-->\s*(\d{1,2}:\d{2}:\d{2}[,.]\d{1,3})"
+)
+
+
+def srt_cues(text, limit=400):
+    """把 srt/vtt 收成带时间的台词行。不要序号和样式标签。"""
+    cues = []
+    start = end = ""
+    buf = []
+
+    def flush():
+        line = re.sub(r"<[^>]+>", "", " ".join(buf)).strip()
+        line = re.sub(r"\{[^}]*\}", "", line).strip()
+        if start and line:
+            cues.append(f"[{start}-{end}] {line}")
+
+    for raw in (text or "").splitlines():
+        s = raw.strip()
+        if not s or s == "WEBVTT":
+            continue
+        m = _SRT_TIME.search(s)
+        if m:
+            flush()
+            start, end = m.group(1), m.group(2)
+            buf = []
+            if len(cues) >= limit:
+                break
+            continue
+        if s.isdigit():
+            continue
+        buf.append(s)
+    flush()
+    return cues[:limit]
+
+
+def _subs_prefer_key(m):
+    """同一 job 有多语字幕时,优先源语中文,其次英文。不要把 16 语全挂上。"""
+    path = (m.get("external_path") or m.get("rel_path") or "").replace("\\", "/").lower()
+    name = (m.get("name") or "").lower()
+    base = os.path.basename(path or name)
+    if base == "zh.srt" or name.endswith("_zh.srt"):
+        return 0
+    if "zh-hant" in base or "zh-hant" in name:
+        return 3
+    if base == "en.srt" or name.endswith("_en.srt"):
+        return 2
+    return 5
+
+
+def attach_job_transcripts(mids=None):
+    """把同 job 的一条字幕挂到视频和音轨的 index/asr/<id>.txt。
+
+    不重跑 Whisper:流水线已经产出 .srt。不写 description。
+    文本有变化时刷新该条向量。返回 {attached, skipped}。
+    """
+    ms = all_materials()
+    want = set(mids) if mids else None
+    subs = [m for m in ms if m.get("kind") == "subs"]
+    by_job = {}
+    for s in subs:
+        for t in (s.get("tags") or "").split(","):
+            t = t.strip()
+            if t.startswith("job:"):
+                by_job.setdefault(t, []).append(s)
+    for job in by_job:
+        by_job[job].sort(key=_subs_prefer_key)
+    os.makedirs(ASR_DIR, exist_ok=True)
+    attached = skipped = 0
+    for m in ms:
+        if m.get("kind") not in ("videos", "audio"):
+            continue
+        if want is not None and m["id"] not in want:
+            continue
+        jobs = [t.strip() for t in (m.get("tags") or "").split(",") if t.strip().startswith("job:")]
+        chosen = None
+        for job in jobs:
+            if by_job.get(job):
+                chosen = by_job[job][0]
+                break
+        if not chosen:
+            skipped += 1
+            continue
+        path = chosen.get("external_path") or ""
+        if path and not os.path.isabs(path):
+            path = os.path.join(HUB, path)
+        if not path or not os.path.isfile(path):
+            skipped += 1
+            continue
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                body = f.read()
+        except OSError:
+            skipped += 1
+            continue
+        cues = srt_cues(body)
+        if not cues:
+            skipped += 1
+            continue
+        text = "\n".join(cues)
+        dest = asr_sidecar_path(m["id"])
+        prev = ""
+        if dest and os.path.isfile(dest):
+            try:
+                with open(dest, "r", encoding="utf-8", errors="ignore") as f:
+                    prev = f.read()
+            except OSError:
+                prev = ""
+        if prev == text:
+            skipped += 1
+            continue
+        with open(dest, "w", encoding="utf-8") as f:
+            f.write(text)
+        _ASR_TEXT_CACHE.pop(m["id"], None)
+        _sync_material_vector(m["id"])
+        attached += 1
+    return {"attached": attached, "skipped": skipped}
+
+
+# ---------- 同 job 字幕信息(供 run/understand 记录与多语检索) ----------
+def _material_job_subs(mid):
+    """返回该素材所属 job 的全部字幕素材(按 _subs_prefer_key 排序,源语优先)。"""
+    m = get_material(mid)
+    if not m:
+        return []
+    jobs = [t.strip() for t in (m.get("tags") or "").split(",") if t.strip().startswith("job:")]
+    if not jobs:
+        return []
+    subs = [s for s in all_materials() if s.get("kind") == "subs"]
+    out = []
+    for s in subs:
+        st = s.get("tags") or ""
+        if any(t.strip() in jobs for t in st.split(",")):
+            out.append(s)
+    out.sort(key=_subs_prefer_key)
+    return out
+
+
+def _sub_lang(s):
+    """从字幕素材的标签或文件名推测受控语种代码(只认站点 16 语,否则 None)。"""
+    for t in (s.get("tags") or "").split(","):
+        t = t.strip()
+        if t.startswith("lang:"):
+            code = normalize_lang_tag(t.split(":", 1)[1])
+            if code:
+                return code
+    base = os.path.basename((s.get("external_path") or s.get("rel_path") or s.get("name") or ""))
+    # 长代码优先(zh-Hant 要先于 zh 匹配),且允许语种码位于文件名开头(如 zh.srt)
+    for lng in sorted(SITE_LANGS, key=len, reverse=True):
+        if re.search(r"(?:^|[._\-])" + re.escape(lng) + r"(?:[._\-]|$)", base, re.IGNORECASE):
+            return lng
+    return None
+
+
+def backfill_lang_tags():
+    """步骤 3:把受控 `lang:` 标签补到已有字幕素材。
+
+    旧 bridge 在 detect_lang 修复前入库的字幕缺 lang: 标签(如 zh.srt/tr.srt 这类裸文件名
+    识别不到)。只增不删;已带 lang: 或识别不到语种的跳过。返回 {updated, skipped}。"""
+    updated, skipped = 0, 0
+    for m in all_materials():
+        if m.get("kind") != "subs":
+            continue
+        old = (m.get("tags") or "")
+        if any(t.strip().startswith("lang:") for t in old.split(",")):
+            skipped += 1
+            continue
+        lg = _sub_lang(m)
+        if not lg:
+            skipped += 1
+            continue
+        new_tags = [t.strip() for t in old.split(",") if t.strip()] + ["lang:" + lg]
+        update_tags(m["id"], ",".join(new_tags))
+        updated += 1
+    return {"updated": updated, "skipped": skipped}
+
+
+def _srt_time_bounds(body):
+    """返回 .srt 首句与末句的开始秒数(无则 None)。"""
+    times = [m.group(1) for m in _SRT_TIME.finditer(body or "")]
+    if not times:
+        return None, None
+
+    def _to_sec(ts):
+        ts = ts.replace(",", ".")
+        h, mm, rest = ts.split(":")
+        s, ms = rest.split(".")
+        return int(h) * 3600 + int(mm) * 60 + int(s) + int(ms.ljust(3, "0")[:3]) / 1000.0
+
+    try:
+        return round(_to_sec(times[0]), 3), round(_to_sec(times[-1]), 3)
+    except Exception:
+        return None, None
+
+
+def job_transcript_info(mid):
+    """返回该母版/音轨的字幕挂接信息(供理解/run 记录)。
+
+    返回 dict: {attached_lang, other_langs, start_sec, end_sec, source_sub_path}。
+    attached_lang: 实际挂到 index/asr 的源语(按 _subs_prefer_key 选);
+    other_langs: 同 job 其余字幕语种代码列表(不抄正文);start/end: 挂接字幕首/末句秒数。
+    """
+    subs = _material_job_subs(mid)
+    if not subs:
+        return {"attached_lang": None, "other_langs": [], "start_sec": None,
+                "end_sec": None, "source_sub_path": None}
+    chosen = subs[0]
+    attached = asr_sidecar_path(mid)
+    attached_lang = _sub_lang(chosen) if (attached and os.path.isfile(attached)) else None
+    other_langs = []
+    for s in subs[1:]:
+        lg = _sub_lang(s)
+        if lg and lg not in other_langs:
+            other_langs.append(lg)
+    path = chosen.get("external_path") or ""
+    if path and not os.path.isabs(path):
+        path = os.path.join(HUB, path)
+    start, end = (None, None)
+    if path and os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                start, end = _srt_time_bounds(f.read())
+        except OSError:
+            start, end = None, None
+    return {"attached_lang": attached_lang, "other_langs": other_langs,
+            "start_sec": start, "end_sec": end, "source_sub_path": path or None}
+
+
+# ---------- 画面描述 sidecar 解析(描述/标签/EN描述/EN标签 四行) ----------
+def _parse_visual_sidecar(text):
+    """解析 index/visual/<id>.txt(见 visual_runner.PROMPT)的 描述/标签/EN描述/EN标签 四行。
+
+    对自由格式/思考前缀鲁棒:同一字段可能出现多次(思考里先拒答,后面才是真描述),
+    只保留最后一条非拒答。返回 dict(zh_desc,zh_tags,en_desc,en_tags)。"""
+    zh_desc = zh_tags = en_desc = en_tags = ""
+    refusal = ("没有提供", "未提供", "无法观察", "无法进行描述", "请上传", "请提供")
+    for line in (text or "").splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        low = s.lower()
+        val = s.split(":", 1)[-1].split("：", 1)[-1].strip()
+        if not val or any(k in val for k in refusal):
+            continue
+        if low.startswith("描述") or (low.startswith("description") and "en" not in low):
+            zh_desc = val
+        elif low.startswith("标签") or low.startswith("tags") or low.startswith("关键字") or low.startswith("关键词"):
+            zh_tags = val
+        elif low.startswith("en描述") or low.startswith("en 描述") or low.startswith("en-description") \
+                or low.startswith("description(en)") or low.startswith("en description"):
+            en_desc = val
+        elif low.startswith("en标签") or low.startswith("en 标签") or low.startswith("en-tags") \
+                or low.startswith("tags(en)") or low.startswith("en tags"):
+            en_tags = val
+    return {"zh_desc": zh_desc, "zh_tags": zh_tags,
+            "en_desc": en_desc, "en_tags": en_tags}
+
+
+def _visual_is_bilingual(mid):
+    """画面描述 sidecar 是否同时含简体(描述/标签)与英文(EN描述/EN标签)——步骤 1「四行齐全」。"""
+    sc = visual_sidecar_path(mid)
+    if not sc or not os.path.isfile(sc):
+        return False
+    try:
+        with open(sc, encoding="utf-8", errors="ignore") as f:
+            p = _parse_visual_sidecar(f.read())
+    except OSError:
+        return False
+    return bool(p["zh_desc"] and p["en_desc"])
+
+
+# ---------- 入库链路逐步状态记录(index/run/<id>.json) ----------
+def write_run_record(mid, steps=None):
+    """写该素材的入库链路状态记录(步骤键用英文,见步骤 12:thumb/tech/describe/ocr/visual/shots/phash/asr)。
+
+    steps: 可传 auto_process_material 返回的 {步名:结果};为 None 时按 pending_processing 推导。
+    同时记录字幕挂接语种与同 job 未挂语种。返回记录 dict。"""
+    m = get_material(mid)
+    if not m:
+        return {"id": mid, "status": "not_found"}
+    path = run_record_path(mid)
+    if not path:
+        return {"id": mid, "status": "bad_id"}
+    kind = m.get("kind")
+    vis = kind in VISUAL_KINDS
+    rec = {"id": mid, "kind": kind, "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+           "runnable": vis, "steps": {}, "transcript": {"attached_lang": None,
+           "other_langs": [], "start_sec": None, "end_sec": None},
+           "bad_file": False, "bad_reason": None}
+    if vis:
+        if steps:
+            step_status = {}
+            for name, r in (steps or {}).items():
+                if isinstance(r, dict):
+                    step_status[name] = r.get("status", "ok")
+                else:
+                    step_status[name] = "ok" if r else "error"
+            rec["steps"] = step_status
+        else:
+            pend = pending_processing(mid)
+            rec["steps"] = {k: ("missing" if v else "ok") for k, v in pend.items()}
+        info = job_transcript_info(mid)
+        rec["transcript"] = info
+        src = _abs_source(m)
+        if src and not os.path.isfile(src):
+            rec["bad_file"] = True
+            rec["bad_reason"] = "source_missing"
+        elif src is None:
+            rec["bad_file"] = True
+            rec["bad_reason"] = "no_source_path"
+    os.makedirs(os.path.join(INDEX_DIR, "run"), exist_ok=True)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(rec, f, ensure_ascii=False, indent=2)
+    except OSError:
+        return rec
+    return rec
+
+
+def read_run_record(mid):
+    path = run_record_path(mid)
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+# ---------- 结构化理解记录(index/understand/<id>.json) ----------
+def write_understand_record(mid):
+    """汇总已有 sidecar 为该素材写理解记录(步骤 4):画面中英、台词语种与起止、画质、人物、版权。
+
+    不把这份 JSON 抄进 description(仍走 sidecar 与主排序分离,铁律)。返回记录 dict。"""
+    m = get_material(mid)
+    if not m:
+        return {"id": mid, "status": "not_found"}
+    path = understand_record_path(mid)
+    if not path:
+        return {"id": mid, "status": "bad_id"}
+    info = job_transcript_info(mid)
+    sc = visual_sidecar_path(mid)
+    viz = {"zh_desc": "", "zh_tags": "", "en_desc": "", "en_tags": ""}
+    if sc and os.path.isfile(sc):
+        try:
+            with open(sc, encoding="utf-8", errors="ignore") as f:
+                viz = _parse_visual_sidecar(f.read())
+        except OSError:
+            pass
+    src = _abs_source(m)
+    quality = "unusable" if (src and not os.path.isfile(src)) or src is None else "ok"
+    rec = {
+        "id": mid, "kind": m.get("kind"),
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "speech": {
+            "lang": info.get("attached_lang"),
+            "start_sec": info.get("start_sec"),
+            "end_sec": info.get("end_sec"),
+            "other_langs": info.get("other_langs") or [],
+        },
+        "visual_zh": {"description": viz["zh_desc"], "tags": viz["zh_tags"]},
+        "visual_en": {"description": viz["en_desc"], "tags": viz["en_tags"]},
+        "visual_bilingual": bool(viz["zh_desc"] and viz["en_desc"]),
+        "quality": quality,
+        "people": "unknown",
+        "rights": "own",
+        "reviewed": False,
+    }
+    os.makedirs(os.path.join(INDEX_DIR, "understand"), exist_ok=True)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(rec, f, ensure_ascii=False, indent=2)
+    except OSError:
+        return rec
+    return rec
+
+
+def read_understand_record(mid):
+    path = understand_record_path(mid)
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def set_reviewed(mid, value=True):
+    """人工复核后把 reviewed 置真(默认 false,不进主排序,见步骤 5)。"""
+    rec = read_understand_record(mid) or {"id": mid}
+    rec["reviewed"] = bool(value)
+    rec["reviewed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    path = understand_record_path(mid)
+    if not path:
+        return rec
+    os.makedirs(os.path.join(INDEX_DIR, "understand"), exist_ok=True)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(rec, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+    return rec
+
+
+# ---------- 运营汇总(步骤 9:按语种拆开计数) ----------
+def ops_summary():
+    """运营汇总:画面中英双行齐全数、源语已挂接数、各 lang: 字幕数、坏文件数、导出次数、反馈采纳率。
+
+    语种计数与库内 `lang:` 标签一致;另含英文问句(chicken wings)与 lang:ja 过滤两条不进旧门禁分母的检查。"""
+    mats = all_materials()
+    visual_bilingual = sum(1 for m in mats
+                           if m.get("kind") in VISUAL_KINDS and _visual_is_bilingual(m["id"]))
+    source_attached = 0
+    for m in mats:
+        if m.get("kind") in ("videos", "audio"):
+            ap = asr_sidecar_path(m["id"])
+            if ap and os.path.isfile(ap):
+                source_attached += 1
+    per_lang = {c: 0 for c in SITE_LANGS}
+    for m in mats:
+        if m.get("kind") != "subs":
+            continue
+        lg = _sub_lang(m)
+        if lg and lg in per_lang:
+            per_lang[lg] += 1
+    bad_files = 0
+    for m in mats:
+        src = _abs_source(m)
+        if (src and not os.path.isfile(src)) or src is None:
+            bad_files += 1
+    deliveries_dir = os.path.join(INDEX_DIR, "agent_workspace", "deliveries")
+    exports = 0
+    if os.path.isdir(deliveries_dir):
+        for _, _, fs in os.walk(deliveries_dir):
+            exports += len(fs)
+    fb = learning_summary()
+    total_fb = fb.get("total", 0)
+    accepted = sum(d.get("accepted", 0) for d in fb.get("by_action", {}).values())
+    feedback_rate = round(accepted / total_fb, 3) if total_fb else 0.0
+    # 不进旧门禁分母的两条检查
+    eng_rows = search("chicken wings", limit=5) if "search" in globals() else []
+    ja_rows = search("", tag="lang:ja", limit=50) if "search" in globals() else []
+    return {
+        "total_materials": len(mats),
+        "visual_bilingual": visual_bilingual,
+        "source_attached": source_attached,
+        "per_lang_subs": per_lang,
+        "bad_files": bad_files,
+        "exports": exports,
+        "feedback_total": total_fb,
+        "feedback_accepted": accepted,
+        "feedback_rate": feedback_rate,
+        "check_english_query_chicken_wings_top": [r["id"] for r in eng_rows[:5]],
+        "check_lang_ja_subs": len(ja_rows),
+    }
 
 
 def _ocr_python():
@@ -3043,7 +3932,7 @@ def ocr_material(mid, frames=5, force=False):
         flags = 0x08000000 if os.name == "nt" else 0
         std = os.path.join(OCR_DIR, "_f0.jpg")
         cmd = [exe, "-v", "error", "-y", "-i", src, "-frames:v", "1",
-               "-vf", "scale=1280:-2", "-q:v", "4", std]
+               "-vf", "scale=1280:-2", "-strict", "unofficial", "-q:v", "4", std]
         try:
             subprocess.run(cmd, stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL, timeout=60,
@@ -3065,7 +3954,8 @@ def ocr_material(mid, frames=5, force=False):
         for i, t in enumerate(stamps):
             out = os.path.join(OCR_DIR, f"_f{i}.jpg")
             cmd = [exe, "-v", "error", "-y", "-ss", str(t), "-i", src,
-                   "-frames:v", "1", "-vf", "scale=960:-2", "-q:v", "4", out]
+                   "-frames:v", "1", "-vf", "scale=960:-2", "-strict", "unofficial",
+                   "-q:v", "4", out]
             try:
                 subprocess.run(cmd, stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL, timeout=60,
@@ -3106,6 +3996,7 @@ def ocr_material(mid, frames=5, force=False):
     with open(sc, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
     _OCR_TEXT_CACHE.pop(mid, None)      # sidecar 已更新,失效进程内缓存
+    _sync_material_vector(mid)          # 向量失效闭环:OCR 文本变了立即重嵌
     # OCR 文本只落 sidecar(index/ocr/<id>.txt),由语义 doc_text 读取参与稠密检索;
     # 不写进 DB description 列——否则自由字幕文本进入词法 SQL 检索(_score 读 description)
     # 会稀释门禁/查询排序(实测 240 条批量 OCR 后 ndcg 0.84→0.80)。
@@ -3125,6 +4016,177 @@ def ocr_all(limit=0, force=False):
         if not force and sc and os.path.isfile(sc):
             continue
         out.append(ocr_material(m["id"], force=force))
+    return out
+
+
+# ---------- 画面描述(对齐 §16.2 Job4「多模态模型读关键帧,生成画面描述/标签」,见最佳实践) ----------
+def _parse_visual_runner_stdout(raw):
+    """解析 visual_runner.py 的 stdout JSON(容忍前置日志:取第一个 '[' 起的 JSON 数组)。"""
+    s = (raw or "").decode("utf-8", "ignore")
+    i = s.find("[")
+    j = s.rfind("]")
+    if i < 0 or j <= i:
+        return None
+    try:
+        data = json.loads(s[i:j + 1])
+        return data if isinstance(data, list) else None
+    except Exception:
+        return None
+
+
+def _visual_python():
+    """承载视觉推理的 python 解释器:用 materials_hub 自身 python(VLM 走 ollama HTTP,
+    零第三方依赖);优先 VITUAL_VISUAL_PYTHON。找不到返回 None(能力优雅缺位)。"""
+    env = os.environ.get("VITUAL_VISUAL_PYTHON", "").strip()
+    if env and os.path.isfile(env):
+        return env
+    return sys.executable
+
+
+def _grab_frame(exe, src, t, dst, vf, flags):
+    """抽出一帧。先快速 seek；空文件再改为先解码再 seek（部分成片快进会写出 0 字节）。"""
+    strict = ["-strict", "unofficial"]
+    attempts = (
+        [exe, "-v", "error", "-y", "-ss", str(t), "-i", src,
+         "-frames:v", "1", "-vf", vf, *strict, "-q:v", "4", dst],
+        [exe, "-v", "error", "-y", "-i", src, "-ss", str(t),
+         "-frames:v", "1", "-vf", vf, *strict, "-q:v", "4", dst],
+    )
+    for cmd in attempts:
+        try:
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=90, creationflags=flags)
+        except Exception:
+            pass
+        if os.path.isfile(dst) and os.path.getsize(dst) > 0:
+            return True
+        try:
+            if os.path.isfile(dst):
+                os.remove(dst)
+        except OSError:
+            pass
+    return False
+
+
+def visual_material(mid, frames=3, force=False):
+    """对视频/图片素材做画面描述(离线,本地多模态 VLM gemma4:e2b via ollama):
+    ffmpeg 采样帧 → visual_runner 子进程调用 ollama 生成「画面描述+标签」→ 落 sidecar
+    `index/visual/<id>.txt`。画面内容(物体/场景/动作)由此可检索:语义(稠密)由 `doc_text`
+    读 sidecar;词法由 `_score` 的 visual 独立低权重通道(0.35)命中稀有画面词;全文分块检索
+    由 `_material_text` 收录。刻意**不写 DB description 列**——该列被 `_score` 按 1.5 权重
+    计分,写入自由描述文本会稀释常规排序(同 OCR 教训:实测 240 条批量 OCR 写 description 后
+    门禁 ndcg 0.84→0.80)。幂等:已有 sidecar 且未 force 时直接返回 cached。记 history 审计。"""
+    m = get_material(mid)
+    if not m:
+        return {"id": mid, "status": "error", "reason": "not_found"}
+    if m.get("kind") not in VISUAL_KINDS:
+        return {"id": mid, "status": "skipped", "reason": f"kind={m.get('kind')}"}
+    sc = visual_sidecar_path(mid)
+    if not sc:
+        return {"id": mid, "status": "error", "reason": "bad_id"}
+    if os.path.isfile(sc) and not force:
+        return {"id": mid, "status": "cached", "chars": os.path.getsize(sc)}
+    src = _abs_source(m)
+    if not src or not os.path.exists(src):
+        return {"id": mid, "status": "error", "reason": "source_missing"}
+    exe = ffmpeg_path()
+    vis_py = _visual_python()
+    runner = os.path.join(HUB, "visual_runner.py")
+    if not exe:
+        return {"id": mid, "status": "skipped", "reason": "no_ffmpeg"}
+    if not vis_py or not os.path.isfile(runner):
+        return {"id": mid, "status": "skipped", "reason": "no_visual_runner"}
+    flags = 0x08000000 if os.name == "nt" else 0
+    # -strict unofficial:mjpeg 编码 yuv420p(非 full-range)在新版 ffmpeg(≥7)默认拒绝,
+    # 报 "Non full-range YUV is non-standard";声明 unofficial 兼容旧版行为,抽帧不再依赖
+    # 编码器是否恰好自动协商出 yuvj420p(带 -vf scale 时协商不到,必现 frame_extract_failed)。
+    STRICT = ["-strict", "unofficial"]
+    if m["kind"] == "images":
+        std = os.path.join(VISUAL_DIR, "_f0.jpg")
+        cmd = [exe, "-v", "error", "-y", "-i", src, "-frames:v", "1",
+               "-vf", "scale=1280:-2", *STRICT, "-q:v", "4", std]
+        try:
+            subprocess.run(cmd, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=60,
+                           creationflags=flags)
+        except Exception:
+            std = None
+        if not std or not os.path.exists(std) or os.path.getsize(std) == 0:
+            return {"id": mid, "status": "error", "reason": "frame_extract_failed"}
+        imgs, stamps = [(std, None)], [None]
+    else:
+        dur = _probe_duration(src)
+        frames = max(1, min(int(frames or 3), 10))
+        if dur > 0.5:
+            stamps = [round(dur * f, 2) for f in (0.1, 0.3, 0.5, 0.7, 0.9)][:frames]
+        else:
+            stamps = [0.0]
+        imgs = []
+        for i, t in enumerate(stamps):
+            out = os.path.join(VISUAL_DIR, f"_f{i}.jpg")
+            if _grab_frame(exe, src, t, out, "scale=960:-2", flags):
+                imgs.append((out, t))
+        if not imgs:
+            # 时长头很大但后段没有画面（截断文件）时，再试开头几秒。
+            for i, t in enumerate((0.5, 1.0, 2.0)):
+                out = os.path.join(VISUAL_DIR, f"_f{i}.jpg")
+                if _grab_frame(exe, src, t, out, "scale=960:-2", flags):
+                    imgs.append((out, t))
+        if not imgs:
+            return {"id": mid, "status": "error", "reason": "frame_extract_failed"}
+    try:
+        env = dict(os.environ, PYTHONIOENCODING="utf-8")   # 防 GBK 管道乱码(双保险)
+        p = subprocess.run([vis_py, runner] + [f for f, _ in imgs],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           timeout=600, creationflags=0x08000000 if os.name == "nt" else 0,
+                           env=env)
+        data = _parse_visual_runner_stdout(p.stdout)
+    except Exception:
+        data = None
+    if data is None:
+        return {"id": mid, "status": "error", "reason": "visual_runner_failed"}
+    by_file = {d.get("file", ""): d for d in data}
+    lines = []
+    total = 0
+    for f, t in imgs:
+        d = by_file.get(f) or {}
+        txt = (d.get("text") or "").strip()
+        if txt:
+            tag = f"[{t}s] " if t is not None else ""
+            lines.append(f"{tag}{txt}")
+            total += len(txt)
+        try:
+            if f != src:
+                os.remove(f)                     # 清理临时抽帧
+        except OSError:
+            pass
+    if not lines:
+        # VLM 全部失败(如 ollama 未起/模型缺失):不写空 sidecar,保持能力缺位可重试
+        return {"id": mid, "status": "skipped", "reason": "vlm_empty",
+                "detail": (by_file and by_file.get(list(by_file)[0], {}).get("error")) or ""}
+    os.makedirs(VISUAL_DIR, exist_ok=True)
+    with open(sc, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    _VISUAL_TEXT_CACHE.pop(mid, None)     # sidecar 已更新,失效进程内缓存
+    _sync_material_vector(mid)            # 向量失效闭环:画面描述变了立即重嵌
+    # 画面描述只落 sidecar(index/visual/<id>.txt),由语义 doc_text / 词法低权重 / 全文分块三路
+    # 径收录;不写进 DB description 列(否则自由描述文本稀释精确 token 排序,同 OCR 教训)。
+    log_history("app", "visual", mid, f"frames={len(imgs)} chars={total}")
+    return {"id": mid, "status": "ok", "frames": len(imgs), "chars": total,
+            "sample": "\n".join(lines)[:200]}
+
+
+def visual_all(limit=0, force=False):
+    """批量画面描述:对全部视频/图片素材补齐 sidecar(默认跳过已有)。"""
+    out = []
+    ms = [m for m in all_materials() if m.get("kind") in VISUAL_KINDS]
+    if limit:
+        ms = ms[:limit]
+    for m in ms:
+        sc = visual_sidecar_path(m["id"])
+        if not force and sc and os.path.isfile(sc):
+            continue
+        out.append(visual_material(m["id"], force=force))
     return out
 
 
@@ -3641,7 +4703,7 @@ def _clip_visual_path(m):
             try:
                 subprocess.run(
                     [exe, "-v", "error", "-y", "-i", src, "-frames:v", "1",
-                     "-vf", "scale=224:-2", "-q:v", "4", dst],
+                     "-vf", "scale=224:-2", "-strict", "unofficial", "-q:v", "4", dst],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     timeout=60, creationflags=flags,
                 )
@@ -3858,8 +4920,164 @@ def search_by_text_image(text, *, limit=20, min_score=0.15):
         return {"status": "error", "mode": "clip-text", "matches": [],
                 "error": "embed_failed"}
     hits = search_by_clip_vector(vecs[0], limit=limit, min_score=min_score)
-    return {"status": "ok", "mode": "clip-text", "matches": hits,
-            "total": len(hits), "model": info.get("model", "")}
+    # 通道 B:视频多帧 CLIP。若已建帧索引,再按各帧最大值召回并合并(取更优分)。
+    fhits = search_by_clip_frame_vector(vecs[0], limit=limit, min_score=min_score)
+    merged = {h["id"]: h for h in hits}
+    for h in fhits:
+        if h["id"] not in merged or h["score"] > merged[h["id"]]["score"]:
+            merged[h["id"]] = h
+    merged = sorted(merged.values(), key=lambda x: -x["score"])[:limit]
+    return {"status": "ok", "mode": "clip-text", "matches": merged,
+            "total": len(merged), "model": info.get("model", "")}
+
+
+def _extract_frames(m, n=5):
+    """为素材抽帧返回 [(path, t), ...]。图片返回源文件本身;视频用 ffmpeg 抽 n 帧到
+    INDEX_DIR/_clip_frames/。复用 OCR/visual 同款抽帧逻辑。"""
+    mid = m["id"]
+    out_dir = os.path.join(INDEX_DIR, "_clip_frames")
+    os.makedirs(out_dir, exist_ok=True)
+    src = _abs_source(m) or ""
+    if not src or not os.path.exists(src):
+        return []
+    if m.get("kind") == "images":
+        return [(src, None)]
+    exe = ffmpeg_path()
+    if not exe:
+        return []
+    dur = _probe_duration(src)
+    n = max(1, min(int(n or 5), 10))
+    if dur > 0.5:
+        stamps = [round(dur * f, 2) for f in (0.1, 0.3, 0.5, 0.7, 0.9)][:n]
+    else:
+        stamps = [0.0]
+    flags = 0x08000000 if os.name == "nt" else 0
+    out = []
+    for i, t in enumerate(stamps):
+        dst = os.path.join(out_dir, f"{mid}_{i}.jpg")
+        if not (os.path.isfile(dst) and os.path.getsize(dst) > 0):
+            _grab_frame(exe, src, t, dst, "scale=224:-2", flags)
+        if os.path.isfile(dst) and os.path.getsize(dst) > 0:
+            out.append((dst, t))
+    if not out:
+        for i, t in enumerate((0.5, 1.0, 2.0)):
+            dst = os.path.join(out_dir, f"{mid}_fb{i}.jpg")
+            if _grab_frame(exe, src, t, dst, "scale=224:-2", flags):
+                out.append((dst, t))
+                break
+    return out
+
+
+def build_clip_frame_embeddings(frames=5, force=False, limit=0, progress=None, kinds=None):
+    """通道 B:为 videos/silent/images 建多帧 CLIP 向量(增量)。无后端 → available=False。
+    与原 image_embeddings(单图)分表,互不影响;CLIP 文本搜帧能力由 search_by_text_image 自动启用。"""
+    _ensure_frame_table()
+    info = clip_probe(refresh=True)
+    if not info.get("ok"):
+        return {"available": False, "embedded": 0, "skipped": 0, "total": 0,
+                "err": info.get("err", "clip_unavailable")}
+    model = info.get("model") or "clip"
+    want = set(kinds) if kinds else set(VISUAL_KINDS)
+    ms = [m for m in all_materials() if m.get("kind") in want]
+    con = _con()
+    con.row_factory = sqlite3.Row
+    have = {(r["mid"], r["idx"]): (r["model"], r["sig"]) for r in con.execute(
+        "SELECT mid, idx, model, sig FROM clip_frame_embeddings").fetchall()}
+    con.close()
+    todo = []  # (mid, [(path,t)...])
+    for m in ms:
+        frames_paths = _extract_frames(m, frames)
+        if not frames_paths:
+            continue
+        # sig 用首帧大小+帧数做粗粒度失效判断(重建成本可接受,真变化会重算)
+        try:
+            sig = "%s:%d:%d" % (model, len(frames_paths),
+                                os.path.getsize(frames_paths[0][0]))
+        except OSError:
+            continue
+        key0 = (m["id"], 0)
+        if not force and have.get(key0) == (model, sig) and len(have) >= len(ms):
+            continue
+        todo.append((m["id"], frames_paths, sig))
+    total = len(ms)
+    skipped = total - len(todo)
+    if limit:
+        todo = todo[:limit]
+    done = 0
+    for mid, fps, sig in todo:
+        paths = [p for p, _ in fps]
+        vecs = _clip_embed_images(paths)
+        con = _con()
+        now = datetime.datetime.now().isoformat(timespec="seconds")
+        for idx, (vec, (p, t)) in enumerate(zip(vecs, fps)):
+            if not vec:
+                continue
+            con.execute(
+                "INSERT OR REPLACE INTO clip_frame_embeddings"
+                "(mid,idx,model,dim,sig,vec,updated_at) VALUES(?,?,?,?,?,?,?)",
+                (mid, idx, model, len(vec), sig, _vec_to_blob(vec), now),
+            )
+            done += 1
+        con.commit()
+        con.close()
+        if progress:
+            progress(done, len(todo))
+    log_history("app", "clipframe", "", "embedded=%d model=%s" % (done, model))
+    return {"available": True, "model": model, "total": total,
+            "embedded": done, "skipped": skipped, "pending": len(todo) - done}
+
+
+def _ensure_frame_table():
+    """确保帧级 CLIP 表存在(应对「库早于本表创建」的长驻进程;CREATE IF NOT EXISTS 幂等)。"""
+    con = _con()
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS clip_frame_embeddings(
+            mid TEXT, idx INTEGER, model TEXT, dim INTEGER,
+            sig TEXT, vec BLOB, updated_at TEXT,
+            PRIMARY KEY (mid, idx))"""
+    )
+    con.close()
+
+
+def _load_frame_vectors(model=None):
+    try:
+        _ensure_frame_table()
+    except Exception:
+        return {}
+    con = _con()
+    con.row_factory = sqlite3.Row
+    if model:
+        rows = con.execute(
+            "SELECT mid, vec FROM clip_frame_embeddings WHERE model=?", (model,)
+        ).fetchall()
+    else:
+        rows = con.execute("SELECT mid, vec FROM clip_frame_embeddings").fetchall()
+    con.close()
+    d = {}
+    for r in rows:
+        d.setdefault(r["mid"], []).append(_blob_to_vec(r["vec"]))
+    return d
+
+
+def search_by_clip_frame_vector(qv, *, limit=20, skip_id="", min_score=0.15):
+    """通道 B:给定查询向量,在 clip_frame_embeddings 里按各帧最大值召回(任一帧相似即命中)。"""
+    if not qv:
+        return []
+    info = clip_probe()
+    model = info.get("model") or None
+    store = _load_frame_vectors(model if info.get("backend") == "local" else None)
+    scored = []
+    for mid, vecs in store.items():
+        if skip_id and mid == skip_id:
+            continue
+        best = max((_cosine(qv, v) for v in vecs), default=-1.0)
+        if best < min_score:
+            continue
+        m = get_material(mid) or {}
+        scored.append({"id": mid, "name": m.get("name", ""),
+                       "kind": m.get("kind", ""), "score": round(best, 4)})
+    scored.sort(key=lambda x: -x["score"])
+    return scored[:limit]
 
 
 def search_by_image(query, *, max_dist=10, limit=20, mode="auto"):
@@ -3957,15 +5175,18 @@ def pending_processing(mid):
     """返回该素材还缺哪些自动处理步骤(True=缺)。
 
     判断依据:thumb 看 thumb_path(mid) 的 jpg 是否存在且非空;
-    ocr/shots/phash 看各自 sidecar(index/ocr|shots|phash/<id>.*)是否已落盘。
-    非 videos/silent/images 素材(docs/subs/audio/other)不需要画面类派生数据 → 全 False。
+    ocr/visual/shots/phash 看各自 sidecar 是否已落盘。
+    visual 必须计入缺项:否则入库钩子只补封面/OCR/镜头,画面描述永远不会补
+    (实库 16 条视频里 10 条因此没有 index/visual)。
+    非 videos/silent/images/anim 素材不需要画面类派生数据 → 全 False。
     物理 clip(role:clip):镜头索引挂在母版上,shots 永不标缺。
     images:不需要 shots(场景检测只对视频)。"""
     m = get_material(mid)
     if not m or m.get("kind") not in VISUAL_KINDS:
-        return {"thumb": False, "ocr": False, "shots": False, "phash": False}
+        return {"thumb": False, "ocr": False, "visual": False, "shots": False, "phash": False}
     tp = thumb_path(mid)
-    op, sp, pp = ocr_sidecar_path(mid), shot_index_path(mid), phash_path(mid)
+    op, vp, sp, pp = (ocr_sidecar_path(mid), visual_sidecar_path(mid),
+                      shot_index_path(mid), phash_path(mid))
     kind = m.get("kind")
     # 图片本身可当封面;有文件即不缺 thumb
     if kind == "images":
@@ -3977,6 +5198,7 @@ def pending_processing(mid):
     return {
         "thumb": need_thumb,
         "ocr": not (op and os.path.isfile(op)),
+        "visual": not (vp and os.path.isfile(vp) and os.path.getsize(vp) > 0),
         "shots": need_shots and not (sp and os.path.isfile(sp)),
         "phash": not (pp and os.path.isfile(pp)),
     }
@@ -4215,9 +5437,9 @@ def describe_all(dry_run=True, only_missing=True, limit=0, with_stage=True):
 
 
 def auto_process_material(mid, ocr=True, shots=True, phash=True, autotag=False, tech=True,
-                          describe=True):
+                          describe=True, visual=True):
     """对单条素材按需依序执行自动处理链:make_thumb → tech_material → describe_material →
-    ocr_material → build_shot_index → phash_material(autotag=True 再追加 auto_tag_material)。
+    ocr_material → visual_material → build_shot_index → phash_material(autotag=True 再追加 auto_tag_material)。
 
     describe 刻意排在 tech 之后(描述要用技术事实),且默认 `with_stage=False`
     (实测中文阶段词进 description 会让 r20 掉出容差,见 describe_material 注释)。
@@ -4252,6 +5474,8 @@ def auto_process_material(mid, ocr=True, shots=True, phash=True, autotag=False, 
         _attempt("describe", lambda: describe_material(mid, with_stage=False))
     if ocr:
         _attempt("ocr", lambda: ocr_material(mid))
+    if visual:
+        _attempt("visual", lambda: visual_material(mid))
     # 物理 clip / 图片 不建镜头表(逻辑片段只在母版 videos/silent shots)
     m0 = get_material(mid) or {}
     run_shots = (
@@ -4263,10 +5487,27 @@ def auto_process_material(mid, ocr=True, shots=True, phash=True, autotag=False, 
         _attempt("shots", lambda: build_shot_index(mid))
     if phash:
         _attempt("phash", lambda: phash_material(mid))
+    # 步骤 1:镜头之后把同 job 的一条源语字幕挂到母版/音轨(只挂一条,避免 16 语冲散向量)
+    if m0.get("kind") in ("videos", "audio"):
+        try:
+            r = attach_job_transcripts(mids=[mid])
+            steps["asr"] = {"status": "ok" if r.get("attached") else "skipped",
+                            "attached": r.get("attached", 0)}
+        except Exception as e:              # noqa: BLE001
+            steps["asr"] = {"status": "error", "reason": f"{type(e).__name__}: {e}"}
     if autotag:
         m = get_material(mid)
         if m:                                # 无 chat 模型时 auto_tag_material 自动 skipped
             _attempt("autotag", lambda: auto_tag_material(m))
+    # 步骤 1/4/7/12:把逐步骤状态、字幕挂接语种、理解记录落盘(派生数据,可重建)
+    try:
+        write_run_record(mid, steps=steps)
+    except Exception:                       # noqa: BLE001
+        pass
+    try:
+        write_understand_record(mid)
+    except Exception:                       # noqa: BLE001
+        pass
     log_history("app", "auto_process", mid, f"ok={okn}/{total}")
     return {"id": mid, "steps": steps, "ok": okn, "total": total}
 
@@ -4409,6 +5650,26 @@ def job_checkup(job_id):
         and not broken_ids
         and (kinds.get("videos", 0) + kinds.get("silent", 0)) > 0
     )
+    # 步骤 7:分发就绪——源文件打不开、有声母版无源语挂接都写进说明(但不把整任务判死)
+    channel_broken = []
+    masters_without_transcript = []
+    subs_langs = set()
+    for m in rows:
+        src = _abs_source(m)
+        if (src and not os.path.isfile(src)) or (src is None and m.get("location") == "external"):
+            channel_broken.append(m["id"])
+        if m["id"] in master_ids:
+            if any(t.startswith("lang:") for t in (m.get("tags") or "").split(",")):
+                pass
+            info = job_transcript_info(m["id"])
+            if info.get("attached_lang") is None and info.get("source_sub_path") is not None:
+                masters_without_transcript.append(m["id"])
+    for m in rows:
+        if m.get("kind") == "subs":
+            lg = _sub_lang(m)
+            if lg:
+                subs_langs.add(lg)
+    channel_ready = (not channel_broken) and ok
     return {
         "ok": ok,
         "job": jid,
@@ -4427,11 +5688,30 @@ def job_checkup(job_id):
         "missing_thumbs": missing_thumbs,
         "missing_shots": missing_shots,
         "broken_ids": broken_ids,
+        "channel_ready": channel_ready,
+        "channel_broken": channel_broken,
+        "subs_langs": sorted(subs_langs),
+        "masters_without_transcript": masters_without_transcript,
         "materials": [
             {"id": m["id"], "kind": m.get("kind"), "name": m.get("name", "")}
             for m in rows[:40]
         ],
     }
+
+
+def job_lang_readiness(job_id, lang):
+    """步骤 7 查询时调用:该 job 是否具备用户点名的 `lang:` 字幕。
+
+    返回 {present, blocking, available_langs}。缺某一种译文是「说明」(blocking=缺这种语言),
+    任务仍可按已有语言导出,不整体判死。"""
+    lg = normalize_lang_tag(lang) if lang else None
+    ck = job_checkup(job_id)
+    avail = set(ck.get("subs_langs") or [])
+    if not lg:
+        return {"present": None, "blocking": None, "available_langs": sorted(avail)}
+    present = lg in avail
+    return {"present": present, "blocking": (None if present else "missing_lang:" + lg),
+            "available_langs": sorted(avail)}
 
 
 # ───────────── Agentic DAM 补齐能力:治理 / 分发就绪 / 持续学习 ─────────────
@@ -4501,6 +5781,11 @@ def distribution_readiness(job_id=""):
                 "reason": c.get("error") or "job_checkup not ok",
                 "blocking": ["job_checkup_failed"], "checkup": c}
     blocking = []
+    # 步骤 7:源文件打不开、有声母版未挂源语,都写进 blocking(只说明,不把整任务判死)
+    if c.get("channel_broken"):
+        blocking.append("source_unopenable:" + ",".join(c["channel_broken"][:5]))
+    if c.get("masters_without_transcript"):
+        blocking.append("master_no_transcript:" + ",".join(c["masters_without_transcript"][:5]))
     if c.get("missing_thumbs"):
         blocking.append("missing_thumbs:" + ",".join(c["missing_thumbs"][:5]))
     if c.get("missing_shots"):
@@ -4512,13 +5797,17 @@ def distribution_readiness(job_id=""):
     return {
         "job": job_id,
         "channel_ready": not blocking,
+        "reason": "" if not blocking else "blocked_items",
         "blocking": blocking,
         "masters": len(c.get("master_ids", [])),
+        "subs_langs": c.get("subs_langs", []),
         "checkup_summary": {
             "kinds": c.get("kinds"),
             "missing_thumbs": len(c.get("missing_thumbs", [])),
             "missing_shots": len(c.get("missing_shots", [])),
             "clips_missing_parent": len(c.get("clips_missing_parent", [])),
+            "channel_broken": len(c.get("channel_broken", [])),
+            "masters_without_transcript": len(c.get("masters_without_transcript", [])),
         },
     }
 
@@ -4533,18 +5822,24 @@ def _feedback_path():
     return _FEEDBACK_PATH
 
 
-def log_feedback(action, accepted, note="", by="agent"):
+def log_feedback(action, accepted, note="", by="agent", lang="",
+                orig_query="", translated_query=""):
     """记录一次 Agent 动作被采纳/否决(持续学习闭环,仅追加写)。
 
     action: 动作名(如 job_checkup/governance_report/update_tags);
     accepted: True=采纳,False=否决(override)。返回累计条数。
+    步骤 10:lang/orig_query/translated_query 让「某语言否决」与「该 query 经翻译桥」可追溯——
+    否决只对译后的检索词生效,这样英文和简体否决的是同一条(见方案 A 记忆)。
     """
     action = (action or "").strip()
     if not action:
         return {"ok": False, "error": "action required"}
     rec = {"ts": datetime.datetime.now().isoformat(),
            "action": action, "accepted": bool(accepted),
-           "note": str(note or ""), "by": str(by or "agent")}
+           "note": str(note or ""), "by": str(by or "agent"),
+           "lang": str(lang or ""),
+           "orig_query": str(orig_query or ""),
+           "translated_query": str(translated_query or "")}
     try:
         with open(_feedback_path(), "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -4588,6 +5883,71 @@ def learning_summary(limit=50):
         d["rate"] = round(d["accepted"] / d["total"], 3) if d["total"] else 0.0
     recent = rows[-limit:] if limit else rows
     return {"total": len(rows), "by_action": by_action, "recent": recent}
+
+
+# ---------- 步骤 10:反馈否决 → 跨语言 veto(译后词对齐) ----------
+_VETO_PATH = None
+
+
+def _veto_path():
+    global _VETO_PATH
+    if _VETO_PATH is None:
+        _VETO_PATH = os.path.join(HUB, ".agent_vetoes.json")
+    return _VETO_PATH
+
+
+def add_veto(q):
+    """把被否决的译后检索词登记为 veto(后续同目标任一语言组装时跳过)。"""
+    q = (q or "").strip()
+    if not q:
+        return
+    try:
+        data = (json.load(open(_veto_path(), encoding="utf-8"))
+                if os.path.isfile(_veto_path()) else [])
+    except Exception:
+        data = []
+    if q not in data:
+        data.append(q)
+        try:
+            with open(_veto_path(), "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+
+
+def list_vetoes():
+    """已登记的 veto 检索词(translated 后的跨语言对齐词)。"""
+    try:
+        with open(_veto_path(), "r", encoding="utf-8") as f:
+            return [x for x in json.load(f) if isinstance(x, str)]
+    except Exception:
+        return []
+
+
+def feedback_vetoed_queries():
+    """步骤 10:从反馈日志取被否决(accepted=False)的检索词,供 assemble 排除。
+
+    取 translated_query(译后,跨语言对齐)+ orig_query(原文兜底);两者任一命中即排除。"""
+    out = set()
+    try:
+        with open(_feedback_path(), "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if r.get("accepted"):
+                    continue
+                for k in ("translated_query", "orig_query"):
+                    q = (r.get(k) or "").strip()
+                    if q:
+                        out.add(q)
+    except OSError:
+        pass
+    return out
 
 
 def split_new_videos(mids, *, force=False):
