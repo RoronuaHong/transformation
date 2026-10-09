@@ -513,27 +513,43 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
                 className={gridMode === "" ? "on" : ""}
                 aria-pressed={gridMode === ""}
                 title={copy.gridAuto}
+                aria-label={copy.gridAuto}
                 onClick={() => applyGridMode("")}
               >
-                ▦
+                {/* auto-fill:2x2 自适应方块 */}
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <rect x="1.5" y="1.5" width="5" height="5" rx="1" />
+                  <rect x="9.5" y="1.5" width="5" height="5" rx="1" />
+                  <rect x="1.5" y="9.5" width="5" height="5" rx="1" />
+                  <rect x="9.5" y="9.5" width="5" height="5" rx="1" />
+                </svg>
               </button>
               <button
                 type="button"
                 className={gridMode === "2" ? "on" : ""}
                 aria-pressed={gridMode === "2"}
                 title={copy.gridTwo}
+                aria-label={copy.gridTwo}
                 onClick={() => applyGridMode("2")}
               >
-                2
+                {/* 一行 2 个:两根立柱 */}
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <rect x="1.5" y="1.5" width="5" height="13" rx="1" />
+                  <rect x="9.5" y="1.5" width="5" height="13" rx="1" />
+                </svg>
               </button>
               <button
                 type="button"
                 className={gridMode === "1" ? "on" : ""}
                 aria-pressed={gridMode === "1"}
                 title={copy.gridOne}
+                aria-label={copy.gridOne}
                 onClick={() => applyGridMode("1")}
               >
-                1
+                {/* 一行 1 个:单根立柱 */}
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <rect x="4.5" y="1.5" width="7" height="13" rx="1" />
+                </svg>
               </button>
             </div>
           </div>

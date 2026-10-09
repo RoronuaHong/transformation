@@ -3847,7 +3847,8 @@ html[data-theme="dark"] .theme-toggle-track {
 .hub-resultbar { margin: 0 0 0.85rem; display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; flex-wrap: wrap; }
 /* 网格密度切换:自适应(▦) / 一行2个 / 一行1个 */
 .hub-gridmode { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
-.hub-gridmode button { border: 0; background: transparent; color: var(--muted); padding: 0.22rem 0.6rem; border-radius: 6px; cursor: pointer; font: inherit; font-size: 0.8rem; line-height: 1.2; }
+.hub-gridmode button { display: inline-flex; align-items: center; justify-content: center; border: 0; background: transparent; color: var(--muted); padding: 0.3rem 0.5rem; border-radius: 6px; cursor: pointer; font: inherit; line-height: 1; }
+.hub-gridmode button svg { display: block; width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.5; }
 .hub-gridmode button:hover { color: var(--primary); }
 .hub-gridmode button.on { background: var(--primary-bg); color: var(--primary); }
 .hub-grid.cols-2 { grid-template-columns: repeat(2, 1fr); }
