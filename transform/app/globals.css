@@ -1400,12 +1400,6 @@ a:hover {
     box-shadow: var(--shadow-card);
     padding: 0.85rem 1rem;
   }
-  .nav-burger { display: inline-flex; }
-  .nav-links { display: none; flex-direction: column; align-items: stretch; gap: 0.35rem; width: 100%; }
-  .nav-links.open { display: flex; }
-  .nav-links > * { width: 100%; }
-  .nav-links a { padding: 0.45rem 0.55rem; border-radius: 8px; }
-  .nav-links a:hover { background: var(--primary-bg); }
 
   .home-intro,
   .article-sheet,
@@ -1687,6 +1681,24 @@ a:hover {
 .nav-burger[aria-expanded="true"] .nav-burger-box span:nth-child(1) { transform: translateY(6px) rotate(45deg); }
 .nav-burger[aria-expanded="true"] .nav-burger-box span:nth-child(2) { opacity: 0; }
 .nav-burger[aria-expanded="true"] .nav-burger-box span:nth-child(3) { transform: translateY(-6px) rotate(-45deg); }
+
+/* 移动形态(<=720):汉堡显示、导航收合。必须位于上方基础规则之后,否则被同优先级后位规则覆盖 */
+@media (max-width: 720px) {
+  .nav-burger { display: inline-flex; }
+  .nav-links { display: none; flex-direction: column; align-items: stretch; gap: 0.3rem; width: 100%; }
+  .nav-links.open { display: flex; }
+  .nav-links a { padding: 0.5rem 0.6rem; border-radius: 8px; width: 100%; }
+  .nav-links a:hover { background: var(--primary-bg); }
+  .nav-links .theme-toggle { width: auto; align-self: flex-start; }
+  /* hero/工具栏紧凑化 */
+  .hub-page .home-intro { padding: 0.9rem 1rem; }
+  .hub-page .home-intro .hero-line { font-size: 1.5rem; }
+  .hub-page .home-intro .lede { font-size: 0.85rem; }
+  .hub-page .hub-hero-cta .watch-btn { padding: 0.5rem 0.9rem; font-size: 0.85rem; }
+  .hub-toolbar-actions { flex: 1 1 100%; }
+  .hub-toolbar-actions select { flex: 1 1 0; min-width: 0; }
+  .hub-aside-toggle { width: 100%; justify-content: center; }
+}
 
 .nav-links a {
   font-size: 0.88rem;
