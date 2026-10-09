@@ -33,6 +33,7 @@ def _isolate_core():
     # 派生 sidecar/记录目录也要隔离,否则跨测试泄漏(如 attach 写 index/asr 命中上次残留)
     core.ASR_DIR = os.path.join(tmp, "asr")
     core.VISUAL_DIR = os.path.join(tmp, "visual")
+    core.AUTOTAG_DIR = os.path.join(tmp, "autotags")
     core.RUN_DIR = os.path.join(tmp, "run")
     core.UNDERSTAND_DIR = os.path.join(tmp, "understand")
     core.INDEX_DB = os.path.join(tmp, "hub.db")

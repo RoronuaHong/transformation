@@ -1,6 +1,5 @@
 # Local derived / large binaries (do not commit)
-models/clip/*.pt
-models/clip/**/*.bin
+models/
 index/_clip_frames/
 
 # phash 检索测试临时产物(含 p2_d.md / phash/ 等,非源码)
@@ -8,3 +7,7 @@ hub_phash_test_*/
 
 # AI 生成的临时提交消息文件
 cm_*.txt
+
+# Agent 运行时状态(反馈日志/否决词表,随库走不入库)
+.agent_feedback.jsonl
+.agent_vetoes.json

@@ -25,8 +25,12 @@ try:
 except Exception:
     pass
 
-_MODEL_NAME = os.environ.get("VITUAL_CLIP_MODEL", "ViT-B-32").strip() or "ViT-B-32"
-_PRETRAINED = os.environ.get("VITUAL_CLIP_PRETRAINED", "openai").strip() or "openai"
+# 2026-10-10 升级:CLIP ViT-B-32(openai, 2021) → SigLIP 2(Google 2025,webli)。
+# SigLIP2 zero-shot 图文检索/分类比 ViT-B-32 高约 8-10 个点;open_clip 3.3 原生支持,
+# 权重经 HF 缓存(models/clip/models--timm--ViT-B-16-SigLIP2-256,~375M 参数,离线可复用)。
+# 回退旧模型:VITUAL_CLIP_MODEL=ViT-B-32 VITUAL_CLIP_PRETRAINED=openai(配 models/clip/ViT-B-32.pt)。
+_MODEL_NAME = os.environ.get("VITUAL_CLIP_MODEL", "ViT-B-16-SigLIP2-256").strip() or "ViT-B-16-SigLIP2-256"
+_PRETRAINED = os.environ.get("VITUAL_CLIP_PRETRAINED", "webli").strip() or "webli"
 _CACHE = (
     os.environ.get("VITUAL_CLIP_CACHE", "").strip()
     or os.environ.get("OPEN_CLIP_CACHE_DIR", "").strip()
@@ -35,16 +39,41 @@ _CACHE = (
 
 _STATE = {"model": None, "preprocess": None, "tokenizer": None, "device": "cpu"}
 
+# HF 访问策略(2026-10-10):hub 是全离线系统,HF 直连在本机 10060 超时;
+# 已有本地缓存时强制 HF_HUB_OFFLINE=1(必须在 import transformers/open_clip 之前设,
+# huggingface_hub 在 import 时读取该常量);首次下载走 hf-mirror。
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+# HF 缓存统一到 models/clip:open_clip 只预下权重,tokenizer 文件是 get_tokenizer 阶段
+# transformers 按需拉的;不指 HF_HUB_CACHE 的话会落 ~/.cache 且与权重缓存分家,
+# 离线机器上 tokenizer 永远找不到(实测 10060 超时假死)。
+os.environ.setdefault("HF_HUB_CACHE", _CACHE)
+
 
 def _local_weight():
-    """优先用已下载的本地 .pt(避免每次走 HF/代理)。"""
+    """优先用已下载的本地 .pt(避免每次走 HF/代理)。
+    文件名**必须跟模型名走**(如 ViT-B-16-SigLIP2-256.pt):曾踩坑——硬编码 ViT-B-32.pt
+    会被塞进 SigLIP2 架构,报 "text pos_embed width changed"。"""
     env = (os.environ.get("VITUAL_CLIP_WEIGHTS") or "").strip()
     if env and os.path.isfile(env):
         return env
-    cand = os.path.join(_CACHE, "ViT-B-32.pt")
+    cand = os.path.join(_CACHE, _MODEL_NAME + ".pt")
     if os.path.isfile(cand) and os.path.getsize(cand) > 10_000_000:
         return cand
     return None
+
+
+def _hf_cache_hit():
+    """open_clip 经 HF 下载的权重是否已在本地缓存(models--timm--<模型名> 目录)。"""
+    import glob
+    return bool(glob.glob(os.path.join(_CACHE, "models--*--" + _MODEL_NAME)))
+
+
+# 断网决策必须在**模块级、任何 transformers/huggingface_hub import 之前**:
+# huggingface_hub.constants 在 import 时读取 HF_HUB_OFFLINE,事后设置无效。
+_allow_dl = os.environ.get("VITUAL_CLIP_ALLOW_DOWNLOAD", "").strip().lower() in (
+    "1", "true", "yes", "on")
+if _hf_cache_hit() and not _allow_dl:
+    os.environ["HF_HUB_OFFLINE"] = "1"
 
 
 def _out(obj):
@@ -95,15 +124,15 @@ def probe():
     allow_dl = os.environ.get("VITUAL_CLIP_ALLOW_DOWNLOAD", "").strip().lower() in (
         "1", "true", "yes", "on",
     )
-    if not weights and not allow_dl:
+    if not weights and not _hf_cache_hit() and not allow_dl:
         return {
             "ok": False,
             "error": "no_local_weights",
             "cache": _CACHE,
             "hint": (
-                "将 ViT-B-32.pt 放到 %s 或设 VITUAL_CLIP_WEIGHTS;"
+                "权重未就位:本地 .pt(%s)或 HF 缓存(models--timm--%s)均无;"
                 "首次下载可设 VITUAL_CLIP_ALLOW_DOWNLOAD=1"
-                % os.path.join(_CACHE, "ViT-B-32.pt")
+                % (os.path.join(_CACHE, _MODEL_NAME + ".pt"), _MODEL_NAME)
             ),
         }
     try:

@@ -29,6 +29,8 @@
   python cli.py imgsearch <id|path> [--max-dist N] [--limit N] [--mode phash|clip|auto]
   python cli.py imgsearch --text "厨房"   以文搜图(需 CLIP 索引)
   python cli.py imgembed [--force] [--limit N] [--status]  建/查 CLIP 图像向量索引
+  python cli.py vtag [--force] [--limit N] [<id>]   受控词表 zero-shot 自动标签(SigLIP2+VLM 互验)
+  python cli.py rerank [--try --query Q]            查看重排链路状态(ONNX cross-encoder)
   python cli.py auto [--limit N] [--autotag]  一条命令跑完自动处理链:封面→OCR→镜头索引→pHash→(可选)打标→语义索引(幂等)
   python cli.py facets [--limit N] [--link-clips|--link-parents]  补 DAM 面标签 + 回填 parent:
   python cli.py facets [--scrub]  去掉与 parent: 重复的旧 from: 别名(库内治理)
@@ -61,6 +63,7 @@ from core import (
     phash_material, phash_all, similar_assets, phash_path, near_duplicate_report,
     search_by_image, search_by_text_image, clip_probe,
     build_image_embeddings, image_embed_status, build_clip_frame_embeddings,
+    build_auto_tags, autotag_sidecar_path, rerank_status,
     auto_process_all, pending_processing,
     apply_media_facet_tags, link_relation_parents, scrub_deprecated_from_tags,
 )
@@ -197,6 +200,41 @@ def main():
             print("usage: python cli.py visual <id> [--force] | visual --all")
             return
         print(visual_material(mid, force="--force" in rest))
+
+    elif cmd == "vtag":
+        # 受控词表 zero-shot 自动标签:python cli.py vtag [--force] [--limit N] [<id>]
+        rest = args[1:]
+        limit = 0
+        if "--limit" in rest:
+            i = rest.index("--limit")
+            limit = int(rest[i + 1])
+            del rest[i:i + 2]
+        mid = next((a for a in rest if not a.startswith("-")), "")
+        r = build_auto_tags(force="--force" in rest, limit=limit,
+                            mids=[mid] if mid else None)
+        print(json.dumps(r, ensure_ascii=False, indent=1))
+        if r.get("available") and (r.get("embedded") or "--force" in rest):
+            for m in all_materials():
+                p = autotag_sidecar_path(m["id"])
+                if p and os.path.isfile(p):
+                    print(" ", m["id"], m["name"][:40])
+                    with open(p, encoding="utf-8") as f:
+                        print("   ", f.read().replace("\n", " ")[:200])
+                    break
+
+    elif cmd == "rerank":
+        # 重排链路状态:python cli.py rerank [--query "..." --try]
+        print(json.dumps(rerank_status(), ensure_ascii=False))
+        if "--try" in args:
+            if "--query" in args:
+                q = args[args.index("--query") + 1]
+            else:
+                q = "chicken wings"
+            docs = ["braised chicken wings on a plate",
+                    "a car driving on the street"]
+            from core import _onnx_rerank
+            order = _onnx_rerank(q, docs)
+            print("order:", order, "(期望 [0, 1])")
 
     elif cmd == "understand":
         # 理解记录:python cli.py understand <id> [--force] | understand --all

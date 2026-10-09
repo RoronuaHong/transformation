@@ -22,7 +22,31 @@ try:
 except Exception:
     pass
 
-MODEL = os.environ.get("VITUAL_VISUAL_MODEL", "gemma4:e2b").strip()
+def _pick_model():
+    """VLM 选型(2026-10-10 升级):显式 env 优先;否则在本机 ollama 已装模型里
+    按 [qwen2.5vl:3b, gemma4:e2b] 顺序取第一个可用的。
+    qwen2.5vl:3b 的物体/菜名命名精度明显优于 gemma4:e2b(实测「红烧鸡翅」这类
+    具体菜名 gemma 常答成「食品」),3B Q4 显存 ~3GB,6GB 卡可跑。"""
+    env = os.environ.get("VITUAL_VISUAL_MODEL", "").strip()
+    if env:
+        return env
+    prefer = ["qwen2.5vl:3b", "gemma4:e2b"]
+    try:
+        with urllib.request.urlopen(OLLAMA_URL + "/api/tags", timeout=8) as r:
+            names = [m.get("name", "") for m in (json.load(r).get("models") or [])]
+        for cand in prefer:
+            base = cand.split(":")[0]
+            for n in names:
+                if n == cand or n.split(":")[0] == base:
+                    return n
+    except Exception:
+        pass
+    return prefer[-1]
+
+
+MODEL = _pick_model()
+# gemma4 带 thinking 会先输出推理过程盖住正文,须关;qwen2.5vl 不支持 think 参数
+_THINK = MODEL.split(":")[0].startswith("gemma")
 OLLAMA_URL = os.environ.get("VITUAL_OLLAMA_URL", "http://localhost:11434").rstrip("/")
 # 双语输出(对齐最佳实践的多语言检索):中文描述/标签走词法 bigram 与中文查询直接命中;
 # EN描述/EN标签供英文查询(及 bge-m3 英文稠密通道)直接命中,无需全依赖翻译桥。两者都落
@@ -43,16 +67,19 @@ def _b64(path):
 
 
 def _describe(path):
-    payload = json.dumps({
+    body = {
         "model": MODEL,
         "prompt": PROMPT,
         "images": [_b64(path)],
         "stream": False,
         "temperature": 0.2,
-        # gemma4 默认先写一段思考。思考里常出现「请提供图片」这类拒答句,
-        # 会盖住后面真正的画面描述。关掉思考,让输出停在 4 行格式上。
-        "think": False,
-    }).encode("utf-8")
+    }
+    # gemma4 默认先写一段思考。思考里常出现「请提供图片」这类拒答句,
+    # 会盖住后面真正的画面描述。关掉思考,让输出停在 4 行格式上。
+    # qwen2.5vl 无 think 能力,传该参数 ollama 会 400,必须按模型区分。
+    if _THINK:
+        body["think"] = False
+    payload = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
         OLLAMA_URL + "/api/generate",
         data=payload,
