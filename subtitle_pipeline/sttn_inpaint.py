@@ -476,8 +476,9 @@ def classify_dialogue_route(
     1) Sample frames and optionally tighten onto an opaque caption plate.
     2) Classify:
        - ``glyph_black``: white strokes on opaque dark plate → paint strokes black
-       - ``flat``: flat UI strip → Temporal Background Exposure
-       - ``tiles``: textured live-action → STTN tiles with glyph holes
+       - ``flat``: glyph-free flat UI strip → Temporal Background Exposure
+       - ``tiles``: textured live-action, or flat bands carrying text glyphs
+         (TBE+lerp ghosts on those; STTN tiles with glyph holes fill cleaner)
     """
     import cv2
 
@@ -493,6 +494,7 @@ def classify_dialogue_route(
     )
     black_hits = 0
     flat_hits = 0
+    glyph_flat_hits = 0
     checked = 0
     found_boxes: list[dict[str, int]] = []
     try:
@@ -516,6 +518,10 @@ def classify_dialogue_route(
                 continue
             if band_is_flat(fr, seed):
                 flat_hits += 1
+                # Flat band carrying text glyphs: TBE+lerp ghosts (实测 25.6 vs
+                # tiles 7.7) → fall through to tiles routing below.
+                if flat_band_glyph_px(fr, seed) > 0:
+                    glyph_flat_hits += 1
     finally:
         cap.release()
 
@@ -544,7 +550,8 @@ def classify_dialogue_route(
 
     if black_hits >= need:
         route = "glyph_black"
-    elif flat_hits >= need:
+    elif flat_hits >= need and glyph_flat_hits == 0:
+        # Pure flat bars (no text glyphs) keep the fast TBE path.
         route = "flat"
     else:
         route = "tiles"
@@ -555,6 +562,7 @@ def classify_dialogue_route(
         "seed_box": seed,
         "black_hits": int(black_hits),
         "flat_hits": int(flat_hits),
+        "glyph_flat_hits": int(glyph_flat_hits),
         "samples": int(checked),
     }
 
@@ -1135,6 +1143,22 @@ def glyph_hole_adaptive(bgr: Any, box: dict[str, int]) -> Any:
     full = np.zeros(bgr.shape[:2], dtype=np.uint8)
     full[y0:y1, x0:x1] = m
     return full
+
+
+def flat_band_glyph_px(bgr: Any, box: dict[str, int]) -> int:
+    """字形像素数（0=无文字）。flat 带路由用：有字形 → tiles 优于 TBE+lerp。
+
+    TBE+逐字形 lerp 在 flat 带上残留幽灵笔画+水平涂抹（实测残差 25.6 vs
+    tiles+字形 hole 7.7, instances/demosaic_test），故 flat 带一旦检出字形
+    应回落 tiles；纯 flat 带保留 TBE 快路径。
+    """
+    import numpy as np
+
+    try:
+        hole = glyph_hole_adaptive(bgr, box)
+        return int(np.count_nonzero(hole))
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 def glyph_hole_for_tile(glyph_union: Any, tile: dict[str, int]) -> Any:
@@ -1914,8 +1938,10 @@ def encode_sttn(
     """Restore caption region.
 
     Routing (``VITUAL_STTN_FORCE``):
-      - ``auto`` (default): flat UI bars → temporal_flat (TBE); textured → STTN tiles
-        with glyph-level holes. Flat bars + whole-box/neural fill leave glyph ghosts.
+      - ``auto`` (default): textured → STTN tiles with glyph-level holes; flat bands
+        → temporal_flat (TBE) only when free of text glyphs. Flat bands carrying
+        glyphs also route to tiles — TBE+per-glyph lerp leaves ghost strokes and
+        horizontal smear (实测残差 25.6 vs tiles 7.7, instances/demosaic_test)。
       - ``flat`` / ``0`` / ``false``: force temporal_flat
       - ``tiles`` / ``sttn`` / ``1`` / ``true``: force STTN tiles
     """
@@ -1966,6 +1992,19 @@ def encode_sttn(
     use_flat = force_flat or (
         not force_tiles and flat_votes * 2 >= flat_checks  # majority / tie → flat
     )
+    if use_flat and not force_flat:
+        # Flat band WITH text glyphs → tiles+glyph-hole fills markedly cleaner
+        # than TBE+per-glyph lerp (ghost strokes + horizontal smear; 实测同一合成
+        # 样片 hardsub 残差 25.6 → 7.7, instances/demosaic_test)。纯 flat 带
+        # （无字形）仍走 temporal_flat。
+        glyph_px = flat_band_glyph_px(first, box)
+        if glyph_px > 0:
+            use_flat = False
+            print(
+                f"[sttn] flat band has glyphs ({glyph_px}px) → route=tiles "
+                f"(TBE+lerp leaves ghost strokes)",
+                flush=True,
+            )
     if use_flat:
         print(
             f"[sttn] route=temporal_flat votes={flat_votes}/{flat_checks} "

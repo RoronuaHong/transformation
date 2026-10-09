@@ -141,7 +141,7 @@ def test_auto_engine_calls_sttn(tmp_path: Path, monkeypatch: object) -> None:
 
 
 def test_encode_sttn_auto_routes_flat_bar(tmp_path: Path, monkeypatch: object) -> None:
-    """Default auto: flat UI bars must not enter STTN tiles."""
+    """Default auto: glyph-free flat UI bars keep temporal_flat (fast TBE path)."""
     import shutil
 
     import cv2
@@ -155,8 +155,7 @@ def test_encode_sttn_auto_routes_flat_bar(tmp_path: Path, monkeypatch: object) -
     assert writer.isOpened()
     for _ in range(n):
         fr = np.full((h, w, 3), 48, dtype=np.uint8)
-        fr[190:230, 40:280] = (40, 40, 40)  # flat dark bar
-        fr[200:220, 80:200] = (245, 245, 245)  # glyphs
+        fr[190:230, 40:280] = (40, 40, 40)  # flat dark bar, no glyphs
         writer.write(fr)
     writer.release()
     dest = tmp_path / "out.mp4"
@@ -169,7 +168,7 @@ def test_encode_sttn_auto_routes_flat_bar(tmp_path: Path, monkeypatch: object) -
         return {"engine": "sttn", "mode": "temporal_flat", "frames": n}
 
     def boom_tiles(*_a, **_k):
-        raise AssertionError("tiles path must not run for flat bars")
+        raise AssertionError("tiles path must not run for glyph-free flat bars")
 
     monkeypatch.setenv("VITUAL_STTN_FORCE", "auto")
     monkeypatch.setattr("sttn_inpaint._encode_spatial", fake_spatial)
@@ -179,6 +178,51 @@ def test_encode_sttn_auto_routes_flat_bar(tmp_path: Path, monkeypatch: object) -
     assert routed.get("mode") == "temporal_flat"
     assert stats.get("mode") == "temporal_flat"
     assert dest.is_file()
+
+
+def test_encode_sttn_auto_routes_glyph_flat_bar_to_tiles(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    """Default auto: flat bars carrying text glyphs route to tiles+glyph holes.
+
+    TBE+per-glyph lerp leaves ghost strokes on flat bands（实测残差 25.6 vs
+    tiles 7.7, instances/demosaic_test）——字形级 tiles 填充更干净。
+    """
+    import cv2
+    import numpy as np
+    import pytest
+
+    from sttn_inpaint import encode_sttn
+
+    src = tmp_path / "flat_glyph.mp4"
+    w, h, fps, n = 320, 240, 10, 8
+    writer = cv2.VideoWriter(str(src), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+    assert writer.isOpened()
+    for _ in range(n):
+        fr = np.full((h, w, 3), 48, dtype=np.uint8)
+        fr[190:230, 40:280] = (40, 40, 40)  # flat dark bar
+        fr[200:220, 80:200] = (245, 245, 245)  # glyphs
+        writer.write(fr)
+    writer.release()
+    dest = tmp_path / "out.mp4"
+    box = {"x": 40, "y": 190, "w": 240, "h": 40}
+    routed: dict[str, str] = {}
+
+    def boom_spatial(*_a, **_k):
+        raise AssertionError("temporal_flat must not run for glyph flat bars")
+
+    def fake_tiles(*_a, **_k):
+        routed["mode"] = "tiles"
+        raise RuntimeError("SHORT_CIRCUIT_TILES")
+
+    monkeypatch.setenv("VITUAL_STTN_FORCE", "auto")
+    monkeypatch.setattr("sttn_inpaint._encode_spatial", boom_spatial)
+    # sttn_tiles is invoked at region-build time (before model load) — sentinel
+    # short-circuits before any heavy IO/GPU work while proving the tiles route.
+    monkeypatch.setattr("sttn_inpaint.sttn_tiles", fake_tiles)
+    with pytest.raises(RuntimeError, match="SHORT_CIRCUIT_TILES"):
+        encode_sttn(src, dest, box)
+    assert routed.get("mode") == "tiles"
 
 
 def test_band_is_flat_rejects_textured_desk() -> None:
