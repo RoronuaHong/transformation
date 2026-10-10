@@ -11,3 +11,6 @@ cm_*.txt
 # Agent 运行时状态(反馈日志/否决词表,随库走不入库)
 .agent_feedback.jsonl
 .agent_vetoes.json
+
+# 生成产物:eval_gt_candidates.py --apply 的提案输出(每次重生成,不入库)
+eval_ground_truth.proposed.json

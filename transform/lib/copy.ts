@@ -299,14 +299,12 @@ export type HubCopy = {
   refresh: string;
   openCrop: string;
   openAgent: string;
-  agentKicker: string;
   agentHeadline: string;
   agentLede: string;
   agentPh: string;
   agentSend: string;
   agentStop: string;
   agentNew: string;
-  agentAllowWrite: string;
   agentBack: string;
   agentRunning: string;
   agentEmpty: string;
@@ -332,7 +330,6 @@ export type HubCopy = {
   agentChats: string;
   agentUntitled: string;
   agentDeleteThread: string;
-  agentSaveFail: string;
   empty: string;
   emptyHint: string;
   loading: string;
@@ -704,14 +701,12 @@ const en: UiCopy = {
     refresh: "Refresh",
     openCrop: "Open crop workbench",
     openAgent: "AI Agent",
-    agentKicker: "Agent",
     agentHeadline: "Materials AI Agent",
     agentLede: "Dedicated agent workspace: search, job checkup, near-dupes, missing covers, shots. Attach images/videos to ingest then image-search or master analysis.",
     agentPh: "Message the agent… or drop an image/video here",
     agentSend: "Send",
     agentStop: "Stop",
     agentNew: "New chat",
-    agentAllowWrite: "Allow writes",
     agentBack: "Back to catalog",
     agentRunning: "Agent is working…",
     agentEmpty: "What should we do with the materials library?",
@@ -737,7 +732,6 @@ const en: UiCopy = {
     agentChats: "History",
     agentUntitled: "New chat",
     agentDeleteThread: "Delete conversation",
-    agentSaveFail: "Failed to save chat",
     empty: "No matching materials",
     emptyHint: "Finish a try job, or upload files here.",
     loading: "Loading…",
@@ -1099,14 +1093,12 @@ const zh: UiCopy = {
     refresh: "刷新",
     openCrop: "打开裁剪工作台",
     openAgent: "AI Agent",
-    agentKicker: "Agent",
     agentHeadline: "素材 AI Agent",
     agentLede: "独立 Agent 工作台：检索、job 体检、近重复、缺封面、镜头。可上传图片/视频入库，再以图搜图或按母版方案 A 分析。",
     agentPh: "给 Agent 发消息… 也可拖入图片/视频",
     agentSend: "发送",
     agentStop: "停止",
     agentNew: "新对话",
-    agentAllowWrite: "允许写入",
     agentBack: "返回素材目录",
     agentRunning: "Agent 执行中…",
     agentEmpty: "想让我对素材库做什么？",
@@ -1132,7 +1124,6 @@ const zh: UiCopy = {
     agentChats: "历史对话",
     agentUntitled: "新对话",
     agentDeleteThread: "删除对话",
-    agentSaveFail: "对话保存失败",
     empty: "没有匹配的素材",
     emptyHint: "先跑完试一试，或在此上传文件。",
     loading: "加载中…",
@@ -1331,14 +1322,12 @@ const zhHant: UiCopy = {
     refresh: "重新整理",
     openCrop: "開啟裁剪工作台",
     openAgent: "AI Agent",
-    agentKicker: "Agent",
     agentHeadline: "素材 AI Agent",
     agentLede: "獨立 Agent 工作台：檢索、job 體檢、近重複、缺封面、鏡頭。可上傳圖片/影片入庫，再以圖搜圖或按母版方案 A 分析。",
     agentPh: "給 Agent 發訊息… 也可拖入圖片/影片",
     agentSend: "傳送",
     agentStop: "停止",
     agentNew: "新對話",
-    agentAllowWrite: "允許寫入",
     agentBack: "返回素材目錄",
     agentRunning: "Agent 執行中…",
     agentEmpty: "想讓我對素材庫做什麼？",
@@ -1364,7 +1353,6 @@ const zhHant: UiCopy = {
     agentChats: "歷史對話",
     agentUntitled: "新對話",
     agentDeleteThread: "刪除對話",
-    agentSaveFail: "對話儲存失敗",
     empty: "沒有符合的素材",
     emptyHint: "先跑完試一試，或在此上傳檔案。",
     loading: "載入中…",
