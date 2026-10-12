@@ -1127,63 +1127,16 @@ def decision_endpoint():
 def decision_call(body, timeout=None, retries=None):
     """统一调决策服务：本地 llama-server(/v1/systemone) 或 OpenRouter Decisions API。
 
-    返回 answers dict 或 None(服务关/失败)。响应解析对各后端一致。
-    识别规则：VITUAL_DECISION_URL 含 'openrouter.ai' 即走云端 Decisions API，
-    需 model 字段(默认 typesafe/jev-1.13) + Authorization: Bearer $OPENROUTER_API_KEY。
-
-    可靠性增强(对齐最佳实践)：
-    - 云端网关偶发 5xx/超时 → 指数退避重试(默认 2 次)；本地失败即真失败,不重试。
-    - 4xx(格式错/鉴权失败,如误用 choices 数组格式)不重试,直接降级。
-    - 每次调用经 _record_decision 埋点(backend/延迟/成败/错误),便于监控。
-    注:OpenRouter 仅接受 `questions` 为对象 + `criteria`(对象/数组) + `instructions` 的
-    SystemOne 格式,不支持 TypeSafe SDK 的 `choices`/`name`/`scale` 数组格式(实测 400)。
+    实现已抽到零依赖的 decision_client.decision_call（core / kb / mcp 共用,消除
+    重复 HTTP 实现），统一：URL 识别、20s 超时兜底、4xx 不重试、5xx/超时指数退避、
+    可选埋点。此处仅做埋点适配,保持本函数签名与既有调用方/单测不变。
     """
-    import json as _json
-    import urllib.request as _u
-    import urllib.error as _ue
+    from decision_client import decision_call as _dc
 
-    base = decision_endpoint()
-    if not base:
-        return None
-    is_or = "openrouter.ai" in base
-    url = base if is_or else base + "/v1/systemone"
-    if timeout is None:
-        try:
-            timeout = float(os.environ.get("VITUAL_DECISION_TIMEOUT", "3"))
-        except ValueError:
-            timeout = 3.0
-    if is_or and timeout < 20:
-        timeout = 20.0
-    if retries is None:
-        retries = 2 if is_or else 0
-    body = dict(body)
-    headers = {"Content-Type": "application/json"}
-    if is_or:
-        body["model"] = os.environ.get("VITUAL_DECISION_MODEL", "typesafe/jev-1.13")
-        key = os.environ.get("OPENROUTER_API_KEY")
-        if key:
-            headers["Authorization"] = "Bearer " + key
-    last_err = None
-    for attempt in range(1 + retries):
-        t0 = time.time()
-        try:
-            req = _u.Request(url, data=_json.dumps(body).encode("utf-8"),
-                             headers=headers, method="POST")
-            with _u.urlopen(req, timeout=timeout) as r:
-                ans = _json.loads(r.read().decode("utf-8")).get("answers", {})
-            _record_decision(is_or, time.time() - t0, True, None)
-            return ans
-        except _ue.HTTPError as e:
-            last_err = "HTTP %s" % e.code
-            if e.code < 500:                      # 客户端错(格式/鉴权)不重试
-                _record_decision(is_or, time.time() - t0, False, last_err)
-                return None
-        except Exception as e:                    # 超时/网络抖动 → 重试
-            last_err = e.__class__.__name__
-        if attempt < retries:
-            time.sleep(min(2 ** attempt, 4))      # 1s, 2s 退避
-    _record_decision(is_or, time.time() - t0, False, last_err)
-    return None
+    def _rec(is_or, dur, ok, err):
+        _record_decision(is_or, dur, ok, err)
+
+    return _dc(body, timeout=timeout, retries=retries, recorder=_rec)
 
 
 def _record_decision(is_or, dur, ok, err):
@@ -1222,6 +1175,12 @@ def decision_choice_intent(q):
     a = ans.get("intent", {})
     choice = a.get("choice")
     if not choice or choice == "other" or choice not in _DECISION_CRITERIA:
+        # 预期兜底(非失败)：模糊/无关查询被 Jev 收进 other,与 4xx/超时失败区分,
+        # 单独埋点便于监控兜底率。
+        try:
+            obs.record("decision_intent_other", query=(q or "")[:60])
+        except Exception:
+            pass
         return None
     probs = a.get("probabilities") or {}
     return choice, float(probs.get(choice, 0.0)), float(a.get("confidence", 0.0))

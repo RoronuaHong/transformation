@@ -404,7 +404,9 @@ def decision_risk_score(task: str):
     """调 /v1/systemone 的 score 原语给写操作风险打分；服务关/失败返回 None。
 
     仅用于风险排序展示（高风险排前面），与 confirm=true 人工护栏正交，不替代它。
-    支持 OpenRouter Decisions API(VITUAL_DECISION_URL 含 'openrouter.ai' 时走云端)。
+    含 uncertain 标志：低置信(conf<0.5)时模型不确定，下游应转人工/LLM 复核
+    （置信门控：System1 高置信自动、中低置信升级 System2）。
+    实现走 core.decision_call（已统一到零依赖 decision_client）。
     """
     url = os.environ.get("VITUAL_DECISION_URL", "").strip().rstrip("/")
     if not url or not (task or "").strip():
@@ -430,7 +432,9 @@ def decision_risk_score(task: str):
     a = ans.get("r", {})
     if "score" not in a:
         return None
-    return {"score": a["score"], "confidence": a.get("confidence")}
+    conf = a.get("confidence")
+    return {"score": a["score"], "confidence": conf,
+            "uncertain": (conf is not None and conf < 0.5)}
 
 
 # ---------- Deep Agent(路线 C:编排层在 agent.py,经 MCP 暴露给宿主) ----------
