@@ -141,77 +141,27 @@ def search(q: Query):
     return {"results": _retrieve(q.query, q.top_k)}
 
 
-def _decision_citation_supported(answer: str, sources: list) -> float | None:
-    """调 /v1/systemone 的 noul 判定回答是否被检索资料支撑；服务关/失败返回 None。
+# P1-2 引用核查已迁至 materials_hub/core.py（decision_citation_supported / citation_gate），
+# 统一走零依赖 decision_client，便于单测且不拖重依赖。
 
-    实现统一走零依赖 decision_client（与 core / mcp 共用），含重试 / 20s 兜底 / 埋点。
-    长上下文防腐烂：sources 限制条数 + state 截断（Jev 长上下文会“腐烂”，最佳实践要求
-    客户端先过滤/截断）。返回 noul(0-1,越高越支撑)；是否降级由 /ask 决定。
-    """
+
+@app.post("/ask")
+def ask(q: Query):
     import os as _os
     import sys as _sys
     _mh = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "materials_hub")
     if _mh not in _sys.path:
         _sys.path.insert(0, _mh)
-    from decision_client import decision_call as _dc, truncate_state as _trunc
-
-    url = os.environ.get("VITUAL_DECISION_URL", "").strip().rstrip("/")
-    if not url:
-        return None
-    try:
-        max_src = int(os.environ.get("VITUAL_DECISION_MAX_SRC", "5"))
-    except ValueError:
-        max_src = 5
-    src = (sources or [])[:max_src]
-    ctx = "\n".join(
-        "[%d] %s（%s）：%s" % (i + 1, c.get("label", ""), c.get("source", ""), c.get("text", ""))
-        for i, c in enumerate(src)
-    )
-    state = "回答：%s\n\n检索资料：\n%s" % (answer, ctx)
-    state = _trunc(state)
-    body = {
-        "state": state,
-        "questions": {
-            "c": {
-                "type": "noul",
-                "instructions": "上述回答是否被检索资料支撑？",
-                "criteria": {"true": "回答可由资料证实", "false": "回答含资料未支撑内容"},
-            }
-        },
-    }
-    ans = _dc(body)
-    if not ans:
-        return None
-    c = ans.get("c", {})
-    return float(c["noul"]) if "noul" in c else None
-
-
-@app.post("/ask")
-def ask(q: Query):
+    from core import citation_gate
     ctx = _retrieve(q.query, q.top_k)
     answer = _generate(q.query, ctx, q.history)
-    # 引用核查（P1-2，默认关闭）：未支撑则降级为仅返回检索原文，附提示。
-    supported = _decision_citation_supported(answer, ctx)
-    if supported is not None:
-        try:
-            thr = float(os.environ.get("VITUAL_DECISION_MIN_CONF", "0.6"))
-        except ValueError:
-            thr = 0.6
-        if supported < thr:
-            try:
-                max_src = int(os.environ.get("VITUAL_DECISION_MAX_SRC", "5"))
-            except ValueError:
-                max_src = 5
-            disp = ctx[:max_src]
-            notice = "⚠️ 回答未被检索资料充分支撑，已降级为仅返回原始资料（前 %d 条）：\n\n" % max_src
-            answer = notice + "\n\n".join(
-                "[来源 %d] %s（%s）\n%s" % (i + 1, c["label"], c["source"], c["text"])
-                for i, c in enumerate(disp)
-            )
+    # 引用核查三档门控（P1-2，默认关闭）：强支撑/部分支撑放行，未支撑降级返回原文。
+    answer, supported, detail = citation_gate(answer, ctx)
     return {
         "answer": answer,
         "sources": [{"source": c["source"], "label": c["label"]} for c in ctx],
         "citation_supported": supported if supported is not None else True,
+        "citation_detail": detail,
     }
 
 

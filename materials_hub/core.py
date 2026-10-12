@@ -1281,6 +1281,68 @@ def decision_batch_noul(questions, state, timeout=None):
             for qid, a in ans.items()}
 
 
+def decision_citation_supported(answer, sources):
+    """P1-2 引用核查：回答是否被检索资料支撑。关/失败返回 None（=降级关闭）。
+
+    统一走 decision_client（重试/20s 兜底/截断）；新增埋点。长上下文已截断防腐烂。
+    返回 noul(0-1,越高越支撑)；是否降级由 citation_gate 决定。"""
+    if not decision_endpoint():
+        return None
+    import os as _os
+    from decision_client import truncate_state as _trunc
+    try:
+        max_src = int(_os.environ.get("VITUAL_DECISION_MAX_SRC", "5"))
+    except ValueError:
+        max_src = 5
+    src = (sources or [])[:max_src]
+    ctx = "\n".join(
+        "[%d] %s（%s）：%s" % (i + 1, c.get("label", ""), c.get("source", ""), c.get("text", ""))
+        for i, c in enumerate(src)
+    )
+    state = "回答：%s\n\n检索资料：\n%s" % (answer, ctx)
+    state = _trunc(state)
+    body = {"state": state, "questions": {
+        "c": {"type": "noul", "instructions": "上述回答是否被检索资料支撑？",
+              "criteria": {"true": "回答可由资料证实", "false": "回答含资料未支撑内容"}}}}
+    ans = decision_call(body)
+    if not ans:
+        return None
+    c = ans.get("c", {})
+    noul = float(c["noul"]) if "noul" in c else None
+    _record_decision("P1-2", "citation", answer[:60], supported=noul, raw=c)
+    return noul
+
+
+def citation_gate(answer, ctx):
+    """P1-2 三档置信门控：整合判定 + 降级 + 详情（对齐 Jev 文档 System1/System2 分工）。
+
+    返回 (answer, supported_or_None, detail_or_None)：
+      detail=None          服务关闭/失败（不降级，原样返回）
+      detail='strong'      supported >= VITUAL_DECISION_HIGH（默认0.9）强支撑，自动放行
+      detail='partial'     [VITUAL_DECISION_MIN_CONF, HIGH) 部分支撑，放行但标注
+      detail='unsupported' supported < MIN_CONF 降级为仅返回检索原文（前 N 条）
+    """
+    import os as _os
+    supported = decision_citation_supported(answer, ctx)
+    if supported is None:
+        return answer, None, None
+    try:
+        thr = float(_os.environ.get("VITUAL_DECISION_MIN_CONF", "0.6"))
+        high = float(_os.environ.get("VITUAL_DECISION_HIGH", "0.9"))
+        max_src = int(_os.environ.get("VITUAL_DECISION_MAX_SRC", "5"))
+    except ValueError:
+        thr, high, max_src = 0.6, 0.9, 5
+    if supported < thr:
+        disp = ctx[:max_src]
+        notice = "⚠️ 回答未被检索资料充分支撑，已降级为仅返回原始资料（前 %d 条）：\n\n" % max_src
+        answer = notice + "\n\n".join(
+            "[来源 %d] %s（%s）\n%s" % (i + 1, c["label"], c["source"], c["text"])
+            for i, c in enumerate(disp)
+        )
+        return answer, supported, "unsupported"
+    return answer, supported, ("strong" if supported >= high else "partial")
+
+
 def _clip_text_floor():
     """以文搜图的命中分数线(模型自适应)。
 
