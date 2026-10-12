@@ -941,7 +941,7 @@ def _autotags_text(mid):
             with open(sc, "r", encoding="utf-8") as f:
                 data = json.load(f)
             lines = []
-            for key in ("verified", "auto"):
+            for key in ("verified", "auto", "open"):
                 for tg in data.get(key) or []:
                     zh, en = (tg.get("zh") or "").strip(), (tg.get("en") or "").strip()
                     if zh or en:
@@ -4736,6 +4736,53 @@ def visual_all(limit=0, force=False):
 
 
 # ---------- 受控词表 zero-shot 自动标签(SigLIP2,2026-10-10 多模型改造) ----------
+# ── 开放标签通道(打标开放化):从 VLM 画面描述抽取 tag_vocab 之外的具体实体 ──
+# 对齐"受控词表 + 开放词汇"最佳实践:SigLIP2×tag_vocab 仍是零幻觉主力(verified/auto),
+# 本通道把 VLM 描述里**未覆盖的具体实体**结构化成 open 标签补召回;归一层(停用词/泛化
+# 黑名单/长度/去重)控噪,极低权重,绝不进 description(排序稀释铁律)。可 VITUAL_OPEN_TAG=0 关。
+_OPEN_STOP = frozenset("""
+a an the of in on at to with and or is are was were be been being this that these those
+it its as by for from into out over under up down above below near there here then than
+show shows showing shown depict depicts depicting feature features featuring appear appears
+scene view shot frame camera photo photos image images picture pictures video footage
+person people man woman close closeup close-up outdoors indoors background foreground
+left right top bottom front back side while during before after around between
+""".split())
+_OPEN_GENERIC = frozenset("""
+thing things object objects stuff item items something anything nothing
+content subject matter type kind sort example sample color colors
+""".split())
+
+
+def _open_entities(vlm, vocab_en, limit=8):
+    """从 VLM 英文画面描述抽取 tag_vocab 之外的具体实体(零幻觉主力之外的低权重补充)。
+
+    归一层:小写切词 → 去停用词/泛化黑名单 → 留长度≥3 字母词 → 二元组(相邻实词,更具体,
+    如 chicken wings)→ 去重、去 tag_vocab 英文已覆盖的 → 按频次取 top limit。
+    返回 [{"en":..., "n":频次}, ...]。"""
+    if not vlm:
+        return []
+    toks = [t for t in re.split(r"[^a-z]+", vlm.lower()) if t]
+    keep = [t for t in toks
+            if len(t) >= 3 and t not in _OPEN_STOP and t not in _OPEN_GENERIC
+            and not t.isdigit()]
+    from collections import Counter
+    cnt, bigr = Counter(keep), Counter()
+    for a, b in zip(keep, keep[1:]):
+        bigr[a + " " + b] += 1
+    out, seen = [], set()
+    for phrase, n in list(bigr.most_common()) + list(cnt.most_common()):
+        if any(w in vocab_en for w in phrase.split()):
+            continue                       # tag_vocab 已覆盖 → SigLIP2 通道负责,不重复
+        if phrase in seen:
+            continue
+        seen.add(phrase)
+        out.append({"en": phrase, "n": n})
+        if len(out) >= limit:
+            break
+    return out
+
+
 def build_auto_tags(force=False, limit=0, progress=None, mids=None):
     """受控词表 zero-shot 打标:SigLIP2 图文相似度过阈值 → index/autotags/<id>.json。
 
@@ -4852,8 +4899,12 @@ def build_auto_tags(force=False, limit=0, progress=None, mids=None):
                 arbiter_summary = "on"
             except Exception:
                 arbiter_summary = "error"
+        open_tags = []
+        if os.environ.get("VITUAL_OPEN_TAG", "1").strip() not in ("0", "false", "no"):
+            open_tags = _open_entities(vlm, {w for en in (e.lower() for _, e in vocab) for w in en.split()})
         data = {"model": model, "min_prob": min_prob,
-                "verified": verified, "auto": auto, "arbiter": arbiter_summary}
+                "verified": verified, "auto": auto, "arbiter": arbiter_summary,
+                "open": open_tags}
         os.makedirs(AUTOTAG_DIR, exist_ok=True)
         with open(sc_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=1)
