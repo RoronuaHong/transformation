@@ -1119,6 +1119,18 @@ _DECISION_CRITERIA = {
 }
 
 
+# 业务意图（第二套 criteria）：面向 agent/离线链路的操作类型分类，与检索意图分开，
+# 互不污染。默认不被检索热路径使用；仅 agent 预评估等离线场景显式传入。
+_DECISION_BIZ_CRITERIA = {
+    "query": "查询/检索素材或数据（只读操作）",
+    "ingest": "入库/新增/处理媒体素材（写操作）",
+    "update": "更新标签/描述/打标（写操作，低风险）",
+    "delete": "删除素材/清空/覆盖（写操作，高风险）",
+    # 无原生弃权：保留 other 吸收无法归类请求。
+    "other": "不属于上述任何一类（闲聊/无法归类）",
+}
+
+
 def decision_endpoint():
     """决策服务地址；未设 VITUAL_DECISION_URL 则完全关闭，退化为纯规则（零延迟）。"""
     return os.environ.get("VITUAL_DECISION_URL", "").strip().rstrip("/")
@@ -1139,8 +1151,37 @@ def decision_call(body, timeout=None, retries=None):
     return _dc(body, timeout=timeout, retries=retries, recorder=_rec)
 
 
+_DECISION_STATS = {"calls": 0, "ok": 0, "err": 0, "other": 0,
+                   "dur_ms_sum": 0.0, "dur_ms_max": 0.0}
+
+
+def decision_stats():
+    """决策调用聚合快照(成功率/平均延迟/兜底率)，供监控。仅内存累计，不落盘。"""
+    s = dict(_DECISION_STATS)
+    calls = s.get("calls", 0)
+    s["avg_ms"] = round(s["dur_ms_sum"] / calls, 1) if calls else 0.0
+    s["ok_rate"] = round(s["ok"] / calls, 3) if calls else None
+    s["other_rate"] = round(s["other"] / calls, 3) if calls else None
+    s.pop("dur_ms_sum", None)
+    return s
+
+
+def _decision_stats_reset():
+    """清空聚合计数（测试/运维用）。"""
+    _DECISION_STATS.update(calls=0, ok=0, err=0, other=0,
+                           dur_ms_sum=0.0, dur_ms_max=0.0)
+
+
 def _record_decision(is_or, dur, ok, err):
-    """决策调用可观测埋点(失败不冒泡,绝不影响主链路降级)。"""
+    """决策调用可观测埋点(失败不冒泡,绝不影响主链路降级)+ 内存聚合。"""
+    try:
+        _DECISION_STATS["calls"] += 1
+        _DECISION_STATS["ok" if ok else "err"] += 1
+        ms = dur * 1000.0
+        _DECISION_STATS["dur_ms_sum"] += ms
+        _DECISION_STATS["dur_ms_max"] = max(_DECISION_STATS["dur_ms_max"], ms)
+    except Exception:
+        pass
     try:
         obs.record("decision", duration_ms=dur * 1000.0, ok=ok,
                    backend="openrouter" if is_or else "local",
@@ -1149,23 +1190,25 @@ def _record_decision(is_or, dur, ok, err):
         pass
 
 
-def decision_choice_intent(q):
+def decision_choice_intent(q, criteria=None):
     """调 /v1/systemone 的 choice 原语判意图，返回 (intent, prob, conf) 或 None。
 
-    返回 None 统一语义为「放弃兜底、回落规则默认 text」：服务关/失败、模型归入
-    other、或 choice 不合法。因无原生弃权机制, _DECISION_CRITERIA 已含 other 选项,
-    模糊/无关查询应被它吸收而非强行归类(验证实证)。
+    criteria=None 默认检索意图(_DECISION_CRITERIA)；传 _DECISION_BIZ_CRITERIA 走业务
+    意图分类(两套 criteria 分开,互不污染)。返回 None 统一语义为「放弃兜底、回落规则
+    默认 text」：服务关/失败、模型归入 other、或 choice 不合法。因无原生弃权机制,
+    criteria 已含 other 选项,模糊/无关查询应被它吸收而非强行归类(验证实证)。
     """
     base = decision_endpoint()
     if not base or not (q or "").strip():
         return None
+    crit = criteria or _DECISION_CRITERIA
     body = {
         "state": "用户查询：%s" % q.strip(),
         "questions": {
             "intent": {
                 "type": "choice",
-                "instructions": "这条查询属于哪类检索意图？若都不匹配选 other。",
-                "criteria": _DECISION_CRITERIA,
+                "instructions": "这条查询属于哪类意图？若都不匹配选 other。",
+                "criteria": crit,
             }
         },
     }
@@ -1174,10 +1217,11 @@ def decision_choice_intent(q):
         return None
     a = ans.get("intent", {})
     choice = a.get("choice")
-    if not choice or choice == "other" or choice not in _DECISION_CRITERIA:
+    if not choice or choice == "other" or choice not in crit:
         # 预期兜底(非失败)：模糊/无关查询被 Jev 收进 other,与 4xx/超时失败区分,
         # 单独埋点便于监控兜底率。
         try:
+            _DECISION_STATS["other"] += 1
             obs.record("decision_intent_other", query=(q or "")[:60])
         except Exception:
             pass
@@ -1244,11 +1288,27 @@ def decision_noul(question, state, true_crit=None, false_crit=None):
     return float(a["noul"])
 
 
-def _arbiter_annotate(auto_items, scores, thr):
-    """把批量 noul 分数映射到 auto 条目的 arbiter 字段（纯函数，便于单测）。"""
+def _arbiter_annotate(auto_items, scores, thr, high=None):
+    """把批量 noul 分数映射到 auto 条目的 arbiter 字段（纯函数，便于单测）。
+
+    三档语义（对齐置信门控）：>=high(默认0.9,VITUAL_DECISION_HIGH)=pass 强支撑；
+    [thr,high)=partial 部分支撑；<thr 或 None(服务失败/无分数)=fail，不误放行。"""
+    import os as _os
+    if high is None:
+        try:
+            high = float(_os.environ.get("VITUAL_DECISION_HIGH", "0.9"))
+        except ValueError:
+            high = 0.9
     for i, item in enumerate(auto_items):
         p = scores.get("a%d" % i)
-        item["arbiter"] = "pass" if (p is not None and p >= thr) else "fail"
+        if p is None:
+            item["arbiter"] = "fail"
+        elif p >= high:
+            item["arbiter"] = "pass"
+        elif p >= thr:
+            item["arbiter"] = "partial"
+        else:
+            item["arbiter"] = "fail"
     return auto_items
 
 
@@ -1309,7 +1369,11 @@ def decision_citation_supported(answer, sources):
         return None
     c = ans.get("c", {})
     noul = float(c["noul"]) if "noul" in c else None
-    _record_decision("P1-2", "citation", answer[:60], supported=noul, raw=c)
+    try:
+        obs.record("decision_citation", ok=(noul is not None),
+                   supported=noul, answer_len=len(answer or ""), max_src=max_src)
+    except Exception:
+        pass
     return noul
 
 
@@ -1361,6 +1425,17 @@ def _clip_text_floor():
     return 0.11 if "siglip2" in model else 0.32
 
 
+def _hot_intent(q):
+    """热路径意图:默认纯规则(零延迟);仅 VITUAL_DECISION_INTENT_HOT=1 才启用 Jev 兜底。
+
+    检索热路径对延迟敏感,Jev 单次 1.7s+ 会拖慢交互,故默认纯规则;该开关仅供离线/
+    实验性 A/B,开启后热路径也会引入决策延迟(不推荐线上开)。
+    """
+    if os.environ.get("VITUAL_DECISION_INTENT_HOT", "").strip().lower() in ("1", "true", "yes"):
+        return _query_intent_decided(q)
+    return _query_intent(q)
+
+
 def _append_clip_hits(q, rows, kind):
     """以文搜图只在文字几乎没命中时补画面。
 
@@ -1369,7 +1444,7 @@ def _append_clip_hits(q, rows, kind):
     (_clip_text_floor)且明显高于第二名。注意 SigLIP2 下多条同主题素材分数几乎相同
     (0.127/0.127/0.122),gap 阈值须相应放宽到 0.01,否则多命中会被误杀。
     """
-    if _query_intent(q) in ("id", "speech"):
+    if _hot_intent(q) in ("id", "speech"):
         return rows
     if kind and kind not in ("images", "videos", "silent", "anim"):
         return rows

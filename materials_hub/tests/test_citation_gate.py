@@ -50,6 +50,22 @@ def test_gate_threshold_from_env(monkeypatch):
     assert d == "unsupported"  # 0.8 < 0.85 降级
 
 
+def test_citation_supported_obs_records(monkeypatch):
+    """真实路径：decision_call 返回 noul，验证解析正确且埋点 kind/kwargs 正确。
+
+    回归：曾误用 _record_decision 导致 kind='decision' 且无 supported 字段（被 try 吞
+    不易察觉），此处显式断言 kind='decision_citation' 与 supported kwarg。
+    """
+    calls = {}
+    monkeypatch.setattr(core, "decision_endpoint", lambda: "http://x")
+    monkeypatch.setattr(core, "decision_call", lambda body, **k: {"c": {"noul": 0.88}})
+    monkeypatch.setattr(core.obs, "record", lambda kind, **f: calls.update(kind=kind, **f))
+    v = core.decision_citation_supported("答案", [{"label": "L", "source": "S", "text": "T"}])
+    assert v == 0.88
+    assert calls.get("kind") == "decision_citation"
+    assert calls.get("supported") == 0.88
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))

@@ -74,7 +74,11 @@ def test_arbiter_annotate_threshold():
     scores = {"a0": 0.65}
     items = [{"zh": "x"}]
     core._arbiter_annotate(items, scores, 0.6)
-    assert items[0]["arbiter"] == "pass"
+    assert items[0]["arbiter"] == "partial"  # [thr, high) 部分支撑
     core._arbiter_annotate(items, scores, 0.7)  # 抬高阈值 -> fail
     assert items[0]["arbiter"] == "fail"
+    scores2 = {"a0": 0.95}
+    items2 = [{"zh": "y"}]
+    core._arbiter_annotate(items2, scores2, 0.6)
+    assert items2[0]["arbiter"] == "pass"  # >= high(0.9) 强支撑
 

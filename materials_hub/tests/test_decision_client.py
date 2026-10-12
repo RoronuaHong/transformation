@@ -99,6 +99,56 @@ def test_batch_noul_truncates_state():
     assert len(cap["state"]) <= 2100
 
 
+import core  # noqa: E402
+
+
+def test_hot_intent_default_is_rule(monkeypatch):
+    """默认纯规则：不设开关时 _hot_intent 等同 _query_intent，绝不调 Jev。"""
+    monkeypatch.delenv("VITUAL_DECISION_INTENT_HOT", raising=False)
+
+    def _boom(*a, **k):
+        raise AssertionError("默认不应调用 Jev")
+
+    monkeypatch.setattr(core, "decision_choice_intent", _boom)
+    assert core._hot_intent("id:abc") == "id"
+    assert core._hot_intent("这句台词") == "speech"
+    assert core._hot_intent("找个做菜的视频") == "text"
+
+
+def test_hot_intent_enabled_uses_jev(monkeypatch):
+    """VITUAL_DECISION_INTENT_HOT=1 时热路径启用 Jev 兜底（离线/实验）。"""
+    monkeypatch.setenv("VITUAL_DECISION_INTENT_HOT", "1")
+    monkeypatch.setattr(core, "decision_endpoint", lambda: "http://x")
+    monkeypatch.setattr(core, "decision_choice_intent",
+                        lambda q, criteria=None: ("speech", 0.9, 0.9))
+    assert core._hot_intent("某句模糊对白") == "speech"
+
+
+def test_biz_criteria_and_choice(monkeypatch):
+    """业务意图 criteria 独立，可传入 decision_choice_intent。"""
+    assert set(core._DECISION_BIZ_CRITERIA) >= {"query", "ingest", "update", "delete", "other"}
+    monkeypatch.setattr(core, "decision_endpoint", lambda: "http://x")
+    monkeypatch.setattr(core, "decision_call",
+                        lambda body, **k: {"intent": {"choice": "delete",
+                                                      "probabilities": {"delete": 0.9},
+                                                      "confidence": 0.9}})
+    got = core.decision_choice_intent("删除所有素材", criteria=core._DECISION_BIZ_CRITERIA)
+    assert got == ("delete", 0.9, 0.9)
+
+
+def test_decision_stats_aggregates(monkeypatch):
+    """_record_decision 累计成功率/延迟，decision_stats 汇总。"""
+    core._decision_stats_reset()
+    monkeypatch.setattr(core.obs, "record", lambda *a, **k: None)
+    core._record_decision(False, 0.01, True, None)
+    core._record_decision(True, 0.03, False, "HTTP 500")
+    s = core.decision_stats()
+    assert s["calls"] == 2 and s["ok"] == 1 and s["err"] == 1
+    assert s["ok_rate"] == 0.5
+    assert s["avg_ms"] == 20.0
+    core._decision_stats_reset()
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))
