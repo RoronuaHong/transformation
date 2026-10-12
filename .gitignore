@@ -30,7 +30,7 @@ subtitle_pipeline/_tmp*.py
 subtitle_pipeline/_*.py
 subtitle_pipeline/_*.ps1
 subtitle_pipeline/_*.json
-subtitle_pipeline/*_pid.txt
+subtitle_pipeline/*pid*.txt
 .planning/
 
 # 导出旁路产物（export-site 生成，勿提交 smoke 样例）
