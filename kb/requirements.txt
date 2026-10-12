@@ -7,3 +7,8 @@ pyyaml>=6.0
 fastapi>=0.110.0
 uvicorn>=0.29.0
 requests>=2.31.0
+
+# 办公文档解析（PDF/Word/Excel 资料问答）
+pdfplumber>=0.11.0
+python-docx>=1.1.0
+openpyxl>=3.1.0

@@ -44,12 +44,32 @@ sources:
     label: 处理产出
     description: ASR/改写/多轮校正等文本产出
 
+  # 6. 项目文档（已为 markdown/ts，直接扩展知识面，覆盖"某文档怎么规定"类问答）
+  - path: docs
+    type: dir-markdown
+    label: 项目文档
+    description: Vitual 项目级说明文档
+  - path: materials_hub
+    type: dir-markdown
+    label: 素材中心文档
+    description: 素材中心最佳实践/检索架构/评估等
+  - path: trans
+    type: dir-markdown
+    label: 字幕产出文档
+    description: 字幕转写/总结产出
+
+  # 7. 办公文档（PDF/Word/Excel）—— 把文件丢进 kb/office 即可被索引，支撑"PDF 资料问答"
+  - path: kb/office
+    type: dir-office
+    label: 办公资料
+    description: 合同/说明书/报表等 PDF/Word/Excel
+
 # 嵌入与生成配置（A 方案使用，B 方案在 UI 中选同样模型）
 embed:
   provider: ollama
-  model: nomic-embed-text
+  model: bge-m3:latest
   base_url: http://127.0.0.1:11434
-  dim: 768
+  dim: 1024
 
 generate:
   # 复用 subtitle_pipeline 的 hy3 profile
