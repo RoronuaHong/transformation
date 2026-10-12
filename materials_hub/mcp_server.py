@@ -404,12 +404,12 @@ def decision_risk_score(task: str):
     """调 /v1/systemone 的 score 原语给写操作风险打分；服务关/失败返回 None。
 
     仅用于风险排序展示（高风险排前面），与 confirm=true 人工护栏正交，不替代它。
+    支持 OpenRouter Decisions API(VITUAL_DECISION_URL 含 'openrouter.ai' 时走云端)。
     """
     url = os.environ.get("VITUAL_DECISION_URL", "").strip().rstrip("/")
     if not url or not (task or "").strip():
         return None
-    import json as _json
-    import urllib.request as _u
+    import core as _core
 
     body = {
         "state": "操作描述：%s" % task,
@@ -424,20 +424,13 @@ def decision_risk_score(task: str):
             }
         },
     }
-    try:
-        req = _u.Request(
-            url + "/v1/systemone",
-            data=_json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with _u.urlopen(req, timeout=float(os.environ.get("VITUAL_DECISION_TIMEOUT", "3"))) as r:
-            a = _json.loads(r.read().decode("utf-8")).get("answers", {}).get("r", {})
-        if "score" not in a:
-            return None
-        return {"score": a["score"], "confidence": a.get("confidence")}
-    except Exception:
+    ans = _core.decision_call(body)
+    if not ans:
         return None
+    a = ans.get("r", {})
+    if "score" not in a:
+        return None
+    return {"score": a["score"], "confidence": a.get("confidence")}
 
 
 # ---------- Deep Agent(路线 C:编排层在 agent.py,经 MCP 暴露给宿主) ----------

@@ -1114,6 +1114,8 @@ _DECISION_CRITERIA = {
     "id": "查询是找某个具体文件/素材编号/ID，或带 type: job: tag: id: 前缀，或形如路径/文件名",
     "speech": "查询是在找台词/字幕内容，例如问某句话、某段对白、视频里说了什么",
     "text": "查询是普通内容检索，找某类素材（如某道菜、某个场景、某个人物）",
+    # 无原生弃权机制：必须保留“其他”，否则模糊/无关查询会被强行归入前三类（验证实证）。
+    "other": "查询不属于上述任何一类（闲聊/无关/无法归类/非素材检索请求）",
 }
 
 
@@ -1122,44 +1124,107 @@ def decision_endpoint():
     return os.environ.get("VITUAL_DECISION_URL", "").strip().rstrip("/")
 
 
-def decision_choice_intent(q):
-    """调 /v1/systemone 的 choice 原语判意图，返回 (intent, prob, conf) 或 None。"""
-    import json as _json
-    import urllib.request
+def decision_call(body, timeout=None, retries=None):
+    """统一调决策服务：本地 llama-server(/v1/systemone) 或 OpenRouter Decisions API。
 
+    返回 answers dict 或 None(服务关/失败)。响应解析对各后端一致。
+    识别规则：VITUAL_DECISION_URL 含 'openrouter.ai' 即走云端 Decisions API，
+    需 model 字段(默认 typesafe/jev-1.13) + Authorization: Bearer $OPENROUTER_API_KEY。
+
+    可靠性增强(对齐最佳实践)：
+    - 云端网关偶发 5xx/超时 → 指数退避重试(默认 2 次)；本地失败即真失败,不重试。
+    - 4xx(格式错/鉴权失败,如误用 choices 数组格式)不重试,直接降级。
+    - 每次调用经 _record_decision 埋点(backend/延迟/成败/错误),便于监控。
+    注:OpenRouter 仅接受 `questions` 为对象 + `criteria`(对象/数组) + `instructions` 的
+    SystemOne 格式,不支持 TypeSafe SDK 的 `choices`/`name`/`scale` 数组格式(实测 400)。
+    """
+    import json as _json
+    import urllib.request as _u
+    import urllib.error as _ue
+
+    base = decision_endpoint()
+    if not base:
+        return None
+    is_or = "openrouter.ai" in base
+    url = base if is_or else base + "/v1/systemone"
+    if timeout is None:
+        try:
+            timeout = float(os.environ.get("VITUAL_DECISION_TIMEOUT", "3"))
+        except ValueError:
+            timeout = 3.0
+    if is_or and timeout < 20:
+        timeout = 20.0
+    if retries is None:
+        retries = 2 if is_or else 0
+    body = dict(body)
+    headers = {"Content-Type": "application/json"}
+    if is_or:
+        body["model"] = os.environ.get("VITUAL_DECISION_MODEL", "typesafe/jev-1.13")
+        key = os.environ.get("OPENROUTER_API_KEY")
+        if key:
+            headers["Authorization"] = "Bearer " + key
+    last_err = None
+    for attempt in range(1 + retries):
+        t0 = time.time()
+        try:
+            req = _u.Request(url, data=_json.dumps(body).encode("utf-8"),
+                             headers=headers, method="POST")
+            with _u.urlopen(req, timeout=timeout) as r:
+                ans = _json.loads(r.read().decode("utf-8")).get("answers", {})
+            _record_decision(is_or, time.time() - t0, True, None)
+            return ans
+        except _ue.HTTPError as e:
+            last_err = "HTTP %s" % e.code
+            if e.code < 500:                      # 客户端错(格式/鉴权)不重试
+                _record_decision(is_or, time.time() - t0, False, last_err)
+                return None
+        except Exception as e:                    # 超时/网络抖动 → 重试
+            last_err = e.__class__.__name__
+        if attempt < retries:
+            time.sleep(min(2 ** attempt, 4))      # 1s, 2s 退避
+    _record_decision(is_or, time.time() - t0, False, last_err)
+    return None
+
+
+def _record_decision(is_or, dur, ok, err):
+    """决策调用可观测埋点(失败不冒泡,绝不影响主链路降级)。"""
+    try:
+        obs.record("decision", duration_ms=dur * 1000.0, ok=ok,
+                   backend="openrouter" if is_or else "local",
+                   err=(err or "")[:120])
+    except Exception:
+        pass
+
+
+def decision_choice_intent(q):
+    """调 /v1/systemone 的 choice 原语判意图，返回 (intent, prob, conf) 或 None。
+
+    返回 None 统一语义为「放弃兜底、回落规则默认 text」：服务关/失败、模型归入
+    other、或 choice 不合法。因无原生弃权机制, _DECISION_CRITERIA 已含 other 选项,
+    模糊/无关查询应被它吸收而非强行归类(验证实证)。
+    """
     base = decision_endpoint()
     if not base or not (q or "").strip():
         return None
-    try:
-        timeout = float(os.environ.get("VITUAL_DECISION_TIMEOUT", "3"))
-    except ValueError:
-        timeout = 3.0
     body = {
         "state": "用户查询：%s" % q.strip(),
         "questions": {
             "intent": {
                 "type": "choice",
-                "instructions": "这条查询属于哪类检索意图？",
+                "instructions": "这条查询属于哪类检索意图？若都不匹配选 other。",
                 "criteria": _DECISION_CRITERIA,
             }
         },
     }
-    try:
-        req = urllib.request.Request(
-            base + "/v1/systemone",
-            data=_json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            ans = _json.loads(r.read().decode("utf-8")).get("answers", {}).get("intent", {})
-        choice = ans.get("choice")
-        if choice not in _DECISION_CRITERIA:
-            return None
-        probs = ans.get("probabilities") or {}
-        return choice, float(probs.get(choice, 0.0)), float(ans.get("confidence", 0.0))
-    except Exception:
+    ans = decision_call(body)
+    if not ans:
         return None
+    a = ans.get("intent", {})
+    choice = a.get("choice")
+    if not choice or choice == "other" or choice not in _DECISION_CRITERIA:
+        return None
+    probs = a.get("probabilities") or {}
+    return choice, float(probs.get(choice, 0.0)), float(a.get("confidence", 0.0))
 
 
 def _query_intent_decided(q, min_conf=None):
@@ -1167,6 +1232,9 @@ def _query_intent_decided(q, min_conf=None):
 
     规则命中 id/speech 直接返回（零延迟、可解释）；仅当规则兜底为 text
     且决策服务显式开启时才问模型；低置信或服务不可用一律回落 text。
+
+    中文兜底：决策模型 CJK 准确率低于英文(官方 jaggedness 已知),故含中文时
+    提高门槛到 0.7(除非显式配置更低),低置信直接回落规则默认 text。
     """
     base = _query_intent(q)
     if base != "text" or not decision_endpoint():
@@ -1176,24 +1244,25 @@ def _query_intent_decided(q, min_conf=None):
             min_conf = float(os.environ.get("VITUAL_DECISION_MIN_CONF", "0.6"))
         except ValueError:
             min_conf = 0.6
+    if _has_cjk(q) and min_conf < 0.7:
+        min_conf = 0.7
     got = decision_choice_intent(q)
     if got and got[1] >= min_conf and got[2] >= min_conf:
         return got[0]
     return "text"
 
 
+_CJK_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]")
+def _has_cjk(s):
+    """粗判是否含中日韩字符(用于中文场景的保守降级)。"""
+    return bool(_CJK_RE.search(s or ""))
+
+
 def decision_noul(question, state, true_crit=None, false_crit=None):
     """调 /v1/systemone 的 noul 原语判断命题真假，返回 P(为真) 或 None（服务关/失败）。"""
-    import json as _json
-    import urllib.request
-
     base = decision_endpoint()
     if not base or not (question or "").strip():
         return None
-    try:
-        timeout = float(os.environ.get("VITUAL_DECISION_TIMEOUT", "3"))
-    except ValueError:
-        timeout = 3.0
     body = {
         "state": "上下文：%s\n命题：%s" % (state, question),
         "questions": {
@@ -1207,20 +1276,13 @@ def decision_noul(question, state, true_crit=None, false_crit=None):
             }
         },
     }
-    try:
-        req = urllib.request.Request(
-            base + "/v1/systemone",
-            data=_json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            ans = _json.loads(r.read().decode("utf-8")).get("answers", {}).get("q", {})
-        if "noul" not in ans:
-            return None
-        return float(ans["noul"])
-    except Exception:
+    ans = decision_call(body)
+    if not ans:
         return None
+    a = ans.get("q", {})
+    if "noul" not in a:
+        return None
+    return float(a["noul"])
 
 
 def _arbiter_annotate(auto_items, scores, thr):
@@ -1251,23 +1313,12 @@ def decision_batch_noul(questions, state, timeout=None):
             "instructions": instr,
             "criteria": {"true": tc or "命题成立", "false": fc or "命题不成立"},
         }
-    import json as _json
-    import urllib.request
-
     body = {"state": state, "questions": q}
-    try:
-        req = urllib.request.Request(
-            base + "/v1/systemone",
-            data=_json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            ans = _json.loads(r.read().decode("utf-8")).get("answers", {})
-        return {qid: (float(a.get("noul")) if a.get("noul") is not None else None)
-                for qid, a in ans.items()}
-    except Exception:
+    ans = decision_call(body, timeout=timeout)
+    if not ans:
         return {}
+    return {qid: (float(a.get("noul")) if a.get("noul") is not None else None)
+            for qid, a in ans.items()}
 
 
 def _clip_text_floor():

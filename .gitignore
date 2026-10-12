@@ -43,6 +43,8 @@ subtitle_pipeline/downloads/
 output/
 subtitle_pipeline/models/*.pth
 subtitle_pipeline/models/*.onnx
+*.gguf
+subtitle_pipeline/models/clef/
 *.pth
 *.onnx
 

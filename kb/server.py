@@ -142,12 +142,18 @@ def search(q: Query):
 
 
 def _decision_citation_supported(answer: str, sources: list) -> float | None:
-    """调 /v1/systemone 的 noul 判定回答是否被检索资料支撑；服务关/失败返回 None。"""
+    """调 /v1/systemone 的 noul 判定回答是否被检索资料支撑；服务关/失败返回 None。
+
+    可靠性对齐 core.decision_call：云端网关偶发失败做指数退避重试(默认 2 次)，
+    4xx(格式/鉴权)不重试；本地失败即真失败。未支撑始终降级为仅返回检索原文。
+    """
     url = os.environ.get("VITUAL_DECISION_URL", "").strip().rstrip("/")
     if not url:
         return None
     import json as _json
+    import time as _t
     import urllib.request as _u
+    import urllib.error as _ue
 
     ctx = "\n".join(
         "[%d] %s（%s）：%s" % (i + 1, c.get("label", ""), c.get("source", ""), c.get("text", ""))
@@ -164,18 +170,43 @@ def _decision_citation_supported(answer: str, sources: list) -> float | None:
             }
         },
     }
+    is_or = "openrouter.ai" in url
+    req_url = url if is_or else url + "/v1/systemone"
+    headers = {"Content-Type": "application/json"}
     try:
-        req = _u.Request(
-            url + "/v1/systemone",
-            data=_json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with _u.urlopen(req, timeout=float(os.environ.get("VITUAL_DECISION_TIMEOUT", "3"))) as r:
-            ans = _json.loads(r.read().decode("utf-8")).get("answers", {}).get("c", {})
-        return float(ans.get("noul")) if "noul" in ans else None
-    except Exception:
-        return None
+        _timeout = float(os.environ.get("VITUAL_DECISION_TIMEOUT", "3"))
+    except ValueError:
+        _timeout = 3.0
+    if is_or and _timeout < 20:
+        _timeout = 20.0
+    if is_or:
+        body["model"] = os.environ.get("VITUAL_DECISION_MODEL", "typesafe/jev-1.13")
+        key = os.environ.get("OPENROUTER_API_KEY")
+        if key:
+            headers["Authorization"] = "Bearer " + key
+    retries = 2 if is_or else 0
+    last_err = None
+    for attempt in range(1 + retries):
+        t0 = _t.time()
+        try:
+            req = _u.Request(
+                req_url,
+                data=_json.dumps(body).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            with _u.urlopen(req, timeout=_timeout) as r:
+                ans = _json.loads(r.read().decode("utf-8")).get("answers", {}).get("c", {})
+            return float(ans.get("noul")) if "noul" in ans else None
+        except _ue.HTTPError as e:
+            last_err = "HTTP %s" % e.code
+            if e.code < 500:                      # 客户端错(格式/鉴权)不重试
+                return None
+        except Exception as e:                    # 超时/网络抖动 → 重试
+            last_err = e.__class__.__name__
+        if attempt < retries:
+            _t.sleep(min(2 ** attempt, 4))        # 1s, 2s 退避
+    return None
 
 
 @app.post("/ask")
