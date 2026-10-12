@@ -26,6 +26,11 @@ subtitle_pipeline/llm.yaml
 .tmp-bili3/
 .tmp-v2ray-*.py
 subtitle_pipeline/_tmp*.py
+# 本地调试/一次性脚本与运行产物（下划线前缀约定 + pid 文件）
+subtitle_pipeline/_*.py
+subtitle_pipeline/_*.ps1
+subtitle_pipeline/_*.json
+subtitle_pipeline/*_pid.txt
 .planning/
 
 # 导出旁路产物（export-site 生成，勿提交 smoke 样例）
