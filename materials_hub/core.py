@@ -1106,6 +1106,170 @@ def _query_intent(q):
     return "text"
 
 
+# ── 决策模型（SystemOne）可选兜底 ─────────────────────────────────
+# 实测单次约 1.7s（Clef-Flash 权重 6.49GB 超出 6GB 显存只能部分 offload），
+# 因此默认关闭：只用于离线/批量实验，绝不进交互式同步链路（见决策模型文档 §7）。
+
+_DECISION_CRITERIA = {
+    "id": "查询是找某个具体文件/素材编号/ID，或带 type: job: tag: id: 前缀，或形如路径/文件名",
+    "speech": "查询是在找台词/字幕内容，例如问某句话、某段对白、视频里说了什么",
+    "text": "查询是普通内容检索，找某类素材（如某道菜、某个场景、某个人物）",
+}
+
+
+def decision_endpoint():
+    """决策服务地址；未设 VITUAL_DECISION_URL 则完全关闭，退化为纯规则（零延迟）。"""
+    return os.environ.get("VITUAL_DECISION_URL", "").strip().rstrip("/")
+
+
+def decision_choice_intent(q):
+    """调 /v1/systemone 的 choice 原语判意图，返回 (intent, prob, conf) 或 None。"""
+    import json as _json
+    import urllib.request
+
+    base = decision_endpoint()
+    if not base or not (q or "").strip():
+        return None
+    try:
+        timeout = float(os.environ.get("VITUAL_DECISION_TIMEOUT", "3"))
+    except ValueError:
+        timeout = 3.0
+    body = {
+        "state": "用户查询：%s" % q.strip(),
+        "questions": {
+            "intent": {
+                "type": "choice",
+                "instructions": "这条查询属于哪类检索意图？",
+                "criteria": _DECISION_CRITERIA,
+            }
+        },
+    }
+    try:
+        req = urllib.request.Request(
+            base + "/v1/systemone",
+            data=_json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            ans = _json.loads(r.read().decode("utf-8")).get("answers", {}).get("intent", {})
+        choice = ans.get("choice")
+        if choice not in _DECISION_CRITERIA:
+            return None
+        probs = ans.get("probabilities") or {}
+        return choice, float(probs.get(choice, 0.0)), float(ans.get("confidence", 0.0))
+    except Exception:
+        return None
+
+
+def _query_intent_decided(q, min_conf=None):
+    """规则优先 + 决策模型兜底。
+
+    规则命中 id/speech 直接返回（零延迟、可解释）；仅当规则兜底为 text
+    且决策服务显式开启时才问模型；低置信或服务不可用一律回落 text。
+    """
+    base = _query_intent(q)
+    if base != "text" or not decision_endpoint():
+        return base
+    if min_conf is None:
+        try:
+            min_conf = float(os.environ.get("VITUAL_DECISION_MIN_CONF", "0.6"))
+        except ValueError:
+            min_conf = 0.6
+    got = decision_choice_intent(q)
+    if got and got[1] >= min_conf and got[2] >= min_conf:
+        return got[0]
+    return "text"
+
+
+def decision_noul(question, state, true_crit=None, false_crit=None):
+    """调 /v1/systemone 的 noul 原语判断命题真假，返回 P(为真) 或 None（服务关/失败）。"""
+    import json as _json
+    import urllib.request
+
+    base = decision_endpoint()
+    if not base or not (question or "").strip():
+        return None
+    try:
+        timeout = float(os.environ.get("VITUAL_DECISION_TIMEOUT", "3"))
+    except ValueError:
+        timeout = 3.0
+    body = {
+        "state": "上下文：%s\n命题：%s" % (state, question),
+        "questions": {
+            "q": {
+                "type": "noul",
+                "instructions": question,
+                "criteria": {
+                    "true": true_crit or "命题成立",
+                    "false": false_crit or "命题不成立",
+                },
+            }
+        },
+    }
+    try:
+        req = urllib.request.Request(
+            base + "/v1/systemone",
+            data=_json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            ans = _json.loads(r.read().decode("utf-8")).get("answers", {}).get("q", {})
+        if "noul" not in ans:
+            return None
+        return float(ans["noul"])
+    except Exception:
+        return None
+
+
+def _arbiter_annotate(auto_items, scores, thr):
+    """把批量 noul 分数映射到 auto 条目的 arbiter 字段（纯函数，便于单测）。"""
+    for i, item in enumerate(auto_items):
+        p = scores.get("a%d" % i)
+        item["arbiter"] = "pass" if (p is not None and p >= thr) else "fail"
+    return auto_items
+
+
+def decision_batch_noul(questions, state, timeout=None):
+    """一次请求批量仲裁多个 noul 命题（llama-server 单请求可答多题）。
+
+    questions: {id: (instructions, true_crit, false_crit)} ；返回 {id: prob_or_None}。
+    """
+    base = decision_endpoint()
+    if not base:
+        return {}
+    if timeout is None:
+        try:
+            timeout = float(os.environ.get("VITUAL_DECISION_TIMEOUT", "6"))
+        except ValueError:
+            timeout = 6.0
+    q = {}
+    for qid, (instr, tc, fc) in questions.items():
+        q[qid] = {
+            "type": "noul",
+            "instructions": instr,
+            "criteria": {"true": tc or "命题成立", "false": fc or "命题不成立"},
+        }
+    import json as _json
+    import urllib.request
+
+    body = {"state": state, "questions": q}
+    try:
+        req = urllib.request.Request(
+            base + "/v1/systemone",
+            data=_json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            ans = _json.loads(r.read().decode("utf-8")).get("answers", {})
+        return {qid: (float(a.get("noul")) if a.get("noul") is not None else None)
+                for qid, a in ans.items()}
+    except Exception:
+        return {}
+
+
 def _clip_text_floor():
     """以文搜图的命中分数线(模型自适应)。
 
@@ -4471,8 +4635,31 @@ def build_auto_tags(force=False, limit=0, progress=None, mids=None):
                 verified.append(item)
             else:
                 auto.append(item)
+        # 决策模型仲裁（P1-1）：对 auto 单方证据条目用 noul 做第三方复核。
+        # 仅新增 arbiter 标注，不动 verified/auto 列表（检索权重零回归）；
+        # 默认关闭（未设 VITUAL_DECISION_URL），开启时一材质一次批量请求。
+        arbiter_summary = "off"
+        if auto and decision_endpoint():
+            try:
+                state = "素材名:%s\n描述:%s\n候选标签(单方 SigLIP 证据):%s" % (
+                    m.get("name", ""), m.get("description", ""),
+                    "、".join(x["zh"] for x in auto))
+                q = {}
+                for i, item in enumerate(auto):
+                    q["a%d" % i] = (
+                        "素材是否匹配标签「%s」？" % item["zh"],
+                        "素材内容/描述与标签相符", "不相符")
+                scores = decision_batch_noul(q, state)
+                try:
+                    thr = float(os.environ.get("VITUAL_DECISION_MIN_CONF", "0.6"))
+                except ValueError:
+                    thr = 0.6
+                _arbiter_annotate(auto, scores, thr)
+                arbiter_summary = "on"
+            except Exception:
+                arbiter_summary = "error"
         data = {"model": model, "min_prob": min_prob,
-                "verified": verified, "auto": auto}
+                "verified": verified, "auto": auto, "arbiter": arbiter_summary}
         os.makedirs(AUTOTAG_DIR, exist_ok=True)
         with open(sc_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=1)
@@ -4490,6 +4677,118 @@ def build_auto_tags(force=False, limit=0, progress=None, mids=None):
     return {"available": True, "model": model, "embedded": done,
             "skipped": skipped, "missing_vec": miss, "vocab": len(vocab),
             "min_prob": min_prob}
+
+
+# ---------- 结构化实体倒排(Netflix §8 P1-1:受控词表 → 可组合实体索引) ----------
+def entity_inverted_path():
+    """结构化实体倒排索引路径(index/entity/entity_inverted.json;派生数据,可随时重建)。"""
+    return os.path.join(INDEX_DIR, "entity", "entity_inverted.json")
+
+
+def _material_entities(mid, vocab_map):
+    """从一条素材抽取受控词表实体(中文键):来源 = autotags sidecar(verified/auto)。"""
+    ents = set()
+    sc = autotag_sidecar_path(mid)
+    if sc and os.path.isfile(sc):
+        try:
+            with open(sc, encoding="utf-8") as f:
+                data = json.load(f)
+            for grp in ("verified", "auto"):
+                for it in (data.get(grp) or []):
+                    zh = it.get("zh")
+                    if zh in vocab_map:
+                        ents.add(zh)
+        except Exception:
+            pass
+    return ents
+
+
+def build_entity_inverted_index(force=False):
+    """把受控词表实体(SigLIP2/VLM 已打标进 autotags)建成全局可组合倒排索引。
+
+    落点: `index/entity/entity_inverted.json` = {entities:{cn:[ids]}, vocab_en:{en:cn}, built}。
+    设计:实体受 tag_vocab 约束(零幻觉);AND/OR 组合约束供检索做「实体标签做约束过滤」
+    (Netflix 最佳实践)。幂等;只读写派生 sidecar,不碰任何素材主数据。
+    依赖 tag_vocab + autotags sidecar(需先 `cli.py vtag` 打标)。"""
+    try:
+        import tag_vocab
+    except Exception:
+        return {"available": False, "reason": "no_tag_vocab"}
+    vocab_map = {zh: en for zh, en in tag_vocab.TAG_VOCAB}
+    inv = {}
+    for m in all_materials():
+        mid = m["id"]
+        ents = _material_entities(mid, vocab_map)
+        for tag in (m.get("tags") or "").split(","):
+            tag = tag.strip()
+            if tag in vocab_map:
+                ents.add(tag)
+        for cn in ents:
+            inv.setdefault(cn, []).append(mid)
+    out = {cn: sorted(set(ids)) for cn, ids in inv.items()}
+    path = entity_inverted_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"entities": out,
+                   "vocab_en": {en: cn for cn, en in vocab_map.items()},
+                   "built": time.strftime("%Y-%m-%dT%H:%M:%S")},
+                  f, ensure_ascii=False, indent=1)
+    total = len({i for ids in out.values() for i in ids})
+    return {"available": True, "entities": len(out),
+            "materials_with_entities": total}
+
+
+def load_entity_inverted():
+    """读实体倒排索引;不存在返回 None。"""
+    p = entity_inverted_path()
+    if not p or not os.path.isfile(p):
+        return None
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def entity_search(entities, op="and", limit=20):
+    """结构化实体组合查询(Netflix 最佳实践:实体标签做约束过滤)。
+
+    多实体可组合 AND/OR 约束: `entity_search(["红烧鸡翅","鸡翅"], op="and")`
+    返回同时含两实体的素材。纯独立召回通道,不改主检索 `search()`。
+    返回 [{id, matched:[cn...]}],按 id 稳定排序。"""
+    data = load_entity_inverted()
+    if not data:
+        return []
+    inv = data.get("entities", {})
+    vocab_en = data.get("vocab_en", {})
+    if isinstance(entities, str):
+        entities = [entities]
+
+    def _resolve(tok):
+        t = (tok or "").strip().lower()
+        if not t:
+            return None
+        if t in inv:
+            return t
+        if t in vocab_en:
+            return vocab_en[t]
+        return None
+
+    keys = []
+    for raw in re.split(r"[\s,+/]+", " ".join(entities)):
+        k = _resolve(raw)
+        if k:
+            keys.append(k)
+    if not keys:
+        return []
+    sets = [set(inv[k]) for k in keys]
+    if op == "or":
+        ids = set().union(*sets)
+    elif len(sets) > 1:
+        ids = set.intersection(*sets)
+    else:
+        ids = sets[0]
+    return [{"id": mid, "matched": keys} for mid in sorted(ids)[:limit]]
 
 
 # ---------- 镜头索引(ffmpeg 场景检测,片段级输出,供下游剪辑 Agent 按片段调用) ----------

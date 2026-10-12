@@ -64,6 +64,7 @@ from core import (
     search_by_image, search_by_text_image, clip_probe,
     build_image_embeddings, image_embed_status, build_clip_frame_embeddings,
     build_auto_tags, autotag_sidecar_path, rerank_status,
+    build_entity_inverted_index, entity_search,
     auto_process_all, pending_processing,
     apply_media_facet_tags, link_relation_parents, scrub_deprecated_from_tags,
 )
@@ -235,6 +236,21 @@ def main():
             from core import _onnx_rerank
             order = _onnx_rerank(q, docs)
             print("order:", order, "(期望 [0, 1])")
+
+    elif cmd == "entity-index":
+        # 结构化实体倒排索引:python cli.py entity-index [--force]
+        # 依赖先跑 `cli.py vtag` 把受控词表实体打进 autotags sidecar
+        r = build_entity_inverted_index(force="--force" in args)
+        print(json.dumps(r, ensure_ascii=False))
+
+    elif cmd == "entity-search":
+        # 实体组合查询:python cli.py entity-search "红烧鸡翅 鸡翅" [--or]
+        # 默认 AND(同时含多实体);--or 为并集。返回命中素材 id 列表
+        rest = args[1:]
+        op = "or" if "--or" in rest else "and"
+        q = " ".join(a for a in rest if a != "--or")
+        res = entity_search(q, op=op)
+        print(json.dumps(res, ensure_ascii=False, indent=1))
 
     elif cmd == "understand":
         # 理解记录:python cli.py understand <id> [--force] | understand --all

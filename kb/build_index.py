@@ -12,6 +12,8 @@ from pymilvus import MilvusClient
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KB_DIR = os.path.dirname(os.path.abspath(__file__))
+# 默认 Milvus Lite（本地文件，无需 Docker）；设 MILVUS_URI=http://host:19530 可切回独立服务
+LITE_DB = os.path.join(KB_DIR, "milvus_kb.db")
 COLLECTION = "deskline_kb_v1"
 
 sys.path.insert(0, KB_DIR)
@@ -28,14 +30,13 @@ def main():
 
     oc = ollama.Client(host=base_url)
 
-    # 连接本地 Milvus 服务（Docker 启动后）
-    uri = os.environ.get("MILVUS_URI", "http://127.0.0.1:19530")
+    # 默认 Milvus Lite（本地文件，无需 Docker）；设 MILVUS_URI=http://host:19530 可切回独立服务
+    uri = os.environ.get("MILVUS_URI", LITE_DB)
     client = MilvusClient(uri)
     if client.has_collection(COLLECTION):
-        # drop 在某些环境下会阻塞，改为清空数据
-        client.delete(COLLECTION, filter="id >= 0")
-    else:
-        client.create_collection(COLLECTION, dimension=dim, metric_type="COSINE")
+        # Lite 模式下 drop 很快；统一重建以保证索引干净
+        client.drop_collection(COLLECTION)
+    client.create_collection(COLLECTION, dimension=dim, metric_type="COSINE")
 
     docs = collect_documents(ROOT, os.path.join(KB_DIR, "sources.yaml"))
     rows = []

@@ -399,6 +399,47 @@ def _prompt_get(name, arguments=None):
     raise ValueError("unknown prompt: " + name)
 
 
+# ---------- 决策模型：写操作风险打分（P2-2，仅辅助排序，绝不自动放行） ----------
+def decision_risk_score(task: str):
+    """调 /v1/systemone 的 score 原语给写操作风险打分；服务关/失败返回 None。
+
+    仅用于风险排序展示（高风险排前面），与 confirm=true 人工护栏正交，不替代它。
+    """
+    url = os.environ.get("VITUAL_DECISION_URL", "").strip().rstrip("/")
+    if not url or not (task or "").strip():
+        return None
+    import json as _json
+    import urllib.request as _u
+
+    body = {
+        "state": "操作描述：%s" % task,
+        "questions": {
+            "r": {
+                "type": "score",
+                "instructions": "该操作的写/破坏风险有多高？",
+                "criteria": [
+                    "无风险(只读/查询)", "低(创建临时/标注)",
+                    "中(生成/导出素材包)", "高(修改/删除/覆盖原素材)",
+                ],
+            }
+        },
+    }
+    try:
+        req = _u.Request(
+            url + "/v1/systemone",
+            data=_json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with _u.urlopen(req, timeout=float(os.environ.get("VITUAL_DECISION_TIMEOUT", "3"))) as r:
+            a = _json.loads(r.read().decode("utf-8")).get("answers", {}).get("r", {})
+        if "score" not in a:
+            return None
+        return {"score": a["score"], "confidence": a.get("confidence")}
+    except Exception:
+        return None
+
+
 # ---------- Deep Agent(路线 C:编排层在 agent.py,经 MCP 暴露给宿主) ----------
 def t_agent_run(a):
     import agent
@@ -420,8 +461,12 @@ def t_agent_run(a):
             agent._mark_error(task_id, "[error] 后台线程异常终止,任务未能完成")
 
     threading.Thread(target=_run, daemon=True).start()
-    return {"status": "running", "task_id": task_id,
+    risk = decision_risk_score(task) if os.environ.get("VITUAL_DECISION_URL", "").strip() else None
+    resp = {"status": "running", "task_id": task_id,
             "hint": "长任务已在后台启动(约 1-3 分钟),用 agent_status 查询进度与结果"}
+    if risk is not None:
+        resp["risk"] = risk
+    return resp
 
 
 def t_agent_status(a):

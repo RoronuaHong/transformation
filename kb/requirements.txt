@@ -1,5 +1,7 @@
-# A 方案：自研 LLM Wiki 依赖（向量库：Milvus Lite）
+# A 方案：自研 LLM Wiki 依赖（向量库：Milvus Lite，本地文件无需 Docker）
 pymilvus>=3.0.0
+# Milvus Lite 本地引擎（pymilvus 不含，需单独装；离线环境先 pip install milvus-lite）
+milvus-lite
 ollama>=0.4.0
 pyyaml>=6.0
 fastapi>=0.110.0
