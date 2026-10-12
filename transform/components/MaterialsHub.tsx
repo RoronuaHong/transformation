@@ -47,6 +47,15 @@ const KINDS = [
 
 type KindKey = (typeof KINDS)[number] | "";
 
+// kind 过滤器从后端 /api/stats.kinds 动态生成(单一真相源在后端):已知 kind 按 KINDS
+// 既定顺序,后端新增的未知 kind 自动排后并按字母序,不再依赖前端硬编码同步。
+function orderKinds(keys: string[]): string[] {
+  const known = KINDS as readonly string[];
+  const inOrder = known.filter((k) => keys.includes(k));
+  const extra = keys.filter((k) => !known.includes(k)).sort();
+  return [...inOrder, ...extra];
+}
+
 const KIND_LABEL: Record<string, keyof HubCopy> = {
   images: "kindImages",
   videos: "kindVideos",
@@ -80,7 +89,7 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
   const params = useParams();
   const locale = typeof params?.locale === "string" ? params.locale : "zh";
   const [q, setQ] = useState("");
-  const [kind, setKind] = useState<KindKey>("");
+  const [kind, setKind] = useState<string>("");
   const [tag, setTag] = useState("");
   const [mode, setMode] = useState("auto");
   const [sort, setSort] = useState("");
@@ -141,7 +150,7 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
   const kindLabel = useCallback(
     (k: string) => {
       const key = KIND_LABEL[k];
-      return key ? copy[key] : copy.kindOther;
+      return key ? copy[key] : k; // 未知 kind(后端新增)显示原名,动态化不再依赖硬编码
     },
     [copy],
   );
@@ -204,9 +213,9 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
   const facets = useMemo(() => {
     const kinds = stats?.kinds || {};
     return [
-      { val: "" as KindKey, label: copy.all, n: stats?.total || 0 },
-      ...KINDS.map((k) => ({
-        val: k as KindKey,
+      { val: "", label: copy.all, n: stats?.total || 0 },
+      ...orderKinds(Object.keys(kinds)).map((k) => ({
+        val: k,
         label: kindLabel(k),
         n: kinds[k] || 0,
       })),
