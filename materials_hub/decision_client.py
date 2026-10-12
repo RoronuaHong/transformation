@@ -30,7 +30,9 @@ def decision_call(body, timeout=None, retries=None, recorder=None):
     if not base:
         return None
     is_or = "openrouter.ai" in base
-    url = base if is_or else base + "/v1/systemone"
+    # 本地 llama-server 与 OpenRouter 决策端点同为 /v1/systemone，统一拼接
+    # (历史上对 openrouter 误用 url=base 不拼，导致 POST /api/v1 → 404)。
+    url = base + "/v1/systemone"
     if timeout is None:
         try:
             timeout = float(os.environ.get("VITUAL_DECISION_TIMEOUT", "3"))
@@ -41,7 +43,11 @@ def decision_call(body, timeout=None, retries=None, recorder=None):
     if retries is None:
         retries = 2 if is_or else 0
     body = dict(body)
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json",
+               # OpenRouter 经 Cloudflare：非浏览器 UA 会被 1010 指纹封禁(403)，故带浏览器 UA。
+               "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                             "AppleWebKit/537.36 (KHTML, like Gecko) "
+                             "Chrome/120.0.0.0 Safari/537.36"}
     if is_or:
         body["model"] = os.environ.get("VITUAL_DECISION_MODEL", "typesafe/jev-1.13")
         key = os.environ.get("OPENROUTER_API_KEY")

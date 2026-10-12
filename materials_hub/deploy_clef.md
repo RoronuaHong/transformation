@@ -39,7 +39,7 @@ $env:VITUAL_DECISION_URL = "http://127.0.0.1:8911"   # 不含 openrouter.ai 即�
 ### B. 云端 OpenRouter（零本地显存，延迟高）
 
 ```powershell
-$env:VITUAL_DECISION_URL = "https://openrouter.ai/api/v1"   # 含 openrouter.ai 即走云端
+$env:VITUAL_DECISION_URL = "https://openrouter.ai/api"   # 含 openrouter.ai 即走云端;客户端自动拼 /v1/systemone(勿带 /v1,否则双拼 404)
 $env:VITUAL_DECISION_MODEL = "typesafe/jev-1.13"
 $env:OPENROUTER_API_KEY = "sk-or-v1-..."
 ```
