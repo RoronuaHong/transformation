@@ -2716,6 +2716,22 @@ QUERY_SYNONYMS = {
     #      匹配)压过 description 含 Lama 的真答案(Lama 查询 P@5 0.20 的根因)。
 }
 
+# 缩写/简称归一(查询理解层,数据驱动:只收语料真实 token + 明确概念缩写)。
+# 与 QUERY_SYNONYMS 分工:后者中文→英文语料同义词;本表专补"英文缩写/中文简称"缺口
+# (原 expand_query 对纯英文查询原样返回,4K/语音识别/文字识别 等无法归一)。
+# 多语查询由上层 _maybe_translate 译中后再进 expand_query,不在此写死多语表(避免又一张封闭业务表)。
+QUERY_ABBREV = {
+    # 画质/超分(语料 upscale/esrgan/deblur)
+    "4k": ["upscale", "esrgan"], "8k": ["upscale", "esrgan"],
+    "超清": ["upscale", "esrgan"], "超分辨率": ["upscale", "esrgan", "super resolution"],
+    # 语音/文字识别(语料 asr/ocr/transcribe/subs)
+    "语音识别": ["asr", "transcribe", "subs"], "文字识别": ["ocr"],
+    # 硬件(语料 gpu)
+    "gpu": ["gpu"],
+    # 软件界面/帧率(语料 ui/frames/frame)
+    "界面": ["ui", "interface"], "帧率": ["fps", "frames", "frame"],
+}
+
 # 「泛化词」:命中面太宽,只在查询里没有更具体概念时才展开。
 # 实测边界:只收**媒体类型词**(video/mp4/png/jpg…会匹配几百个文件名,
 # 纯稀释);而 对比→cmp/compare、结果→out/final 是**答案型词**(compare10s/final_*
@@ -2725,9 +2741,31 @@ QUERY_SYNONYMS = {
 _WEAK_SYNONYMS = {"视频", "图片", "状态"}
 
 
+_ABBREV_RE = {}
+
+
+def _abbrev_expand(q):
+    """缩写/简称归一:英文缩写按词边界匹配(防 said 误中 ai),中文简称按子串。
+    返回需追加词列表(与 QUERY_SYNONYMS 去重后由 expand_query 追加)。"""
+    ql = (q or "").lower()
+    add = []
+    for ab, ens in QUERY_ABBREV.items():
+        if ab.isascii():
+            pat = _ABBREV_RE.get(ab)
+            if pat is None:
+                pat = re.compile(r"(?<![a-z0-9])" + re.escape(ab.lower()) + r"(?![a-z0-9])")
+                _ABBREV_RE[ab] = pat
+            if pat.search(ql):
+                add.extend(ens)
+        elif ab in q:
+            add.extend(ens)
+    return add
+
+
 def expand_query(q):
-    """中文问句 → 追加语料里的英文对应词汇(纯英文查询原样返回)。
-    只做「加词」不做「改词」,原有命中只会更靠前,不会消失。
+    """中文问句/英文缩写 → 追加语料英文对应词(只加词不改词,原有命中只会更靠前)。
+    两层归一:① 缩写/简称(QUERY_ABBREV,词边界,补 4K/语音识别/文字识别 等原"纯英文原样
+    返回"缺口);② 中文同义词(QUERY_SYNONYMS)。多语查询由上层 _maybe_translate 译中后再进本函数。
 
     泛化词(_WEAK_SYNONYMS,如 对比/视频/图片)只在查询里**没有更具体概念**时才展开:
     「显卡对比」→ 只加 gpu;单独问「视频」→ 仍展开 video/mp4。"""
@@ -2738,14 +2776,15 @@ def expand_query(q):
         if zh in q:
             (weak if zh in _WEAK_SYNONYMS else strong).extend(ens)
     extra = strong or weak
-    if not extra:
+    add = _abbrev_expand(q) + list(extra)
+    if not add:
         return q
-    seen, add = set(), []
-    for w in extra:
+    seen, out = set(), []
+    for w in add:
         if w not in seen:
             seen.add(w)
-            add.append(w)
-    return q + " " + " ".join(add)
+            out.append(w)
+    return q + " " + " ".join(out)
 
 
 def distinct_tags():
