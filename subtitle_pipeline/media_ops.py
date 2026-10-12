@@ -2161,7 +2161,11 @@ def strip_hardsubs(
             box = cleanup.get("box") or box
             action = str(cleanup.get("action") or "multipass_cleanup")
         except Exception as exc:
+            import traceback
+
             print(f"[dehardsub] multipass failed ({exc}); falling back to single inpaint")
+            # Errno 22 这类瞬时故障不打印 traceback 就永远查不到根因。
+            traceback.print_exc()
             located = resolve_hardsub_box(
                 src,
                 width,

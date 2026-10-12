@@ -59,8 +59,14 @@ def get_role_config(role: str) -> RoleConfig:
             api_key_env=cfg.api_key_env,
             temperature=cfg.temperature,
             prefer_anthropic=cfg.prefer_anthropic,
+            fallback=cfg.fallback,
         )
     return cfg
+
+
+def get_role_chain(role: str) -> list[RoleConfig]:
+    """Ordered provider chain for a role: primary first, then fallbacks."""
+    return [get_role_config(role)] + list(get_role_config(role).fallback)
 
 
 def build_client(
@@ -146,8 +152,23 @@ def complete(
     timeout: int = 300,
     model: str | None = None,
 ) -> str:
-    client = get_client(role, model=model)
-    return client.complete(prompt, timeout=timeout)
+    chain = get_role_chain(role)
+    last_err: Exception | None = None
+    for idx, cfg in enumerate(chain):
+        try:
+            client = build_client(cfg)
+            return client.complete(prompt, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 — fallback across providers
+            last_err = exc
+            tag = f"primary[{idx}]" if idx == 0 else f"fallback[{idx}]"
+            print(
+                f"[llm] {role} {tag} {cfg.provider}:{cfg.model} failed: {exc}; "
+                f"{'trying next' if idx < len(chain) - 1 else 'no more fallbacks'}"
+            )
+            continue
+    if last_err:
+        raise last_err
+    raise RuntimeError(f"no providers configured for role {role!r}")
 
 
 def active_profile() -> str:

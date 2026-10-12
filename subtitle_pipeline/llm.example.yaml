@@ -14,6 +14,13 @@
 #   Singapore: https://tokenhub-intl.tencentcloudmaas.com
 #   US:        https://tokenhub-us.tencentcloudmaas.com
 
+# ── OpenRouter（免费模型，OpenAI 兼容）──
+#   控制台 https://openrouter.ai/workspaces/default/keys 创建 key，得到 sk-or-... 填到 OPENROUTER_API_KEY
+#   免费模型列表公开：GET https://openrouter.ai/api/v1/models （pricing.prompt/completion == "0"）
+#   接入端点：https://openrouter.ai/api/v1 （Bearer 鉴权；可附带 HTTP-Referer / X-Title 头，可选）
+# OPENROUTER_API_KEY=sk-or-xxxxxxxx
+# OPENROUTER_MODEL=<免费模型 id，如 nvidia/nemotron-3.5-lightning:free>
+
 profile: local
 
 profiles:
@@ -82,3 +89,49 @@ profiles:
       provider: ollama
       model: translategemma:4b
       base_url: http://127.0.0.1:11434
+
+  # 兜底链：本地(免费/离线) → OpenRouter 免费(多模型顺延) → 腾讯 TokenHub(付费,最后兜底)
+  # 任一失败自动顺延下家；全部失败才抛错。切换：set VITUAL_LLM_PROFILE=openrouter_chain
+  openrouter_chain:
+    chat:
+      provider: ollama
+      model: gemma4:e2b
+      base_url: http://127.0.0.1:11434
+      fallback:
+        - provider: openai_compat
+          model: ${OPENROUTER_MODEL}                       # 首选(默认 nvidia/nemotron-3.5-lightning:free，可在 .env 覆盖)
+          base_url: https://openrouter.ai/api/v1
+          api_key_env: OPENROUTER_API_KEY                    # sk-or-...
+        - provider: openai_compat
+          model: nvidia/nemotron-3-super-120b-a12b:free      # 实测 5/5, avg 10.3s(最快)
+          base_url: https://openrouter.ai/api/v1
+          api_key_env: OPENROUTER_API_KEY
+        - provider: openai_compat
+          model: nvidia/nemotron-3-ultra-550b-a55b:free     # 实测 5/5, avg 12.3s
+          base_url: https://openrouter.ai/api/v1
+          api_key_env: OPENROUTER_API_KEY
+        - provider: tokenhub
+          model: hy3                                         # 付费,作为最后兜底
+          base_url: ${ANTHROPIC_BASE_URL}
+          api_key_env: ANTHROPIC_AUTH_TOKEN
+    translate:
+      provider: ollama
+      model: translategemma:4b
+      base_url: http://127.0.0.1:11434
+      fallback:
+        - provider: openai_compat
+          model: ${OPENROUTER_MODEL}
+          base_url: https://openrouter.ai/api/v1
+          api_key_env: OPENROUTER_API_KEY
+        - provider: openai_compat
+          model: nvidia/nemotron-3-super-120b-a12b:free
+          base_url: https://openrouter.ai/api/v1
+          api_key_env: OPENROUTER_API_KEY
+        - provider: openai_compat
+          model: nvidia/nemotron-3-ultra-550b-a55b:free
+          base_url: https://openrouter.ai/api/v1
+          api_key_env: OPENROUTER_API_KEY
+        - provider: tokenhub
+          model: hy3
+          base_url: ${ANTHROPIC_BASE_URL}
+          api_key_env: ANTHROPIC_AUTH_TOKEN

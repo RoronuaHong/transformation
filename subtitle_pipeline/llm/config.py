@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +21,7 @@ class RoleConfig:
     api_key_env: str | None = None
     temperature: float = 0.2
     prefer_anthropic: bool = False
+    fallback: list["RoleConfig"] = field(default_factory=list)
 
     def resolve_api_key(self) -> str | None:
         envs: list[str] = []
@@ -99,13 +100,20 @@ def _builtin_local() -> dict[str, Any]:
 
 def parse_role(raw: dict[str, Any] | None, *, fallback_model: str) -> RoleConfig:
     raw = raw or {}
+    fb_raw = raw.get("fallback") or []
+    fallback = (
+        [parse_role(f, fallback_model=fallback_model) for f in fb_raw]
+        if isinstance(fb_raw, list)
+        else []
+    )
     return RoleConfig(
         provider=str(raw.get("provider") or "ollama").strip().lower(),
-        model=str(raw.get("model") or fallback_model),
+        model=_expand_env(str(raw.get("model") or fallback_model)),
         base_url=(str(raw["base_url"]) if raw.get("base_url") else None),
         api_key_env=(str(raw["api_key_env"]) if raw.get("api_key_env") else None),
         temperature=float(raw.get("temperature") if raw.get("temperature") is not None else 0.2),
         prefer_anthropic=bool(raw.get("prefer_anthropic") or False),
+        fallback=fallback,
     )
 
 
