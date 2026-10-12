@@ -78,3 +78,30 @@ print(core.decision_stats())
 
 `ok_rate` 低说明后端不稳（查 GPU 抢占/云端 5xx）；`other_rate` 高说明大量查询被归入
 other（模糊/中文弱），可考虑抬高门槛或保持规则。
+
+## 生产投入启用（smoke 已验证 2026-10-12）
+
+设 `VITUAL_DECISION_URL` 后**自动启用**（无需改代码，`decision_endpoint()` 非空即工作）：
+- **P1-1 标签仲裁**（build_auto_tags 入库时）、**P1-2 KB 引用核查**（kb `/ask`）、
+  **P2-2 agent 风险排序**（mcp `t_agent_run`）——设 URL 即投。
+- **P0-2 意图识别**：默认纯规则；要投需额外 `VITUAL_DECISION_INTENT_HOT=1`（会把 Jev
+  挂到检索热路径，**每次 +1.7s(本地)/+5-12s(云端)**，交互式慎用）。
+
+OpenRouter 一键启用（服务启动前）：
+```powershell
+$env:VITUAL_DECISION_URL = "https://openrouter.ai/api"   # 客户端自动拼 /v1/systemone
+$env:VITUAL_DECISION_MODEL = "typesafe/jev-1.13"
+$env:OPENROUTER_API_KEY = "sk-or-v1-..."
+# 投 P1-1/P1-2/P2-2 到此即生效；如需 P0-2 热路径再加：$env:VITUAL_DECISION_INTENT_HOT = "1"
+```
+
+smoke 实测（OpenRouter，4 环节均返回真实决策）：
+- P0-2 意图："找个做菜的视频" → text(prob 1.0)
+- P1-1 仲裁：素材匹配「鸡翅」→ noul 0.98
+- P1-2 引用：回答 vs 资料 → noul（中文偏低，见下）
+- P2-2 风险："删除所有素材" → score 3 / conf 1.0（高危精准）
+
+**中文注意**：Jev 对 CJK 支撑判定偏保守（实测中文引用 noul 0.31，易触发降级）——P1-2 在
+中文库可能过度降级；如误降级多，下调 `VITUAL_DECISION_MIN_CONF`（默认 0.6）或对中文查询
+保持 P1-2 观察。延迟：本地 Clef ~1.7s / 云端 5-12s，**只投离线/异步/后处理环节**，
+勿挂交互式同步（P0-2 热路径）。
