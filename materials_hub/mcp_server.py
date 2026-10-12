@@ -610,7 +610,7 @@ HANDLERS = {"search_materials": t_search, "get_material": t_get,
 # __PART2__
 _SCHEMA_OBJ = {"type": "object", "properties": {
     "q": {"type": "string", "description": "关键词或中文自然语言问句"},
-    "kind": {"type": "string", "enum": ["images", "videos", "silent", "docs", "audio", "subs", "anim", "other"]},
+    "kind": {"type": "string", "enum": ["images", "videos", "silent", "docs", "audio", "subs", "anim", "raw", "project", "vector", "model3d", "font", "other"]},
     "tag": {"type": "string"},
     "mode": {"type": "string", "enum": ["auto", "lexical", "semantic"]},
     "limit": {"type": "integer"}}}
@@ -694,7 +694,7 @@ TOOLS = [
     {"name": "assemble_package", "description": "只读:把高层目标落成可交付素材包(多智能体编排 Librarian 拆解检索→Critic 核验→Executor 写 manifest JSON 到 agent_workspace/packages/;绝不改动资产)。用于「组装一个混剪素材包/打包分发素材」等。",
      "inputSchema": {"type": "object", "properties": {
         "goal": {"type": "string", "description": "高层目标/自然语言(中文)"},
-        "kind": {"type": "string", "enum": ["images", "videos", "silent", "docs", "audio", "subs", "anim", "other"]},
+        "kind": {"type": "string", "enum": ["images", "videos", "silent", "docs", "audio", "subs", "anim", "raw", "project", "vector", "model3d", "font", "other"]},
         "scope": {"type": "string", "enum": ["all", "master", "clips"]},
         "limit": {"type": "integer"},
         "queries": {"type": "array", "items": {"type": "string"}}},

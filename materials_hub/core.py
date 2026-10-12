@@ -89,6 +89,13 @@ KINDS = {
              ".csv", ".json", ".yaml", ".yml", ".html", ".epub", ".rtf"},
     "audio": {".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac"},  # 纯音轨
     "subs": {".srt", ".ass", ".ssa", ".vtt", ".sub", ".sbv"},
+    # ── 素材中心完整分类(对齐 shutterstock/envato:图/视频/音/动画/矢量/3D/模板/字体/原片)──
+    # 以下为非影视内容类素材:仅登记 + name/tags 检索,不做 VLM 画面描述(不进 VISUAL_KINDS)。
+    "raw": {".raw", ".cr2", ".cr3", ".nef", ".arw", ".dng", ".orf", ".rw2", ".pef", ".srw", ".x3f"},  # 相机原片
+    "project": {".aep", ".prproj", ".psd", ".psb", ".mogrt", ".fcpxml", ".drp", ".sesx"},             # 工程/模板
+    "vector": {".ai", ".eps", ".cdr", ".emf", ".wmf"},                                                # 矢量(svg 归 images)
+    "model3d": {".glb", ".gltf", ".obj", ".fbx", ".blend", ".dae", ".3ds", ".stl", ".ply"},           # 三维模型
+    "font": {".ttf", ".otf", ".woff", ".woff2", ".eot"},                                              # 字体
 }
 
 

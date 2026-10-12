@@ -662,7 +662,8 @@ def _observe(state, ws, obj):
 
 
 # ---------------------------------------------------------------- 工具表(支柱 3/4)
-_VALID_KINDS = {"images", "videos", "silent", "docs", "audio", "subs", "anim", "other"}
+_VALID_KINDS = {"images", "videos", "silent", "docs", "audio", "subs", "anim",
+                "raw", "project", "vector", "model3d", "font", "other"}
 
 
 def _tool_search(a):
@@ -691,7 +692,7 @@ def _tool_search(a):
                             % (kind or "-", tag or "-", note)}
     if rows:
         return rows
-    extra = (";注意 kind=%s 不是合法值(合法:images/videos/silent/docs/audio/subs/anim/other)"
+    extra = (";注意 kind=%s 不是合法值(合法:images/videos/silent/docs/audio/subs/anim/raw/project/vector/model3d/font/other)"
              % bad_kind) if bad_kind else ""
     return {"results": [], "count": 0,
             "hint": "0 hits。请换更短的关键词重试:素材文件名片段(如 BV 号)、"
