@@ -294,6 +294,11 @@ export type HubCopy = {
   kindAudio: string;
   kindSubs: string;
   kindAnim: string;
+  kindRaw: string;
+  kindProject: string;
+  kindVector: string;
+  kindModel3d: string;
+  kindFont: string;
   kindOther: string;
   upload: string;
   refresh: string;
@@ -696,6 +701,11 @@ const en: UiCopy = {
     kindAudio: "Audio tracks",
     kindSubs: "Captions",
     kindAnim: "GIFs",
+    kindRaw: "Camera RAW",
+    kindProject: "Projects",
+    kindVector: "Vectors",
+    kindModel3d: "3D",
+    kindFont: "Fonts",
     kindOther: "Other",
     upload: "Upload",
     refresh: "Refresh",
@@ -1088,6 +1098,11 @@ const zh: UiCopy = {
     kindAudio: "音轨",
     kindSubs: "字幕",
     kindAnim: "动图",
+    kindRaw: "原片",
+    kindProject: "工程",
+    kindVector: "矢量",
+    kindModel3d: "三维",
+    kindFont: "字体",
     kindOther: "其他",
     upload: "上传",
     refresh: "刷新",
@@ -1317,6 +1332,11 @@ const zhHant: UiCopy = {
     kindSilent: "無聲",
     kindAudio: "音軌",
     kindAnim: "動圖",
+    kindRaw: "原片",
+    kindProject: "工程",
+    kindVector: "向量",
+    kindModel3d: "三維",
+    kindFont: "字型",
     kindOther: "其他",
     upload: "上傳",
     refresh: "重新整理",

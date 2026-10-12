@@ -37,6 +37,11 @@ const KINDS = [
   "audio",
   "subs",
   "anim",
+  "raw",
+  "project",
+  "vector",
+  "model3d",
+  "font",
   "other",
 ] as const;
 
@@ -50,6 +55,11 @@ const KIND_LABEL: Record<string, keyof HubCopy> = {
   audio: "kindAudio",
   subs: "kindSubs",
   anim: "kindAnim",
+  raw: "kindRaw",
+  project: "kindProject",
+  vector: "kindVector",
+  model3d: "kindModel3d",
+  font: "kindFont",
   other: "kindOther",
 };
 
