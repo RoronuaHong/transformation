@@ -459,8 +459,12 @@ def t_agent_run(a):
 
     threading.Thread(target=_run, daemon=True).start()
     risk = decision_risk_score(task) if os.environ.get("VITUAL_DECISION_URL", "").strip() else None
-    resp = {"status": "running", "task_id": task_id,
-            "hint": "长任务已在后台启动(约 1-3 分钟),用 agent_status 查询进度与结果"}
+    hint = "长任务已在后台启动(约 1-3 分钟),用 agent_status 查询进度与结果"
+    if risk is not None and risk.get("uncertain"):
+        conf = risk.get("confidence")
+        hint += " ⚠️ Jev 对该操作风险不确定(conf=%s),建议人工复核后再放行。" % (
+            "%.2f" % conf if conf is not None else "未知")
+    resp = {"status": "running", "task_id": task_id, "hint": hint}
     if risk is not None:
         resp["risk"] = risk
     return resp

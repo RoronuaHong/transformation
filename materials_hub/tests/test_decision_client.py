@@ -85,6 +85,20 @@ def test_recorder_called():
     assert calls and calls[0][0] is False
 
 
+def test_batch_noul_truncates_state():
+    """P1-1 批量仲裁同样需截断 state，防长素材描述/多标签腐烂（对齐 Jev 长上下文禁忌）。"""
+    import core
+    long = "素材描述:" + "y" * 5000
+    cap = {}
+    with mock.patch.object(
+        core, "decision_call",
+        side_effect=lambda b, **k: (cap.update(b), {"a0": {"noul": 0.9}})[1]
+    ):
+        res = core.decision_batch_noul({"a0": ("是否匹配标签X?", "相符", "不符")}, long)
+    assert res == {"a0": 0.9}
+    assert len(cap["state"]) <= 2100
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))

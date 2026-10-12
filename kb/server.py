@@ -198,10 +198,15 @@ def ask(q: Query):
         except ValueError:
             thr = 0.6
         if supported < thr:
-            notice = "⚠️ 回答未被检索资料充分支撑，已降级为仅返回原始资料：\n\n"
+            try:
+                max_src = int(os.environ.get("VITUAL_DECISION_MAX_SRC", "5"))
+            except ValueError:
+                max_src = 5
+            disp = ctx[:max_src]
+            notice = "⚠️ 回答未被检索资料充分支撑，已降级为仅返回原始资料（前 %d 条）：\n\n" % max_src
             answer = notice + "\n\n".join(
                 "[来源 %d] %s（%s）\n%s" % (i + 1, c["label"], c["source"], c["text"])
-                for i, c in enumerate(ctx)
+                for i, c in enumerate(disp)
             )
     return {
         "answer": answer,

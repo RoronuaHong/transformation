@@ -1272,7 +1272,8 @@ def decision_batch_noul(questions, state, timeout=None):
             "instructions": instr,
             "criteria": {"true": tc or "命题成立", "false": fc or "命题不成立"},
         }
-    body = {"state": state, "questions": q}
+    from decision_client import truncate_state as _trunc
+    body = {"state": _trunc(state), "questions": q}
     ans = decision_call(body, timeout=timeout)
     if not ans:
         return {}
