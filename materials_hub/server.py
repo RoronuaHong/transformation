@@ -311,6 +311,14 @@ class Handler(BaseHTTPRequestHandler):
                 "silent": mt or "video/*",
                 "anim": mt or "image/gif",
                 "audio": mt or "audio/*",
+                "font": mt or "font/ttf",
+                "model3d": mt or "model/gltf-binary",
+                "raw": mt or "application/octet-stream",
+                "project": mt or "application/octet-stream",
+                "vector": mt or "application/octet-stream",
+                "docs": "application/octet-stream",
+                "subs": "application/octet-stream",
+                "other": "application/octet-stream",
             }.get(m["kind"], mt or "application/octet-stream")
             return self._serve_file(fp, ctype, head_only=True)
         if p.startswith("/api/thumb/"):
@@ -566,6 +574,11 @@ class Handler(BaseHTTPRequestHandler):
                 "silent": mt or "video/*",
                 "anim": mt or "image/gif",
                 "audio": mt or "audio/*",
+                "font": mt or "font/ttf",
+                "model3d": mt or "model/gltf-binary",
+                "raw": mt or "application/octet-stream",
+                "project": mt or "application/octet-stream",
+                "vector": mt or "application/octet-stream",
                 "docs": "application/octet-stream",
                 "subs": "application/octet-stream",
                 "other": "application/octet-stream",

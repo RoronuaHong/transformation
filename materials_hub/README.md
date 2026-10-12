@@ -76,7 +76,8 @@ sp | <platform> | job:<id> | type:<media|clip|subs|notes|benchmark|render|test>
 5. 找片段默认 `role:master` + `get_shots`;不要把每个镜头拆成独立入库视频。
 
 ### 分类(kind)与扩展名
-`images` · `videos` · **`silent`(无声音轨的画面)** · `docs` · `audio` · **`subs`(srt/ass/vtt/ssa/sub/sbv)** · `anim` · `other`。
+`images` · `videos` · **`silent`(无声音轨的画面)** · `docs` · `audio` · **`subs`(srt/ass/vtt/ssa/sub/sbv)** · `anim` · **`raw`(相机原片)** · **`project`(工程/模板)** · **`vector`(矢量)** · **`model3d`(三维)** · **`font`(字体)** · `other`。
+(raw/project/vector/model3d/font 为 2026-10-12 补的素材中心完整分类,对齐 shutterstock/envato;仅登记 + name/tags 检索,不做 VLM 画面描述)
 (当前 127 条:docs 73 / silent 16 / subs 19 / audio 8 / videos 5 / images 4 / anim 1 / other 1;2026-10-09 移除 256 条流水线 QA 渲染产物 + 2 条上传测试垃圾)
 
 ### 检索打分(词法层)
