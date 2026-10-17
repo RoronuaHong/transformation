@@ -99,6 +99,240 @@ KINDS = {
 }
 
 
+# ---------- 内容形式分类体系(多层级树,主轴) ----------
+# 对齐影视/短视频/动画行业最佳实践(B站 60+ 子分区纯树、动画风格六类、AI 视频 42 风格):
+# 按「制作方式 / 内容形式」分,而非文件媒体类型(图片/视频…)。
+# 结构:一级分组(L1)→ 二级子类(L2,可选)→ 三级叶子(leaf id 存素材)。
+#   值可以是 字符串(叶子 label) 或 字典(继续下钻)。例:
+#     "live": { "live_talk": { "live_talk_solo": "单人口播", ... }, "live_interview": "采访" }
+#   叶子归档素材;中间节点(如 live_talk)亦可作「未细分」归类值。
+# 素材存最细 leaf(form 字段);上层分组由树推导。交叉维度(题材/用途)用独立多选标签,见 TOPICS/USAGES。
+# 主轴 = 内容形式 / 制作方式(每个素材唯一归属一个 leaf,符合 DAM 互斥原则)。
+# 维度边界(避免与题材/用途/技术重叠、避免双计数):
+#   · 实拍底                → live
+#   · 手绘 / 软件 2D        → anim2d
+#   · 渲染 3D(非动漫风格)   → anim3d
+#   · 动漫(日式/二次元风格,跨 2D/3D) → anime
+#   · 定格                  → stop
+#   · 纯 AI 模型生成(跨风格)→ ai
+#   · 实拍/手绘/渲染中「用 AI 辅助」的,仍归其形式类(AI 是技术手段,不重复建类)
+#   · 动漫是「风格」维度,与制作方式并存(行业惯例);边界:动漫=日式/二次元角色风格,
+#     anim3d 的卡通3D 若非动漫角色(如产品演示)归 anim3d,动漫角色 3D 归 anime_3d
+FORM_TAXONOMY = {
+    "live": {                       # 真人实拍
+        "live_talk": {              # 口播/解说
+            "live_talk_solo": "单人口播",
+            "live_talk_dialogue": "对话/双人",
+            "live_vo": "画外音/旁白",
+        },
+        "live_vlog": {              # 生活记录
+            "live_vlog_vlog": "Vlog/生活记录",
+            "live_daily": "日常片段",
+        },
+        "live_interview": "采访/访谈",
+        "live_story": {             # 剧情/故事
+            "live_story_clip": "剧情片段",
+            "live_sitcom": "情景剧/短剧",
+        },
+        "live_broll": {             # 空镜/B-roll
+            "live_broll_nature": "自然风光",
+            "live_broll_city": "城市街景",
+            "live_broll_industry": "工业科技",
+            "live_broll_weather": "天气时段",
+        },
+        "live_fx": "实拍特效/绿幕/合成素材",
+        "live_ai": "真人+AI(换脸/修复/扩图)",   # 实拍底 + AI 后期
+    },
+    "anim2d": {                     # 2D 动画
+        "flat2d": "扁平/极简",
+        "mg2d": {                   # 动态图形MG
+            "mg2d_title": "片头/转场",
+            "mg2d_data": "数据/图表",
+        },
+        "hand2d": "手绘/原画",
+        "comic2d": "条漫/插画/信息图",
+    },
+    "anim3d": {                     # 3D 动画(非动漫风格)
+        "cgi3d": "写实CGI/渲染",
+        "toon3d": "风格化/卡通3D(非动漫)",
+        "product3d": {              # 产品/工业
+            "product3d_show": "产品演示",
+            "product3d_arch": "建筑/室内",
+        },
+        "vfx3d": "粒子/流体/特效",
+    },
+    "anime": {                      # 动漫(日式/二次元风格,跨 2D/3D)
+        "anime_jp": "日式2D动漫",
+        "anime_cn": "国漫/中式动漫",
+        "anime_3d": "3D动漫(角色)",
+        "anime_manga": "漫画/插画风",
+    },
+    "ai": {                         # AI 生成(模型原生生成,跨风格)
+        "ai_txt2vid": "文生/图生视频",
+        "ai_img": "AI绘画/图像",
+        "ai_digital": "AI数字人/虚拟人",
+        "ai_scene": "AI场景/特效/材质",
+        "ai_anime": "AI动漫/漫剧",
+    },
+    "stop": {                       # 定格动画
+        "stop_clay": "粘土/木偶",
+        "stop_obj": "实物/剪纸/像素",
+    },
+    "other": {"other": "其他"},
+}
+FORM_GROUP_LABELS = {
+    "live": "真人实拍", "anim2d": "2D 动画", "anim3d": "3D 动画",
+    "anime": "动漫", "ai": "AI 生成", "stop": "定格动画", "other": "其他",
+}
+FORM_GROUP_LABELS_EN = {
+    "live": "Live Action", "anim2d": "2D Animation", "anim3d": "3D Animation",
+    "anime": "Anime", "ai": "AI Generated", "stop": "Stop Motion", "other": "Other",
+}
+# 二级子类展示名(中间节点无独立 label,用此表;叶子用其字符串值)
+FORM_SUBGROUP_LABELS = {
+    "live_talk": "口播/解说",
+    "live_vlog": "生活记录",
+    "live_story": "剧情/故事",
+    "live_broll": "空镜/B-roll",
+    "mg2d": "动态图形MG",
+    "product3d": "产品/工业",
+}
+FORM_SUBGROUP_LABELS_EN = {
+    "live_talk": "Talk / Commentary",
+    "live_vlog": "Vlog / Life",
+    "live_story": "Drama / Story",
+    "live_broll": "B-roll / Establishing",
+    "mg2d": "Motion Graphics",
+    "product3d": "Product / Industrial",
+}
+# 叶子展示名英文(叶子 label 存在 FORM_TAXONOMY 的值里,此处仅补英文)
+FORM_LEAF_LABELS_EN = {
+    "live_talk_solo": "Solo Talking Head", "live_talk_dialogue": "Dialogue / Two-person",
+    "live_vo": "Voice-over / Narration", "live_vlog_vlog": "Vlog / Lifestyle",
+    "live_daily": "Daily Moments", "live_interview": "Interview",
+    "live_story_clip": "Drama Clip", "live_sitcom": "Sitcom / Short Drama",
+    "live_broll_nature": "Nature Scenery", "live_broll_city": "City Streets",
+    "live_broll_industry": "Industry / Tech", "live_broll_weather": "Weather / Time of Day",
+    "live_fx": "Live VFX / Green Screen / Composite",
+    "live_ai": "Live + AI (Face Swap / Restore / Outpaint)",
+    "flat2d": "Flat / Minimalist", "mg2d_title": "Title / Transition",
+    "mg2d_data": "Data / Charts", "hand2d": "Hand-drawn / Original Art",
+    "comic2d": "Comic / Illustration / Infographic",
+    "cgi3d": "Photoreal CGI / Render",
+    "toon3d": "Stylized / Toon 3D (non-anime)",
+    "product3d_show": "Product Demo", "product3d_arch": "Architecture / Interior",
+    "vfx3d": "Particles / Fluid / VFX",
+    "anime_jp": "Japanese 2D Anime", "anime_cn": "Chinese Anime / Donghua",
+    "anime_3d": "3D Anime (Character)", "anime_manga": "Manga / Illustration Style",
+    "ai_txt2vid": "Text/Image-to-Video", "ai_img": "AI Painting / Image",
+    "ai_digital": "AI Digital Human / Virtual Human",
+    "ai_scene": "AI Scene / Effects / Material", "ai_anime": "AI Anime / Comic Drama",
+    "stop_clay": "Clay / Puppet", "stop_obj": "Object / Paper-cut / Pixel",
+    "other": "Other",
+}
+
+
+def _iter_form_leaves(node):
+    """递归产出 (leaf_id, label)。"""
+    for k, v in node.items():
+        if isinstance(v, dict):
+            yield from _iter_form_leaves(v)
+        else:
+            yield (k, v)
+
+
+ALL_FORMS = [lid for _g in FORM_TAXONOMY.values() for lid, _ in _iter_form_leaves(_g)]
+
+
+def form_group(form_id):
+    """给定 leaf id 返回其一级分组(用于统计);无效/未归类返回 'other'。"""
+    for g, node in FORM_TAXONOMY.items():
+        if any(lid == form_id for lid, _ in _iter_form_leaves(node)):
+            return g
+    return "other"
+
+
+def _collect_form_ids(node):
+    """子树内所有可作为 form 的节点 id(含中间节点与叶子)。"""
+    ids = []
+    for nid, val in node.items():
+        ids.append(nid)
+        if isinstance(val, dict):
+            ids.extend(_collect_form_ids(val))
+    return ids
+
+
+# node id → 其子树全部 id(含自身);前端「选父即选全部后代」筛选匹配用
+FORM_DESCENDANTS: dict[str, list[str]] = {}
+for _g, _node in FORM_TAXONOMY.items():
+    FORM_DESCENDANTS[_g] = [_g] + _collect_form_ids(_node)
+    for _nid, _val in _node.items():
+        if isinstance(_val, dict):
+            FORM_DESCENDANTS[_nid] = [_nid] + _collect_form_ids(_val)
+
+
+# 上传表单用:扁平 [id, "L1 › L2 › L3"] 选项(中间节点可作未细分归类值);中英文各一份
+FORM_OPTIONS: list[tuple[str, str]] = []
+FORM_OPTIONS_EN: list[tuple[str, str]] = []
+def _build_form_options(node, path_zh, path_en):
+    for _nid, _val in node.items():
+        if isinstance(_val, dict):
+            _sub_zh = FORM_SUBGROUP_LABELS.get(_nid, _nid)
+            _sub_en = FORM_SUBGROUP_LABELS_EN.get(_nid, _sub_zh)
+            FORM_OPTIONS.append((_nid, " › ".join(path_zh + [_sub_zh])))
+            FORM_OPTIONS_EN.append((_nid, " › ".join(path_en + [_sub_en])))
+            _build_form_options(_val, path_zh + [_sub_zh], path_en + [_sub_en])
+        else:
+            FORM_OPTIONS.append((_nid, " › ".join(path_zh + [_val])))
+            FORM_OPTIONS_EN.append((_nid, " › ".join(path_en + [FORM_LEAF_LABELS_EN.get(_nid, _val)])))
+
+
+for _g, _node in FORM_TAXONOMY.items():
+    _gl = FORM_GROUP_LABELS.get(_g, _g)
+    _gle = FORM_GROUP_LABELS_EN.get(_g, _gl)
+    _build_form_options(_node, [_gl], [_gle])
+
+# 防御:确保 form_options 的 id 唯一(组/叶子命名空间冲突会在导入期立即暴露)
+assert len({_i for _i, _ in FORM_OPTIONS}) == len(FORM_OPTIONS), \
+    "FORM_TAXONOMY 存在重复 id(组与叶子命名冲突),请检查"
+# 防御:每个叶子都要有英文标签(否则英文模式会漏成中文,破坏多语言一致性)
+_missing_leaf_en = [lid for lid in ALL_FORMS if lid not in FORM_LEAF_LABELS_EN]
+assert not _missing_leaf_en, \
+    f"以下 form 叶子缺英文标签(FORM_LEAF_LABELS_EN): {_missing_leaf_en}"
+
+
+# 题材(多选标签,独立于形式树;短视频三层结构的「底层标签」)
+TOPICS_EN = {"美食": "Food", "美妆": "Beauty", "穿搭": "Fashion", "剧情": "Drama",
+             "知识": "Knowledge", "搞笑": "Comedy", "游戏": "Gaming", "旅行": "Travel",
+             "萌宠": "Pets", "情感": "Emotion", "汽车": "Auto", "母婴": "Baby",
+             "运动": "Sports", "财经": "Finance", "教育": "Education", "科技": "Tech",
+             "音乐": "Music", "舞蹈": "Dance", "影视": "Film/TV", "二次元": "ACG"}
+
+# 题材结构化分组(避免扁平 20 项太杂;前端按「组 → 叶子」渲染并聚合计数)
+TOPIC_TAXONOMY = {
+    "生活方式": ["美食", "萌宠", "母婴", "情感"],
+    "时尚美妆": ["美妆", "穿搭"],
+    "知识教育": ["知识", "教育", "财经", "科技"],
+    "影视娱乐": ["影视", "搞笑", "音乐", "舞蹈"],
+    "游戏二次元": ["游戏", "二次元"],
+    "出行运动": ["旅行", "汽车", "运动"],
+    "剧情故事": ["剧情"],
+}
+TOPIC_GROUP_EN = {
+    "生活方式": "Lifestyle", "时尚美妆": "Style & Beauty", "知识教育": "Knowledge & Edu",
+    "影视娱乐": "Film & Entertainment", "游戏二次元": "Gaming & ACG",
+    "出行运动": "Travel & Sports", "剧情故事": "Story",
+}
+# 扁平 leaf 列表(统计/上传兼容):保持原有 20 项全集
+TOPICS = [t for _g, _leaves in TOPIC_TAXONOMY.items() for t in _leaves]
+TOPIC_DESCENDANTS = {_g: list(_leaves) for _g, _leaves in TOPIC_TAXONOMY.items()}
+# 用途(多选标签)
+USAGES = ["短视频", "短剧", "影视", "公司宣传", "广告", "课程", "直播", "纪录片"]
+USAGES_EN = {"短视频": "Short Video", "短剧": "Short Drama", "影视": "Film/TV",
+             "公司宣传": "Corporate", "广告": "Ad", "课程": "Course",
+             "直播": "Live", "纪录片": "Documentary"}
+
+
 def init_hub():
     """创建标准目录结构并初始化数据库。幂等。"""
     for d in [MATERIALS, INGEST, TRASH, INDEX_DIR, OCR_DIR, VISUAL_DIR, ASR_DIR, SHOT_DIR, PHASH_DIR, STATIC]:
@@ -119,7 +353,7 @@ def probe_has_audio(path, timeout=20):
     flags = 0x08000000 if os.name == "nt" else 0
     if exe:
         try:
-            p = subprocess.run(
+            p = _run_ffmpeg_safe(
                 [
                     exe, "-v", "error", "-select_streams", "a",
                     "-show_entries", "stream=codec_type",
@@ -141,7 +375,7 @@ def probe_has_audio(path, timeout=20):
     if not ff:
         return True
     try:
-        p = subprocess.run(
+        p = _run_ffmpeg_safe(
             [ff, "-i", path],
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             timeout=timeout, creationflags=flags,
@@ -661,7 +895,10 @@ def _init_db():
     )
     for col, ddl in [("location", "TEXT DEFAULT 'internal'"),
                      ("external_path", "TEXT DEFAULT ''"),
-                     ("ai_tags", "TEXT DEFAULT ''")]:
+                     ("ai_tags", "TEXT DEFAULT ''"),
+                     ("form", "TEXT DEFAULT ''"),       # 内容形式 leaf id(多层级树最细节点)
+                     ("topics", "TEXT DEFAULT ''"),     # 题材(多选标签,逗号分隔)
+                     ("usage", "TEXT DEFAULT ''")]:     # 用途(多选标签,逗号分隔)
         try:
             con.execute(f"ALTER TABLE materials ADD COLUMN {col} {ddl}")
         except sqlite3.OperationalError:
@@ -716,11 +953,18 @@ def get_history(limit=50, target_id=""):
 
 
 def add_material(**kw):
+    # form/topics/usage 为新增结构化分类列,默认空串——旧调用方(不带这三参数的 ingest/
+    # bridge/测试助手)必须继续可用,否则 INSERT 绑定参数缺失直接抛 ProgrammingError。
+    kw.setdefault("form", "")
+    kw.setdefault("topics", "")
+    kw.setdefault("usage", "")
     con = _con()
     con.execute(
         """INSERT OR REPLACE INTO materials
-           (id,kind,ext,name,rel_path,size,sha256,tags,description,source,orig_name,created_at)
-           VALUES(:id,:kind,:ext,:name,:rel_path,:size,:sha256,:tags,:description,:source,:orig_name,:created_at)""",
+           (id,kind,ext,name,rel_path,size,sha256,tags,description,source,orig_name,created_at,
+            form,topics,usage)
+           VALUES(:id,:kind,:ext,:name,:rel_path,:size,:sha256,:tags,:description,:source,:orig_name,:created_at,
+            :form,:topics,:usage)""",
         kw,
     )
     con.commit()
@@ -1139,8 +1383,12 @@ _DECISION_BIZ_CRITERIA = {
 
 
 def decision_endpoint():
-    """决策服务地址；未设 VITUAL_DECISION_URL 则完全关闭，退化为纯规则（零延迟）。"""
-    return os.environ.get("VITUAL_DECISION_URL", "").strip().rstrip("/")
+    """决策服务地址；env VITUAL_DECISION_URL > decision.conf > 空(关)。
+
+    委托 decision_client 单一路径解析（env 优先、decision.conf KEY=VALUE 回退，可热切换）。
+    """
+    from decision_client import _endpoint
+    return _endpoint()
 
 
 def decision_call(body, timeout=None, retries=None):
@@ -1859,6 +2107,23 @@ def rerank_status():
                 "dir": _rerank_dir()}
     return {"mode": "none", "available": False,
             "hint": "models/rerank 缺 model.onnx/model.onnx_data/tokenizer.json"}
+
+
+def _ollama_rerank_fallback_model():
+    """ONNX rerank 失败时回退用的 ollama cross-encoder 模型名；无则空(再退 RRF)。
+
+    优先 VITUAL_RERANK_FALLBACK 指定；否则探 ollama 已装的第一个 rerank 模型。
+    """
+    m = os.environ.get("VITUAL_RERANK_FALLBACK", "").strip()
+    if m:
+        return m
+    try:
+        for n in _ollama_model_names():
+            if "rerank" in n.lower():
+                return n
+    except Exception:
+        pass
+    return ""
 
 
 def _onnx_rerank(q, docs, timeout=600):
@@ -2602,6 +2867,10 @@ def semantic_rank(q, base_rows, lexical_rows=None):
             order = _lexical_rerank(q, docs, rerank_model)   # 内置离线弱基线,无需 ollama
         elif rerank_model == "onnx":
             order = _onnx_rerank(q, docs)    # 本地 bge-reranker-v2-m3(rerank_runner.py)
+            if order is None:                # ONNX runner 失败→回退 ollama cross-encoder(若已装)
+                fb = _ollama_rerank_fallback_model()
+                if fb:
+                    order = _ollama_rerank(q, docs, fb)
         else:
             order = _ollama_rerank(q, docs, rerank_model)   # 真目标:ollama cross-encoder
         if order is not None:
@@ -3056,8 +3325,11 @@ def _purge_material_derived(mid):
     """素材删除后的派生数据级联清理(最佳实践:主记录删除必须联动向量索引失效)。
 
     覆盖:三张向量表(embeddings/image_embeddings/clip_frame_embeddings)、
-    OCR/视觉/镜头/phash/tech sidecar、缩略图及其 .fail 失败标记、进程内文本缓存。
-    否则 embed_status 覆盖率虚高、孤儿 sidecar 随删除累积。全部尽力而为不抛错。"""
+    OCR/视觉/镜头/phash/tech/autotag sidecar、run/understand 记录、缩略图及其
+    .fail 失败标记、进程内文本缓存。
+    否则 embed_status 覆盖率虚高、孤儿 sidecar 随删除累积。全部尽力而为不抛错。
+    2026-10-15:补 autotag_sidecar_path/run_record_path/understand_record_path——
+    此前漏清导致删 127 条流水线素材后 index/autotags 残留 24 个孤儿 sidecar。"""
     try:
         con = _con()
         for tbl in ("embeddings", "image_embeddings", "clip_frame_embeddings"):
@@ -3071,7 +3343,8 @@ def _purge_material_derived(mid):
         pass
     files = []
     for mk in (visual_sidecar_path, ocr_sidecar_path, asr_sidecar_path, shot_index_path,
-               phash_path, tech_path, thumb_path):
+               phash_path, tech_path, thumb_path, autotag_sidecar_path,
+               run_record_path, understand_record_path):
         try:
             p = mk(mid)
             if p:
@@ -3131,7 +3404,7 @@ _BLOCKED_UPLOAD_EXT = frozenset(
 )
 
 
-def ingest_file(src, move=True, source=""):
+def ingest_file(src, move=True, source="", form="", topics="", usage=""):
     """整理单个文件:去重(按 sha256)、分类、命名规范、入索引。
     返回 {status:'added'|'duplicate'|'rejected', id, path?}。
     - 可执行/脚本扩展名拒收(DAM 不是软件仓库;超限大文件走链接引用或 CLI);
@@ -3172,6 +3445,7 @@ def ingest_file(src, move=True, source=""):
         rel_path=os.path.relpath(dest, HUB), size=os.path.getsize(dest), sha256=sha,
         tags=tags, description="", source=source, orig_name=os.path.basename(src),
         created_at=datetime.datetime.now().isoformat(timespec="seconds"),
+        form=form, topics=topics, usage=usage,
     )
     normalize_name(mid)          # 入库即规范化显示名(只改 name,不动 rel_path/磁盘)
     return {"status": "added", "id": mid, "path": os.path.relpath(dest, HUB)}
@@ -3228,7 +3502,7 @@ def split_video_to_silent_and_audio(mid, *, force=False):
     audio_path = _unique_dest(audio_dir, f"{stem}_track.wav")
 
     try:
-        subprocess.run(
+        _run_ffmpeg_safe(
             [ff, "-y", "-i", src, "-map", "0:v:0", "-c:v", "copy", "-an", silent_path],
             check=True, capture_output=True, creationflags=flags, timeout=600,
         )
@@ -3238,7 +3512,7 @@ def split_video_to_silent_and_audio(mid, *, force=False):
     audio_ok = False
     if probe_has_audio(src):
         try:
-            subprocess.run(
+            _run_ffmpeg_safe(
                 [
                     ff, "-y", "-i", src, "-vn",
                     "-acodec", "pcm_s16le", "-ar", "48000", "-ac", "2",
@@ -3443,7 +3717,9 @@ def ingest_external(src, source="", tags="", description="", kind=None):
     con.commit()
     con.close()
     normalize_name(mid)          # 入库即规范化显示名(只改 name,不动 external_path/磁盘)
-    return {"status": "added", "id": mid}
+    # P4：入库即近重复预检（仅提示不阻断；库内无 phash sidecar 时为空，零误报）
+    near = near_duplicate_check(src, limit=5)
+    return {"status": "added", "id": mid, "near_duplicates": near}
 
 
 def scan_materials():
@@ -3556,10 +3832,27 @@ def external_stats():
 def health():
     """健康检查快照:总量、种类分布、重复、引用完整性、封面能力、磁盘占用。"""
     ms = all_materials()
-    kinds = {}
+    # 完整 KINDS 分类体系(含 0 计数),与 /api/stats 保持一致
+    kinds = {k: 0 for k in list(KINDS) + ["other"]}
+    # 内容形式分布:leaf → 一级分组聚合(未归类/无效归 other),与 /api/stats 一致
+    forms = {g: 0 for g in FORM_GROUP_LABELS}
+    forms["other"] = 0
+    topics = {}
+    usages = {}
     size = 0
     for m in ms:
-        kinds[m["kind"]] = kinds.get(m["kind"], 0) + 1
+        k = m.get("kind") or "other"
+        kinds[k] = kinds.get(k, 0) + 1
+        g = form_group(m.get("form") or "")
+        forms[g] = forms.get(g, 0) + 1
+        for t in (m.get("topics") or "").split(","):
+            t = t.strip()
+            if t:
+                topics[t] = topics.get(t, 0) + 1
+        for u in (m.get("usage") or "").split(","):
+            u = u.strip()
+            if u:
+                usages[u] = usages.get(u, 0) + 1
         size += m.get("size") or 0
     st = thumbs_status()
     ex = external_stats()
@@ -3568,6 +3861,9 @@ def health():
         "ok": (ex["broken"] == 0),
         "total": len(ms),
         "kinds": kinds,
+        "forms": forms,
+        "topics": topics,
+        "usages": usages,
         "bytes": size,
         "duplicates": len(duplicates()),
         "external": ex,
@@ -3672,6 +3968,23 @@ def _build_deliver_cmd(exe, src, dst, *, fmt="mp4", res="720", clip=None,
     return cmd
 
 
+def _deliver_digest(path):
+    """交付产物完整性信息 {sha256, bytes}；字段失败为 None（不否掉已成功的交付）。
+
+    供下游核对交付物是否完整/被篡改（P8：交付带校验和）。
+    """
+    out = {"sha256": None, "bytes": None}
+    try:
+        out["bytes"] = os.path.getsize(path)
+    except OSError:
+        pass
+    try:
+        out["sha256"] = compute_sha256(path)
+    except OSError:
+        pass
+    return out
+
+
 def deliver_package(manifest_path=None, ids=None, *, out_dir=None,
                     confirm=False, fmt="mp4", res="720",
                     clips=None, copy_only=False, overwrite=False):
@@ -3761,14 +4074,16 @@ def deliver_package(manifest_path=None, ids=None, *, out_dir=None,
         if not confirm:
             continue
         if os.path.exists(dst) and not overwrite:
-            skipped.append({"id": mid, "dst": dst, "status": "exists"})
+            skipped.append({"id": mid, "dst": dst, "status": "exists",
+                            **_deliver_digest(dst)})
             entry["status"] = "skipped_exists"
             continue
         os.makedirs(out_dir, exist_ok=True)
         if not video_like:
             try:
                 shutil.copy2(src, dst)
-                written.append({"id": mid, "dst": dst, "status": "copied"})
+                written.append({"id": mid, "dst": dst, "status": "copied",
+                                **_deliver_digest(dst)})
                 entry["status"] = "copied"
             except Exception as e:  # noqa: BLE001
                 errors.append({"id": mid, "status": "copy_error",
@@ -3781,11 +4096,12 @@ def deliver_package(manifest_path=None, ids=None, *, out_dir=None,
             continue
         flags = 0x08000000 if os.name == "nt" else 0
         try:
-            p = subprocess.run(cmd, stdout=subprocess.DEVNULL,
+            p = _run_ffmpeg_safe(cmd, stdout=subprocess.DEVNULL,
                                stderr=subprocess.PIPE, timeout=600,
                                creationflags=flags)
             if p.returncode == 0 and os.path.exists(dst) and os.path.getsize(dst) > 0:
-                written.append({"id": mid, "dst": dst, "status": "ok"})
+                written.append({"id": mid, "dst": dst, "status": "ok",
+                                **_deliver_digest(dst)})
                 entry["status"] = "ok"
             else:
                 err = (p.stderr or b"").decode("utf-8", "ignore")[:300]
@@ -3799,20 +4115,53 @@ def deliver_package(manifest_path=None, ids=None, *, out_dir=None,
             "written": written, "skipped": skipped, "errors": errors}
 
 
-def make_thumb(mid, retry_failed=False):
-    """为视频抽一帧存成 jpg 封面,缓存到 index/thumbs/<id>.jpg。
-    返回封面路径;无 ffmpeg / 非视频 / 抽帧失败均返回 None。
+def _make_thumb_pil(m, dst):
+    """图片/动画(GIF)用 PIL 重采样成缩略图 jpg。
 
-    抽帧失败的会留下 `<id>.jpg.fail` 标记:源文件损坏/未写完时 ffmpeg 很费时,
-    标记后不再反复重试(想重试:purge_thumbs() 清标记,或传 retry_failed=True)。"""
-    m = get_material(mid)
-    if not m or m["kind"] not in VIDEO_LIKE_KINDS:
+    不碰 ffmpeg,规避其特殊字符路径坑(此前视频抽帧在此栽过);PIL 直接用系统
+    open 读 UTF-8 路径,中文/空格素材安全。动画只取首帧作静态封面。"""
+    src = _abs_source(m)
+    if not src or not os.path.exists(src):
         return None
+    os.makedirs(THUMBS, exist_ok=True)
+    try:
+        from PIL import Image
+        with Image.open(src) as im:
+            im = im.convert("RGB")  # GIF 调色板/透明 → RGB,统一输出 jpg
+            max_side = int(os.environ.get("VITUAL_THUMB_MAX", "512"))
+            im.thumbnail((max_side, max_side))
+            im.save(dst, "JPEG", quality=82)
+    except Exception as e:
+        # 解码失败(损坏图)留标记,避免反复重试
+        try:
+            with open(dst + ".fail", "w", encoding="utf-8") as f:
+                f.write("PIL: " + str(e)[:400])
+        except OSError:
+            pass
+        return None
+    return dst if (os.path.exists(dst) and os.path.getsize(dst) > 0) else None
+
+
+def make_thumb(mid, retry_failed=False):
+    """为素材生成封面 jpg,缓存到 index/thumbs/<id>.jpg。
+    视频/无声:ffmpeg 抽帧;图片/动画:PIL 缩略图;其余(文档/字幕/音频)返回 None。
+    返回封面路径;源缺失/抽帧失败均返回 None,并写 `<id>.jpg.fail` 标记防反复重试
+    (重试:purge_thumbs() 清标记,或传 retry_failed=True)。"""
+    m = get_material(mid)
+    if not m:
+        return None
+    kind = m["kind"]
     dst = thumb_path(mid)
     if os.path.exists(dst) and os.path.getsize(dst) > 0:
         return dst
     if not retry_failed and os.path.exists(dst + ".fail"):
         return None
+    # 图片/动画:PIL 重采样(比原图小得多,卡片加载更快;不依赖 ffmpeg)
+    if kind in ("images", "anim"):
+        return _make_thumb_pil(m, dst)
+    if kind not in VIDEO_LIKE_KINDS:
+        return None
+    # 视频:ffmpeg 抽帧(原逻辑,未改)
     exe = ffmpeg_path()
     if not exe:
         return None
@@ -3832,7 +4181,7 @@ def make_thumb(mid, retry_failed=False):
                    "-frames:v", "1", "-vf", "scale=480:-2", "-strict", "unofficial",
                    "-q:v", "4", dst]
             try:
-                p = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                p = _run_ffmpeg_safe(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                    timeout=60, creationflags=flags)
                 last_err = (p.stderr or b"")[:400]
             except Exception as e:
@@ -3870,6 +4219,16 @@ def ocr_sidecar_path(mid):
     if not mid or any(c in mid for c in "\\/.:"):
         return None                              # 防路径拼接注入
     return os.path.join(OCR_DIR, mid + ".txt")
+
+
+def ocr_detail_path(mid):
+    """OCR 结构化明细 sidecar 路径(index/ocr/<id>.json;bbox+置信,派生可重建)。
+
+    与检索用的 .txt 分离：.txt 仍是纯文本供三路检索；.json 带每行检测框与
+    置信度，供下游定位画面文字位置与低置信复核(P3)。
+    """
+    p = ocr_sidecar_path(mid)
+    return (p[:-4] + ".json") if p else None
 
 
 def asr_sidecar_path(mid):
@@ -4403,6 +4762,52 @@ def _ffprobe_path():
     return cand if os.path.isfile(cand) else None
 
 
+# ffmpeg/ffprobe 的 image2 demuxer 会把输入路径里的 %/[/{ 等当"序列图模式"元字符,
+# 于是合法单图被当成图序列、报 "Could find no file ... index in the range 0-4"
+# (实测 frame_extract_failed;复制成简单名即 rc=0)。下面这些喂媒体源的站点统一走
+# _run_ffmpeg_safe:仅当 argv 里某个**已存在的输入文件**含这些字符时,才复制到安全
+# 临时名(保留扩展名,ffmpeg 据此选 demuxer)再跑、用完即删。正常路径零改动,行为透明。
+_FFMPEG_PATTERN_CHARS = "%[]{}"
+
+
+def _needs_safe_src(p):
+    return isinstance(p, str) and bool(p) and any(c in p for c in _FFMPEG_PATTERN_CHARS)
+
+
+def _run_ffmpeg_safe(argv, **kw):
+    """subprocess.run 的透明包装:把含 image2 模式元字符的输入文件复制到安全临时名。
+
+    跳过 argv[0](可执行路径);只复制"已存在且含问题字符"的参数。返回 CompletedProcess,
+    语义与 subprocess.run 一致;临时文件在 finally 中删除,异常也不泄漏。"""
+    import tempfile
+    new = list(argv)
+    tmps = []
+    try:
+        for i in range(1, len(new)):
+            a = new[i]
+            if _needs_safe_src(a) and os.path.isfile(a):
+                ext = os.path.splitext(a)[1] or ".bin"
+                fd, tmp = tempfile.mkstemp(prefix="hub_ffsrc_", suffix=ext)
+                os.close(fd)
+                try:
+                    shutil.copyfile(a, tmp)
+                except OSError:
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
+                    continue
+                tmps.append(tmp)
+                new[i] = tmp
+        return subprocess.run(new, **kw)
+    finally:
+        for t in tmps:
+            try:
+                os.remove(t)
+            except OSError:
+                pass
+
+
 def _probe_duration(path):
     """视频时长(秒);探测失败返回 0(退化为只抽 1 帧)。"""
     exe = _ffprobe_path()
@@ -4410,7 +4815,7 @@ def _probe_duration(path):
         return 0.0
     flags = 0x08000000 if os.name == "nt" else 0
     try:
-        p = subprocess.run(
+        p = _run_ffmpeg_safe(
             [exe, "-v", "error", "-show_entries", "format=duration",
              "-of", "default=noprint_wrappers=1:nokey=1", path],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -4432,6 +4837,9 @@ def _parse_ocr_runner_stdout(raw):
         return data if isinstance(data, list) else None
     except Exception:
         return None
+
+
+_OCR_LOW_CONF = 0.7   # P3：OCR 行置信度低于此值计为"待复核"
 
 
 def ocr_material(mid, frames=5, force=False):
@@ -4470,7 +4878,7 @@ def ocr_material(mid, frames=5, force=False):
         cmd = [exe, "-v", "error", "-y", "-i", src, "-frames:v", "1",
                "-vf", "scale=1280:-2", "-strict", "unofficial", "-q:v", "4", std]
         try:
-            subprocess.run(cmd, stdout=subprocess.DEVNULL,
+            _run_ffmpeg_safe(cmd, stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL, timeout=60,
                            creationflags=flags)
         except Exception:
@@ -4493,7 +4901,7 @@ def ocr_material(mid, frames=5, force=False):
                    "-frames:v", "1", "-vf", "scale=960:-2", "-strict", "unofficial",
                    "-q:v", "4", out]
             try:
-                subprocess.run(cmd, stdout=subprocess.DEVNULL,
+                _run_ffmpeg_safe(cmd, stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL, timeout=60,
                                creationflags=flags)
             except Exception:
@@ -4515,7 +4923,9 @@ def ocr_material(mid, frames=5, force=False):
         return {"id": mid, "status": "error", "reason": "ocr_runner_failed"}
     by_file = {d.get("file", ""): d for d in data}
     lines = []
+    detail = []          # P3：结构化 bbox/置信，落 .json sidecar 供定位与复核
     total = 0
+    low_conf = 0
     for f, t in imgs:
         d = by_file.get(f) or {}
         txt = (d.get("text") or "").strip()
@@ -4523,6 +4933,12 @@ def ocr_material(mid, frames=5, force=False):
             tag = f"[{t}s] " if t is not None else ""
             lines.append(f"{tag}{txt}")
             total += len(txt)
+        for ln in (d.get("lines") or []):
+            s = ln.get("score")
+            if s is not None and float(s) < _OCR_LOW_CONF:
+                low_conf += 1
+        detail.append({"t": t, "file": os.path.basename(f),
+                       "lines": d.get("lines") or []})
         try:
             if f != src:
                 os.remove(f)                     # 清理临时抽帧
@@ -4531,6 +4947,18 @@ def ocr_material(mid, frames=5, force=False):
     os.makedirs(OCR_DIR, exist_ok=True)
     with open(sc, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
+    # P3：结构化明细（bbox + 置信）落 .json sidecar，供下游定位画面文字与低置信复核；
+    # 与检索用的 .txt 分离，不影响三路检索与门禁。
+    det = ocr_detail_path(mid)
+    if det:
+        try:
+            with open(det, "w", encoding="utf-8") as f:
+                json.dump({"id": mid, "frames": detail,
+                           "low_conf_lines": low_conf,
+                           "low_conf_threshold": _OCR_LOW_CONF},
+                          f, ensure_ascii=False, indent=1)
+        except OSError:
+            det = None
     _OCR_TEXT_CACHE.pop(mid, None)      # sidecar 已更新,失效进程内缓存
     _sync_material_vector(mid)          # 向量失效闭环:OCR 文本变了立即重嵌
     # OCR 文本只落 sidecar(index/ocr/<id>.txt),由语义 doc_text 读取参与稠密检索;
@@ -4538,6 +4966,7 @@ def ocr_material(mid, frames=5, force=False):
     # 会稀释门禁/查询排序(实测 240 条批量 OCR 后 ndcg 0.84→0.80)。
     log_history("app", "ocr", mid, f"frames={len(imgs)} chars={total}")
     return {"id": mid, "status": "ok", "frames": len(imgs), "chars": total,
+            "low_conf_lines": low_conf, "detail": det,
             "sample": "\n".join(lines)[:200]}
 
 
@@ -4590,7 +5019,7 @@ def _grab_frame(exe, src, t, dst, vf, flags):
     )
     for cmd in attempts:
         try:
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            _run_ffmpeg_safe(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                            timeout=90, creationflags=flags)
         except Exception:
             pass
@@ -4642,7 +5071,7 @@ def visual_material(mid, frames=3, force=False):
         cmd = [exe, "-v", "error", "-y", "-i", src, "-frames:v", "1",
                "-vf", "scale=1280:-2", *STRICT, "-q:v", "4", std]
         try:
-            subprocess.run(cmd, stdout=subprocess.DEVNULL,
+            _run_ffmpeg_safe(cmd, stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL, timeout=60,
                            creationflags=flags)
         except Exception:
@@ -5061,7 +5490,7 @@ def _ffmpeg_scene_cuts(exe, src, threshold):
     日志级别必须是 info:warning 会丢掉 showinfo 行。"""
     flags = 0x08000000 if os.name == "nt" else 0          # CREATE_NO_WINDOW,避免弹黑框
     try:
-        p = subprocess.run(
+        p = _run_ffmpeg_safe(
             [exe, "-v", "info", "-i", src,
              "-vf", f"select='gt(scene,{threshold})',showinfo",
              "-f", "null", "-"],
@@ -5222,7 +5651,7 @@ def _ffmpeg_dhash_bits(exe, src):
     子进程失败或像素不足 → None。视频只取首帧(近重复检测足够)。"""
     flags = 0x08000000 if os.name == "nt" else 0          # CREATE_NO_WINDOW,避免弹黑框
     try:
-        p = subprocess.run(
+        p = _run_ffmpeg_safe(
             [exe, "-v", "error", "-i", src, "-frames:v", "1",
              "-vf", "scale=9:8,format=gray", "-f", "rawvideo", "-"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -5412,6 +5841,32 @@ def near_duplicate_report(max_dist=10, limit_pairs=50):
     }
 
 
+def near_duplicate_check(path, max_dist=None, limit=5):
+    """入库前近重复预检(P4)：待入库文件 vs 库内已有 dHash，返回近重复素材摘要。
+
+    与 ingest_external 的 sha256 精确去重互补：这里抓「画面近似但字节不同」的
+    漏网情况（同片段不同编码/转码/裁剪/压缩）。**仅提示、不阻断**——由人决定
+    是否仍要入库。非视觉类/无 ffmpeg/库内无 phash sidecar 时返回空列表(零误报)。
+    """
+    if max_dist is None:
+        try:
+            max_dist = int(os.environ.get("VITUAL_INGEST_DEDUP_DIST", "10"))
+        except ValueError:
+            max_dist = 10
+    bits = _dhash_bits_from_path(path)
+    if bits is None:
+        return []
+    out = []
+    for oid, other in _load_all_phashes():
+        d = hamming(bits, other)
+        if d <= max_dist:
+            m = get_material(oid) or {}
+            out.append({"id": oid, "dist": d, "name": m.get("name", ""),
+                        "kind": m.get("kind", "")})
+    out.sort(key=lambda x: (x["dist"], x["id"]))
+    return out[: max(1, int(limit))]
+
+
 def _clip_python():
     """承载 open_clip 的 python:优先 VITUAL_CLIP_PYTHON,否则与 OCR 同用 SP venv。"""
     env = os.environ.get("VITUAL_CLIP_PYTHON", "").strip()
@@ -5548,7 +6003,7 @@ def _clip_visual_path(m):
         if not (os.path.isfile(dst) and os.path.getsize(dst) > 0):
             flags = 0x08000000 if os.name == "nt" else 0
             try:
-                subprocess.run(
+                _run_ffmpeg_safe(
                     [exe, "-v", "error", "-y", "-i", src, "-frames:v", "1",
                      "-vf", "scale=224:-2", "-strict", "unofficial", "-q:v", "4", dst],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -6129,7 +6584,7 @@ def _probe_media(path):
         return {}
     flags = 0x08000000 if os.name == "nt" else 0
     try:
-        p = subprocess.run(
+        p = _run_ffmpeg_safe(
             [exe, "-v", "error", "-show_entries",
              "format=duration,format_name,bit_rate:"
              "stream=codec_type,codec_name,width,height,r_frame_rate,sample_rate,channels",
@@ -6401,6 +6856,144 @@ def auto_process_material(mid, ocr=True, shots=True, phash=True, autotag=False, 
     return {"id": mid, "steps": steps, "ok": okn, "total": total}
 
 
+# ---------- 内容形式/题材/用途 自动分类回填 ----------
+def _ollama_text(prompt, model=None, timeout=120):
+    """纯文本生成(无图):调用 ollama /api/generate。无模型/失败返回空串。"""
+    names = chat_models()
+    if not names:
+        return ""
+    model = model or names[0]
+    try:
+        r = _http_json(_embed_url() + "/api/generate", timeout=timeout,
+                       payload={"model": model, "prompt": prompt, "stream": False, "temperature": 0.2})
+        return (r.get("response") or "").strip()
+    except Exception:
+        return ""
+
+
+# 合法 form id 全集(组 / 子类 / 叶子),用于校验 LLM 输出
+_ALL_FORM_IDS = set(FORM_GROUP_LABELS) | set(FORM_SUBGROUP_LABELS) | {i for i, _ in FORM_OPTIONS}
+
+
+def classify_material(mid, force=False, dry=False, model=None):
+    """用已生成的画面 sidecar + OCR + 名称,让本地 VLM/LLM 把素材归到受控分类法,
+    回填 form / topics / usage 三个结构化字段(绝不改 tags,系统标签安全)。
+    无视觉 sidecar 时退化为仅依据名称/标签/OCR 的弱分类。返回结果 dict。"""
+    m = get_material(mid)
+    if not m:
+        return {"id": mid, "status": "not_found"}
+    # 非画面素材(流水线派生的 docs/subs/audio/notes 等)不参与内容分类:VLM 只能从文件名猜,
+    # 产出纯噪声——实测 73 条 docs(metrics/dehardsub_meta/pack_manifest 等 JSON)被 100%
+    # 打成「课程/知识」。内容形式/题材/用途只对真实画面内容有意义,故整体跳过。
+    if m.get("kind") not in VISUAL_KINDS:
+        return {"id": mid, "status": "skip_nonvisual", "kind": m.get("kind")}
+    cur_form = (m.get("form") or "").strip()
+    if cur_form and not force:
+        return {"id": mid, "status": "skip", "form": cur_form}
+    # 已人工/上游填过的 topics/usage 默认保留(零回归),除非 --force 覆盖
+    cur_topics = (m.get("topics") or "").strip()
+    cur_usage = (m.get("usage") or "").strip()
+    # 1) 证据收集
+    name = m.get("name", "") or ""
+    kind = m.get("kind", "") or ""
+    tags = m.get("tags", "") or ""
+    zh_desc = zh_tags = ""
+    sc = visual_sidecar_path(mid)
+    if sc and os.path.isfile(sc):
+        try:
+            with open(sc, encoding="utf-8", errors="ignore") as f:
+                d = _parse_visual_sidecar(f.read())
+            zh_desc = d.get("zh_desc", "")
+            zh_tags = d.get("zh_tags", "")
+        except OSError:
+            pass
+    ocr = ""
+    op = ocr_sidecar_path(mid)
+    if op and os.path.isfile(op):
+        try:
+            with open(op, encoding="utf-8", errors="ignore") as f:
+                ocr = f.read()[:600]
+        except OSError:
+            pass
+    # 2) 受控词表约束(只给合法 id,降低幻觉)
+    # 内容形式(form)仅对视频/图片类有意义;docs/subs/audio 等非画面素材不填 form(避免污染形式 facet)
+    is_visual = m.get("kind") in VISUAL_KINDS
+    form_opts = "; ".join(f"{i}={lbl}" for i, lbl in FORM_OPTIONS)
+    topic_opts = "; ".join(f"{g}: {', '.join(leaves)}" for g, leaves in TOPIC_TAXONOMY.items())
+    usage_opts = ", ".join(USAGES)
+    form_part = (
+        f"内容形式(form,从下面对照表选 1 个 id,无把握留空):\n{form_opts}\n"
+        if is_visual else
+        "内容形式(form): 此素材非视频/图片,form 固定为空。\n"
+    )
+    prompt = (
+        "你是多媒体素材库分类器。依据素材信息,从受控词表里选出最贴切的分类。\n"
+        f"名称: {name}\n类型: {kind}\n已有标签: {tags}\n"
+        f"画面中文描述: {zh_desc}\n画面中文标签: {zh_tags}\nOCR文本: {ocr}\n\n"
+        f"{form_part}"
+        f"题材(topics,0~3 个叶子原文,无把握留空数组):\n{topic_opts}\n"
+        f"用途(usage,0~3 个,可选值: {usage_opts}):\n\n"
+        "只输出一行 JSON,不要解释、不要 markdown 围栏:\n"
+        '{"form":"<id或空>","topics":["<题材叶子>"],"usage":["<用途>"]}'
+    )
+    raw = _ollama_text(prompt, model=model)
+    obj = _safe_json(raw) if raw else None
+    form, topics, usage = "", [], []
+    if isinstance(obj, dict):
+        if is_visual:
+            fv = (obj.get("form") or "").strip()
+            if fv in _ALL_FORM_IDS:
+                form = fv
+        tv = obj.get("topics") or []
+        if isinstance(tv, list):
+            topics = [t for t in tv if t in TOPICS][:3]
+        uv = obj.get("usage") or obj.get("usages") or []
+        if isinstance(uv, list):
+            usage = [u for u in uv if u in USAGES][:3]
+    res = {"id": mid, "status": "ok", "form": form, "topics": topics, "usage": usage,
+           "is_visual": is_visual, "raw": (raw[:200] if raw else "")}
+    if dry:
+        return res
+    fields = {}
+    if is_visual and form:
+        fields["form"] = form
+    if topics and (not cur_topics or force):
+        fields["topics"] = ",".join(topics)
+    if usage and (not cur_usage or force):
+        fields["usage"] = ",".join(usage)
+    if fields:
+        _update_material(mid, **fields)
+        log_history("app", "classify", mid, f"form={form} topics={topics} usage={usage}")
+        res["status"] = "written"
+    else:
+        res["status"] = "empty"
+    return res
+
+
+def classify_all(limit=0, force=False, dry=False, model=None):
+    """批量回填分类。建议先 `cli.py visual --all` 生成画面 sidecar 再跑本命令。
+    只处理 VISUAL_KINDS 素材(见 classify_material 的 skip_nonvisual)。"""
+    ms = all_materials()
+    if limit:
+        ms = ms[:limit]
+    return [classify_material(m["id"], force=force, dry=dry, model=model) for m in ms]
+
+
+def classify_clear_nonvisual():
+    """清除非视觉类素材上的自动分类残留(docs/subs/audio 等流水线产物不该有 form/topics/usage)。
+    仅清空这三列、绝不动 tags(系统标签安全)。返回清理条数。"""
+    n = 0
+    for m in all_materials():
+        if m.get("kind") in VISUAL_KINDS:
+            continue
+        fields = {col: "" for col in ("form", "topics", "usage") if (m.get(col) or "").strip()}
+        if fields:
+            _update_material(m["id"], **fields)
+            log_history("app", "classify_clear", m["id"], "cleared non-visual auto-classify")
+            n += 1
+    return n
+
+
 def auto_process_all(limit=0, autotag=False):
     """批处理:找出所有还有缺项的 videos/silent/images 素材,逐条跑 auto_process_material,
     最后调一次 build_embeddings()(增量:只补新素材/文本有变化的向量)。
@@ -6449,7 +7042,7 @@ def missing_thumbnail_ids(skip_failed=True):
     skip_failed=True 时跳过已知损坏(有 .fail 标记)的,避免每次批量都白跑。"""
     out = []
     for m in all_materials():
-        if m["kind"] not in VIDEO_LIKE_KINDS:
+        if m["kind"] not in VIDEO_LIKE_KINDS and m["kind"] not in ("images", "anim"):
             continue
         p = thumb_path(m["id"])
         if os.path.exists(p) and os.path.getsize(p) > 0:
@@ -6611,6 +7204,14 @@ _PLACEHOLDER_RE = re.compile(
 )
 
 
+_GOV_SUGGESTIONS = {
+    "placeholder": "占位/临时文件：确认无用则删除；否则用 update_tags 补 role:/type: 归类",
+    "missing_desc": "缺描述：用 read_text_preview 或 run_visual 看懂内容后补描述，提升可检索性",
+    "missing_role": "未分类：用 update_tags 补 role:master / role:clip 与 type: 归类",
+    "untagged": "无语义标签：跑 auto_process(autotag=true) 自动打标，或用 update_tags 手工补",
+}
+
+
 def governance_report(limit=50):
     """全库治理/合规只读扫描(Agent「治理合规」技能用)。
 
@@ -6649,11 +7250,15 @@ def governance_report(limit=50):
     truncated = {k: (c > limit) for k, c in counts.items()}
     for key in issues:
         issues[key] = issues[key][:limit]
+    # P5：每类问题附可执行建议（不只列问题，给下一步动作链）；
+    # 只对实际存在问题(counts>0)的类别给建议，零问题类别不产噪声。
+    suggestions = {k: v for k, v in _GOV_SUGGESTIONS.items() if counts.get(k)}
     return {
         "scanned": scanned,
         "issues": issues,
         "counts": counts,          # 真实总数(不受 limit 影响)
         "truncated": truncated,    # 标记该类是否被截断,便于调用方判断要不要翻页
+        "suggestions": suggestions,
         "sample_limit": limit,
     }
 

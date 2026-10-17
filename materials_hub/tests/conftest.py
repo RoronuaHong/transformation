@@ -28,6 +28,7 @@ def _isolate_core():
     core.OCR_DIR = os.path.join(tmp, "ocr")
     core.SHOT_DIR = os.path.join(tmp, "shots")
     core.PHASH_DIR = os.path.join(tmp, "phash")
+    core.TECH_DIR = os.path.join(tmp, "tech")   # 技术元数据 sidecar;漏隔离会写进真实 index/tech(2026-10-15 实测泄漏)
     core.THUMBS = os.path.join(tmp, "thumbs")
     core.STATIC = os.path.join(tmp, "static")
     # 派生 sidecar/记录目录也要隔离,否则跨测试泄漏(如 attach 写 index/asr 命中上次残留)
@@ -37,6 +38,9 @@ def _isolate_core():
     core.RUN_DIR = os.path.join(tmp, "run")
     core.UNDERSTAND_DIR = os.path.join(tmp, "understand")
     core.INDEX_DB = os.path.join(tmp, "hub.db")
+    # 这两个是"导入期由 INDEX_DIR 算出"的模块级路径,单改 INDEX_DIR 不会重算,需显式重定向
+    core._CACHE_PATH = os.path.join(tmp, "search_cache.pkl")
+    core.AUTOTAG_BACKUP = os.path.join(tmp, "autotag_backup.json")
     # 反馈日志 / 否决词表也随 INDEX_DIR 隔离(否则跨测试/真实库泄漏,
     # 步骤 10 的 _is_vetoed 会读到真实库的否决导致组装过滤失真)
     core._FEEDBACK_PATH = os.path.join(tmp, ".agent_feedback.jsonl")

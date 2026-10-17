@@ -128,6 +128,52 @@ def check_gate(p5, r20, mrr, ndcg, baseline=None, tol=GATE_TOL):
     return ok, details
 
 
+def gt_staleness(gt=None, corpora=None):
+    """GT 与当前语料的一致性：GT 标注的 id 有多少仍存在于语料。
+
+    语料重构/清理后，旧 GT 引用的 id 可能已不存在 → 检索永远找不到 → 召回虚低、
+    门禁【假失败】。返回 {queries, total_gt_ids, existing, missing, coverage,
+    empty_queries, stale}。coverage<0.5 或半数以上查询整组缺失 → stale=True
+    （指标不可信，应先用 gen_ground_truth.py 重标，而非当回归处理）。
+    """
+    if gt is None:
+        gt = load_ground_truth()
+    if not gt:
+        return {"queries": 0, "total_gt_ids": 0, "existing": 0, "missing": 0,
+                "coverage": None, "empty_queries": 0, "stale": False,
+                "note": "no GT file (heuristic mode)"}
+    if corpora is None:
+        corpora = core.all_materials()
+    have = {m["id"] for m in corpora}
+    total = existing = empty_queries = 0
+    for _q, ids in gt.items():
+        if not ids:
+            continue
+        total += len(ids)
+        hit = sum(1 for i in ids if i in have)
+        existing += hit
+        if hit == 0:
+            empty_queries += 1
+    coverage = (existing / total) if total else None
+    # 零覆盖（GT 与当前语料完全不匹配 → 评估休眠）同样必须判 stale：
+    # 否则指标会全为 0，门禁从「跳过」退化成「误报回归」，比不检测更糟。
+    stale = bool(gt) and (
+        total == 0 or coverage < 0.5
+        or empty_queries >= max(1, len(gt) // 2))
+    # 零覆盖 = existing==0：既含「GT 无标注相关集」，也含「标注的 id 全不在语料」
+    # （语料重构后的典型情形）；两者都意味着评估休眠，note 分别说明成因。
+    if existing == 0:
+        why = ("GT 无任何标注相关集" if total == 0
+               else "标注的 %d 个 id 全部不在当前语料" % total)
+        note = f"GT 对当前语料零覆盖（{why}），评估休眠"
+    else:
+        note = ""
+    return {"queries": len(gt), "total_gt_ids": total, "existing": existing,
+            "missing": total - existing,
+            "coverage": round(coverage, 3) if coverage is not None else None,
+            "empty_queries": empty_queries, "stale": stale, "note": note}
+
+
 def evaluate(mode, gt=None):
     corpora = core.all_materials()
     total_rel = {}
@@ -197,7 +243,8 @@ def main():
     ap.add_argument("--baseline", action="store_true", help="同时输出 lexical 与 auto 对比")
     ap.add_argument("--gate", action="store_true",
                     help="回归门禁:均值低于基线(含容差)则退出码 1。"
-                         "基线以 --mode lexical 测得,建议配合 --mode lexical 使用")
+                         "基线以 --mode lexical 测得,建议配合 --mode lexical 使用。"
+                         "GT 过期(标注 id 多数已不在语料)时判 GT_STALE 并跳过(退出码 0)")
     ap.add_argument("--gt", default=None,
                     help="指定 ground-truth JSON(默认 eval_ground_truth.json);"
                          "用于 A/B 不同的 GT 标注方案")
@@ -228,6 +275,17 @@ def main():
         return p5, r20, mrr, ndcg
 
     if args.gate:
+        # GT 过期保护：语料重构后旧 GT 标注的 id 可能已不存在 → 召回虚低、门禁【假失败】。
+        # 此时判 GT_STALE 并跳过（退出码 0），提示先重标 GT，而非误报检索回归。
+        st = gt_staleness(gt)
+        if st.get("stale"):
+            print(f"\n=== 回归门禁 (mode={args.mode}) ===")
+            print("GATE: GT_STALE (SKIPPED)")
+            print(f"  GT 标注 {st.get('existing')}/{st.get('total_gt_ids')} 个 id "
+                  f"仍存在于当前语料（coverage={st.get('coverage')}），"
+                  f"{st.get('empty_queries')}/{st.get('queries')} 条查询整组缺失")
+            print("  → 指标不可信；请先用 gen_ground_truth.py 按当前语料重标 GT 再跑门禁")
+            sys.exit(0)
         _per, p5, r20, mrr, ndcg = evaluate(args.mode, gt)
         base = AUTO_GATE_BASELINE if args.mode == "auto" else None
         ok, details = check_gate(p5, r20, mrr, ndcg, baseline=base)

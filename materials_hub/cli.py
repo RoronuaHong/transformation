@@ -66,6 +66,7 @@ from core import (
     build_auto_tags, autotag_sidecar_path, rerank_status,
     build_entity_inverted_index, entity_search,
     auto_process_all, pending_processing,
+    classify_all, classify_material, classify_clear_nonvisual,
     apply_media_facet_tags, link_relation_parents, scrub_deprecated_from_tags,
 )
 from core import (
@@ -647,6 +648,31 @@ def main():
         for x in res[:25]:
             extra = x.get("desc") or x.get("reason") or ""
             print(f"  {x['id']}  {x['status']}  {extra}")
+
+    elif cmd == "classify":
+        # 回填分类:python cli.py classify <id> [--force] [--dry] | classify --all [--limit N] [--force] [--dry]
+        # 清理非视觉素材上的自动分类残留:python cli.py classify --clear-nonvisual
+        rest = args[1:]
+        if "--clear-nonvisual" in rest:
+            n = classify_clear_nonvisual()
+            print(f"classify CLEARED: 已清空 {n} 条非视觉素材的 form/topics/usage(tags 未动)")
+            return
+        if "--all" in rest:
+            limit = int(rest[rest.index("--limit") + 1]) if "--limit" in rest else 0
+            dry = "--dry" in rest
+            force = "--force" in rest
+            res = classify_all(limit=limit, force=force, dry=dry)
+            ok = [x for x in res if x.get("form") or x.get("topics") or x.get("usage")]
+            print(f"classify done: {len(res)} scanned, {len(ok)} with fills"
+                  f"{' (dry-run)' if dry else ''}")
+            for x in ok[:40]:
+                print(f"  {x['id']}  form={x.get('form')} topics={x.get('topics')} usage={x.get('usage')}")
+            return
+        mid = next((a for a in rest if not a.startswith("-")), "")
+        if not mid:
+            print("用法: python cli.py classify <id> [--force] [--dry] | classify --all [--limit N] [--force] [--dry]")
+            return
+        print(json.dumps(classify_material(mid, force="--force" in rest, dry="--dry" in rest), ensure_ascii=False, indent=2))
 
     elif cmd == "package":
         import agent as _agent

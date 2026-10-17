@@ -408,10 +408,10 @@ def decision_risk_score(task: str):
     （置信门控：System1 高置信自动、中低置信升级 System2）。
     实现走 core.decision_call（已统一到零依赖 decision_client）。
     """
-    url = os.environ.get("VITUAL_DECISION_URL", "").strip().rstrip("/")
+    import core as _core
+    url = _core.decision_endpoint()
     if not url or not (task or "").strip():
         return None
-    import core as _core
 
     body = {
         "state": "操作描述：%s" % task,
@@ -458,7 +458,8 @@ def t_agent_run(a):
             agent._mark_error(task_id, "[error] 后台线程异常终止,任务未能完成")
 
     threading.Thread(target=_run, daemon=True).start()
-    risk = decision_risk_score(task) if os.environ.get("VITUAL_DECISION_URL", "").strip() else None
+    import core as _core
+    risk = decision_risk_score(task) if _core.decision_endpoint() else None
     hint = "长任务已在后台启动(约 1-3 分钟),用 agent_status 查询进度与结果"
     if risk is not None and risk.get("uncertain"):
         conf = risk.get("confidence")
@@ -548,8 +549,51 @@ def t_feedback(a):
 
 
 def t_learning(a):
-    """只读:汇总 Agent 反馈学习日志(各动作采纳率+近期记录)。"""
-    return core.learning_summary(limit=int(a.get("limit") or 50))
+    """只读:汇总 Agent 反馈学习日志(各动作采纳率+近期记录)+ 任务成功率/失败归因(P7)。"""
+    r = core.learning_summary(limit=int(a.get("limit") or 50))
+    try:
+        import agent
+        r["task_success"] = agent.agent_task_stats()
+    except Exception:
+        r["task_success"] = {"error": "agent_task_stats unavailable"}
+    return r
+
+
+def t_search_eval(a):
+    """只读:按需跑检索质量评估(P@5/R@20/MRR/nDCG + 回归门禁),复用 eval_search。
+
+    mode=auto|lexical|semantic;有 eval_ground_truth.json 则用权威标注(否则启发式)。
+    附带 GT 过期检测:语料重构后旧 GT 标注的 id 可能已不存在,导致召回虚低、
+    门禁【假失败】——此时 verdict=gt_stale,应先用 gen_ground_truth.py 重标 GT,
+    而非当检索回归处理。
+    """
+    import eval_search as ev
+    mode = str(a.get("mode") or "auto")
+    if mode not in ("auto", "lexical", "semantic"):
+        mode = "auto"
+    try:
+        gt = ev.load_ground_truth()
+    except Exception:
+        gt = None
+    per_q, p5, r20, mrr, ndcg = ev.evaluate(mode, gt=gt or None)
+    ok, details = ev.check_gate(p5, r20, mrr, ndcg)
+    try:
+        stale = ev.gt_staleness(gt)
+    except Exception:
+        stale = None
+    verdict = "gt_stale" if (stale or {}).get("stale") else ("pass" if ok else "regression")
+    return {
+        "mode": mode, "gt_used": bool(gt),
+        "metrics": {"p5": round(p5, 4), "r20": round(r20, 4),
+                    "mrr": round(mrr, 4), "ndcg": round(ndcg, 4)},
+        "baseline": ev.GATE_BASELINE,
+        "gate": {"ok": ok, "details": details},
+        "gt_stale": stale,
+        "verdict": verdict,
+        "per_query": [{"q": q, "p5": round(x, 3), "r20": round(y, 3),
+                       "mrr": round(z, 3), "ndcg": round(w, 3), "n": n}
+                      for (q, x, y, z, w, n) in per_q],
+    }
 
 
 def t_assemble(a):
@@ -605,6 +649,7 @@ HANDLERS = {"search_materials": t_search, "get_material": t_get,
             "auto_process": t_auto,
             "governance_report": t_governance, "distribution_readiness": t_readiness,
             "agent_feedback": t_feedback, "learning_summary": t_learning,
+            "search_eval": t_search_eval,
             "assemble_package": t_assemble,
             "deliver_package": t_deliver}
 # __PART2__
@@ -618,7 +663,7 @@ _CONFIRM = {"type": "object", "properties": {
     "confirm": {"type": "boolean", "description": "必须为 true 才允许写/删操作(人工复核护栏)"}}}
 
 TOOLS = [
-    {"name": "search_materials", "description": "检索素材库(128 条,支持中文自然语言问句,内置中英同义词+语义混合排序;英文等非中文查询会自动经本地翻译模型译中再中英合并检索)",
+    {"name": "search_materials", "description": "检索素材库(支持中文自然语言问句,内置中英同义词+语义混合排序;英文等非中文查询会自动经本地翻译模型译中再中英合并检索)",
      "inputSchema": _SCHEMA_OBJ},
     {"name": "get_material", "description": "按 id 取素材完整记录",
      "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
@@ -691,6 +736,9 @@ TOOLS = [
          "required": ["action", "accepted"]}},
     {"name": "learning_summary", "description": "只读:汇总 Agent 反馈学习日志(各动作采纳率+近期记录)",
      "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer"}}}},
+    {"name": "search_eval", "description": "只读:按需跑检索质量评估(P@5/R@20/MRR/nDCG + 回归门禁 check_gate);复用 eval_search,mode=auto|lexical|semantic,有 eval_ground_truth.json 则用权威标注",
+     "inputSchema": {"type": "object", "properties": {
+        "mode": {"type": "string", "enum": ["auto", "lexical", "semantic"]}}}},
     {"name": "assemble_package", "description": "只读:把高层目标落成可交付素材包(多智能体编排 Librarian 拆解检索→Critic 核验→Executor 写 manifest JSON 到 agent_workspace/packages/;绝不改动资产)。用于「组装一个混剪素材包/打包分发素材」等。",
      "inputSchema": {"type": "object", "properties": {
         "goal": {"type": "string", "description": "高层目标/自然语言(中文)"},
@@ -746,6 +794,27 @@ TOOLS = [
          "task_id": {"type": "string"}, "extra_steps": {"type": "integer"}}, "required": ["task_id"]}},
 ]
 # __PART3__
+def _tools_live():
+    """tools/list 时注入实时语料条数，避免硬编码数字过期。
+
+    与 initialize 的 serverInfo.count 同源（core.count_materials()）；
+    取不到时原样返回静态 TOOLS（描述已不含数字，永不为错）。
+    """
+    try:
+        n = core.count_materials()
+        prefix, repl = "检索素材库(", "检索素材库(%d 条," % n
+    except Exception:
+        return TOOLS
+    out = []
+    for t in TOOLS:
+        d = t.get("description") or ""
+        if t.get("name") == "search_materials" and prefix in d:
+            t = dict(t)
+            t["description"] = d.replace(prefix, repl, 1)
+        out.append(t)
+    return out
+
+
 def _dispatch(req):
     """处理一条 JSON-RPC 请求;notification(无 id)返回 None。"""
     if "id" not in req:
@@ -777,7 +846,7 @@ def _dispatch(req):
         params = req.get("params", {}) or {}
         return _prompt_get(params.get("name", ""), params.get("arguments") or {})
     if m == "tools/list":
-        return {"tools": TOOLS}
+        return {"tools": _tools_live()}
     if m == "tools/call":
         p = req.get("params", {})
         fn = HANDLERS.get(p.get("name", ""))

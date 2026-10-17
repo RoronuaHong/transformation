@@ -25,10 +25,15 @@ try:
 except Exception:
     pass
 
-# 2026-10-10 升级:CLIP ViT-B-32(openai, 2021) → SigLIP 2(Google 2025,webli)。
-# SigLIP2 zero-shot 图文检索/分类比 ViT-B-32 高约 8-10 个点;open_clip 3.3 原生支持,
-# 权重经 HF 缓存(models/clip/models--timm--ViT-B-16-SigLIP2-256,~375M 参数,离线可复用)。
-# 回退旧模型:VITUAL_CLIP_MODEL=ViT-B-32 VITUAL_CLIP_PRETRAINED=openai(配 models/clip/ViT-B-32.pt)。
+# 默认模型(2026-10-15 恢复 SigLIP2-256/webli,768 维):
+# 2026-10-14 曾因 SigLIP2 safetensors ~1.5GB(fp32)在 **CPU 侧**加载触发 Windows
+# ERROR_NOT_ENOUGH_MEMORY(1455)/段错误而回退 ViT-B-32。2026-10-15 定位:那只是
+# **CPU 提交内存尖峰**;把 device 传进 create_model_and_transforms 让权重**直接加载到
+# GPU**(RTX2060 6G 放得下,实测 cuda 直载 1.5GB OK)即可绕开,无需加内存。tokenizer 的
+# 离线问题也从本地 snapshot 目录建 HFTokenizer 解决(读 tokenizer_config.json,绕开缺
+# config.json 的负缓存)。SigLIP2 比 ViT-B-32 图文检索高约 8-10 点,且 build_auto_tags
+# 本就按 SigLIP2 zero-shot 设计。轻量回退(内存紧/无 GPU 时):
+#   VITUAL_CLIP_MODEL=ViT-B-32 VITUAL_CLIP_PRETRAINED=openai(单体 .pt,内置 tokenizer)
 _MODEL_NAME = os.environ.get("VITUAL_CLIP_MODEL", "ViT-B-16-SigLIP2-256").strip() or "ViT-B-16-SigLIP2-256"
 _PRETRAINED = os.environ.get("VITUAL_CLIP_PRETRAINED", "webli").strip() or "webli"
 _CACHE = (
@@ -80,6 +85,28 @@ def _out(obj):
     print(json.dumps(obj, ensure_ascii=False), flush=True)
 
 
+def _hf_snapshot_dir():
+    """SigLIP2 等经 HF 缓存的本地 snapshot 目录(含 tokenizer.json/tokenizer_config.json)。"""
+    import glob
+    hits = glob.glob(os.path.join(_CACHE, "models--*--" + _MODEL_NAME, "snapshots", "*"))
+    return hits[0] if hits else None
+
+
+def _build_tokenizer(model):
+    """构建分词器,离线友好。
+    - HF tokenizer 模型(如 SigLIP2/Gemma):从本地 snapshot 目录建 HFTokenizer,
+      规避离线时 AutoTokenizer 因缺 config.json(负缓存 .no_exist)而失败;
+    - 其它(如 ViT-B-32/openai 的内置 SimpleTokenizer):走 open_clip.get_tokenizer。"""
+    import open_clip
+    ctx = getattr(model, "context_length", 0) or 64
+    if "siglip" in _MODEL_NAME.lower():
+        snap = _hf_snapshot_dir()
+        if snap:
+            from open_clip.tokenizer import HFTokenizer
+            return HFTokenizer(snap, context_length=ctx)
+    return open_clip.get_tokenizer(_MODEL_NAME, context_length=ctx)
+
+
 def _load():
     if _STATE["model"] is not None:
         return
@@ -100,15 +127,17 @@ def _load():
 
     torch.load = _torch_load_compat
     try:
+        # 2026-10-15:传 device 让权重直接加载到目标设备(GPU)。SigLIP2 safetensors 1.5GB
+        # 若在 CPU 侧加载会触发 Windows 提交内存 1455/段错误;GPU 6G 放得下。
         model, _, preprocess = open_clip.create_model_and_transforms(
-            _MODEL_NAME, pretrained=pretrained, cache_dir=_CACHE,
+            _MODEL_NAME, pretrained=pretrained, cache_dir=_CACHE, device=device,
         )
     finally:
         torch.load = _orig_load
     model = model.to(device).eval()
     _STATE["model"] = model
     _STATE["preprocess"] = preprocess
-    _STATE["tokenizer"] = open_clip.get_tokenizer(_MODEL_NAME)
+    _STATE["tokenizer"] = _build_tokenizer(model)
     _STATE["device"] = device
     tag = "%s/%s" % (_MODEL_NAME, "local" if weights else _PRETRAINED)
     _STATE["tag"] = tag

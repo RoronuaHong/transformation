@@ -37,8 +37,11 @@ def _has_cjk(s):
     return bool(_CJK_RE.search(s or ""))
 import time
 import hashlib
+import threading
 
 import core
+
+_TL = threading.local()   # 每线程 LLM 用量累计(token/延迟)，供 agent 可观测(P6)
 
 # 工作区(派生数据,可整目录删除;与 thumbs/search_cache 同级,不入库)
 WORKSPACE = os.path.join(core.HUB, "index", "agent_workspace")
@@ -71,10 +74,19 @@ _STALL_SOFT = 1
 
 # ---------------------------------------------------------------- LLM 后端
 def _chat(messages, model, timeout=180):
-    """调 ollama /api/chat,强制 JSON 输出;失败/空响应一律返回 {}(绝不泄漏 None)。"""
+    """调 ollama /api/chat,强制 JSON 输出;失败/空响应一律返回 {}(绝不泄漏 None)。
+
+    顺手把 ollama 返回的 token/延迟累计到线程本地 _TL.usage(P6 可观测)，未设置则跳过。
+    """
     r = core._http_json(core._embed_url() + "/api/chat", timeout=timeout,
                         payload={"model": model, "messages": messages,
                                  "format": "json", "stream": False}) or {}
+    u = getattr(_TL, "usage", None)
+    if isinstance(u, dict):
+        u["calls"] = u.get("calls", 0) + 1
+        u["prompt_tokens"] = u.get("prompt_tokens", 0) + int(r.get("prompt_eval_count") or 0)
+        u["completion_tokens"] = u.get("completion_tokens", 0) + int(r.get("eval_count") or 0)
+        u["latency_s"] = round(u.get("latency_s", 0.0) + float(r.get("total_duration") or 0) / 1e9, 3)
     return core._safe_json(((r.get("message") or {}).get("content") or "").strip()) or {}
 
 
@@ -205,6 +217,12 @@ def _new_id(task):
 
 
 def _save(state, ws):
+    u = getattr(_TL, "usage", None)
+    if isinstance(u, dict):
+        state["usage"] = {"model": u.get("model", ""), "calls": u.get("calls", 0),
+                          "prompt_tokens": u.get("prompt_tokens", 0),
+                          "completion_tokens": u.get("completion_tokens", 0),
+                          "latency_s": u.get("latency_s", 0.0)}
     with open(os.path.join(ws, "state.json"), "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=1)
 
@@ -227,7 +245,8 @@ def agent_status(task_id):
             "context_digest": s.get("context_digest", ""),
             "progress": progress,
             "skill": s.get("skill"),
-            "crop_windows": s.get("crop_windows") or []}
+            "crop_windows": s.get("crop_windows") or [],
+            "usage": s.get("usage") or {}}
 
 
 def _progress_from_state(s):
@@ -345,6 +364,55 @@ def agent_list(limit=20):
                      "steps": len(s.get("steps") or [])})
     rows.sort(key=lambda x: x["created_at"], reverse=True)
     return rows[:max(1, int(limit))]
+
+
+def agent_task_stats(limit_failures=5):
+    """全库 Agent 任务成功率/失败归因(P7 可观测)：扫 state.json 按 status 聚合。
+
+    返回 {total, terminal, by_status, success_rate, avg_steps, avg_usage, recent_failures}。
+    success_rate = done / terminal(终态任务)；planning/running 不计分母。
+    avg_usage 复用 P6 落盘的 state.usage(calls/prompt_tokens/completion_tokens)。
+    """
+    by_status, failures = {}, []
+    total = terminal = done = steps_sum = steps_n = 0
+    uc = up = ucomp = 0
+    if os.path.isdir(WORKSPACE):
+        for tid in os.listdir(WORKSPACE):
+            p = os.path.join(_ws(tid), "state.json")
+            if not os.path.isfile(p):
+                continue
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    s = json.load(f)
+            except (OSError, ValueError):
+                continue
+            total += 1
+            st = s.get("status") or ""
+            by_status[st] = by_status.get(st, 0) + 1
+            nsteps = len(s.get("steps") or [])
+            if st in _TERMINAL_STATUSES:
+                terminal += 1
+                steps_sum += nsteps
+                steps_n += 1
+                if st == "done":
+                    done += 1
+                else:
+                    failures.append({"task_id": tid, "status": st,
+                                     "task": (s.get("task") or "")[:60],
+                                     "summary": (s.get("summary") or "")[:120]})
+            u = s.get("usage") or {}
+            uc += u.get("calls", 0) or 0
+            up += u.get("prompt_tokens", 0) or 0
+            ucomp += u.get("completion_tokens", 0) or 0
+    failures.sort(key=lambda x: x["task_id"], reverse=True)
+    return {
+        "total": total, "terminal": terminal, "by_status": by_status,
+        "success_rate": round(done / terminal, 3) if terminal else None,
+        "avg_steps": round(steps_sum / steps_n, 1) if steps_n else None,
+        "avg_usage": {"calls": int(uc), "prompt_tokens": int(up),
+                      "completion_tokens": int(ucomp)},
+        "recent_failures": failures[:limit_failures],
+    }
 
 
 def agent_cleanup(max_age_hours=72):
@@ -2321,6 +2389,8 @@ def agent_run(task, allow_write=False, max_steps=_DEFAULT_STEPS, model=None, tas
         return {"status": "skipped", "reason": "no_chat_model",
                 "hint": "ollama pull qwen2.5:7b 后重试"}
     model = model or models[0]
+    _TL.usage = {"model": model, "calls": 0, "prompt_tokens": 0,
+                 "completion_tokens": 0, "latency_s": 0.0}   # P6: 本任务 LLM 用量累计
 
     task_id = task_id or _new_id(task)
     ws = _ws(task_id)
@@ -2884,7 +2954,8 @@ def _loop(state, ws, task_id, tools, model, budget, start_step, context, digest,
             "critic": state.get("critic"),
             "context_digest": state.get("context_digest", ""),
             "skill": state.get("skill") or "",
-            "progress": state.get("progress")}
+            "progress": state.get("progress"),
+            "usage": state.get("usage", {})}
 
 
 if __name__ == "__main__":                                  # 直接调试: python agent.py "任务..."

@@ -159,6 +159,40 @@ def test_ocr_text_cache_invalidates_on_mtime():
     print("PASS test_ocr_text_cache_invalidates_on_mtime")
 
 
+def test_remove_cascades_all_sidecars():
+    """remove_material 必须级联清掉每类 per-material sidecar(含 autotag/run/understand)。
+
+    2026-10-15 回归:_purge_material_derived 曾漏清 autotag/run/understand,删 127 条
+    流水线素材后 index/autotags 残留 24 个孤儿 sidecar。本测试为每类 sidecar 各写一个
+    假文件,remove 后必须全部消失。"""
+    _mk_material("p1")
+    # 其余派生目录也指到 _TMP(pytest 下 conftest 已隔离,此处无害;直接跑时据此隔离)
+    for d in ("VISUAL_DIR", "PHASH_DIR", "TECH_DIR", "ASR_DIR", "SHOT_DIR",
+              "AUTOTAG_DIR", "THUMBS", "RUN_DIR", "UNDERSTAND_DIR"):
+        setattr(core, d, os.path.join(_TMP, d.lower()))
+    writers = [
+        core.ocr_sidecar_path("p1"), core.visual_sidecar_path("p1"),
+        core.phash_path("p1"), core.tech_path("p1"), core.asr_sidecar_path("p1"),
+        core.shot_index_path("p1"), core.autotag_sidecar_path("p1"),
+        core.thumb_path("p1"), core.run_record_path("p1"),
+        core.understand_record_path("p1"),
+    ]
+    for p in writers:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("{}")
+        assert os.path.isfile(p), p
+    failp = os.path.join(core.THUMBS, "p1.jpg.fail")
+    with open(failp, "w", encoding="utf-8") as f:
+        f.write("err")
+    core.remove_material("p1")
+    leftover = [p for p in writers if os.path.isfile(p)]
+    assert not leftover, ("孤儿 sidecar 未清:", leftover)
+    assert not os.path.isfile(failp), "thumb .fail 标记未清"
+    assert core.get_material("p1") is None
+    print("PASS test_remove_cascades_all_sidecars")
+
+
 if __name__ == "__main__":
     test_history_records_write_ops()
     test_history_remove_and_order()
@@ -167,5 +201,6 @@ if __name__ == "__main__":
     test_parse_ocr_runner_stdout()
     test_ocr_lexical_low_weight_channel()
     test_ocr_text_cache_invalidates_on_mtime()
+    test_remove_cascades_all_sidecars()
     _teardown()
     print("OK")

@@ -61,3 +61,44 @@ def test_gate_baseline_constants_sane():
         v = ev.GATE_BASELINE[k]
         assert 0.0 <= v <= 1.0, k
     assert ev.GATE_TOL >= 0
+
+
+def test_gt_staleness_flags_zero_coverage():
+    """GT 标注的 id 全不在语料 → stale=True。
+
+    零覆盖也必须判 stale：否则 evaluate 的指标会全为 0，门禁从「跳过」
+    退化成「误报回归」，比不检测更糟。
+    """
+    gt = {"q1": ["deadbeef0001", "deadbeef0002"], "q2": ["deadbeef0003"]}
+    st = ev.gt_staleness(gt, corpora=[])
+    assert st["stale"] is True
+    assert st["existing"] == 0 and st["total_gt_ids"] == 3
+    assert st["coverage"] == 0.0
+    assert "零覆盖" in (st.get("note") or "")
+
+
+def test_gt_staleness_flags_deleted_ids():
+    """GT id 多数已不在语料（语料重构后的典型情形）→ stale=True。"""
+    gt = {"q1": ["a" * 12, "b" * 12, "c" * 12]}
+    corpora = [{"id": "a" * 12}]          # 3 个标注只有 1 个还在
+    st = ev.gt_staleness(gt, corpora=corpora)
+    assert st["stale"] is True
+    assert st["existing"] == 1 and st["missing"] == 2
+
+
+def test_gt_staleness_flags_gt_with_no_annotations():
+    """GT 存在但每条查询的相关集都为空（total=0）→ 同样属零覆盖，stale=True。"""
+    gt = {"q1": [], "q2": []}
+    st = ev.gt_staleness(gt, corpora=[{"id": "a" * 12}])
+    assert st["stale"] is True
+    assert st["total_gt_ids"] == 0 and st["coverage"] is None
+    assert "零覆盖" in (st.get("note") or "")
+
+
+def test_gt_staleness_ok_when_ids_exist():
+    """GT id 全部存在于语料 → stale=False（不该误跳）。"""
+    gt = {"q1": ["a" * 12, "b" * 12], "q2": ["c" * 12]}
+    corpora = [{"id": "a" * 12}, {"id": "b" * 12}, {"id": "c" * 12}]
+    st = ev.gt_staleness(gt, corpora=corpora)
+    assert st["stale"] is False
+    assert st["coverage"] == 1.0 and st["empty_queries"] == 0

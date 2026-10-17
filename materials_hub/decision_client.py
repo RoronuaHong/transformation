@@ -16,8 +16,34 @@ import urllib.request as _u
 import urllib.error as _ue
 
 
+_CONF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "decision.conf")
+
+
+def _conf_get(key, default=""):
+    """配置读取：环境变量优先 > decision.conf(KEY=VALUE) > default。文件回退可热切换。
+
+    _CONF_PATH 提为模块级变量，便于测试 monkeypatch 以隔离真实配置。
+    """
+    val = os.environ.get(key, "").strip()
+    if val:
+        return val
+    try:
+        if os.path.isfile(_CONF_PATH):
+            with open(_CONF_PATH, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, _, v = line.partition("=")
+                    if k.strip() == key:
+                        return v.strip()
+    except Exception:
+        pass
+    return default
+
+
 def _endpoint():
-    return os.environ.get("VITUAL_DECISION_URL", "").strip().rstrip("/")
+    return _conf_get("VITUAL_DECISION_URL").strip().rstrip("/")
 
 
 def decision_call(body, timeout=None, retries=None, recorder=None):
@@ -35,7 +61,7 @@ def decision_call(body, timeout=None, retries=None, recorder=None):
     url = base + "/v1/systemone"
     if timeout is None:
         try:
-            timeout = float(os.environ.get("VITUAL_DECISION_TIMEOUT", "3"))
+            timeout = float(_conf_get("VITUAL_DECISION_TIMEOUT", "3") or "3")
         except ValueError:
             timeout = 3.0
     if is_or and timeout < 20:

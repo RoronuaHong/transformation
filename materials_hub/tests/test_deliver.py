@@ -144,6 +144,33 @@ def test_deliver_package_non_video_copies_instead_of_transcode():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_deliver_package_carries_sha256_digest():
+    """P8：交付产物带 SHA256 + 字节数，供下游核对完整性；skipped 亦带。"""
+    tmp = tempfile.mkdtemp()
+    src = os.path.join(tmp, "note.md")
+    with open(src, "w", encoding="utf-8") as f:
+        f.write("# hi\n交付校验和测试\n")
+    core.ffmpeg_path = lambda: _FAKE_EXE
+    core.get_material = lambda mid: {"id": mid, "kind": "docs", "name": "note.md",
+                                     "location": "external", "external_path": src}
+    try:
+        out_dir = os.path.join(tmp, "out")
+        r = core.deliver_package(ids=["d1"], out_dir=out_dir, confirm=True, fmt="mp4")
+        w = r["written"][0]
+        dst = w["dst"]
+        expect = core.compute_sha256(src)          # copy 模式 → 与源字节一致
+        assert w["sha256"] == expect, w
+        assert w["bytes"] == os.path.getsize(src), w
+        assert w["sha256"] == core.compute_sha256(dst)   # 独立复算交付物本身
+        # 二次交付同目录 → skipped(exists)，也带校验和
+        r2 = core.deliver_package(ids=["d1"], out_dir=out_dir, confirm=True, fmt="mp4")
+        sk = r2["skipped"][0]
+        assert sk["status"] == "exists" and sk["sha256"] == expect, sk
+    finally:
+        _reset()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_deliver_package_missing_id():
     core.ffmpeg_path = lambda: _FAKE_EXE
     core.get_material = lambda mid: None

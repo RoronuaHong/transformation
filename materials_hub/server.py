@@ -29,6 +29,10 @@ from core import (
     read_run_record, read_understand_record, set_reviewed, distribution_readiness,
     deliver_package,
 )
+from core import (
+    KINDS, FORM_TAXONOMY, FORM_GROUP_LABELS, FORM_GROUP_LABELS_EN,
+    TOPICS, TOPICS_EN, USAGES, USAGES_EN, ALL_FORMS, form_group, FORM_SUBGROUP_LABELS, FORM_SUBGROUP_LABELS_EN, FORM_OPTIONS, FORM_OPTIONS_EN, FORM_DESCENDANTS, TOPIC_TAXONOMY, TOPIC_GROUP_EN, TOPIC_DESCENDANTS,
+)
 from gateway import proxy_target, forward as gateway_forward
 
 PORT = 8000
@@ -372,8 +376,9 @@ class Handler(BaseHTTPRequestHandler):
             rows = search(kw, kind, tag, limit=limit, offset=offset, mode=mode,
                           sort=sort if sort in ("newest", "oldest", "name", "size") else "")
             for m in rows:
-                # 给视频标注封面是否已就绪,前端据此决定要不要请求 poster
-                if m["kind"] in ("videos", "silent"):
+                # 标注封面是否已就绪(视频抽帧 / 图片·动画 PIL 缩略图),
+                # 前端据此(m.thumb)决定请求 /api/thumb 还是原文件,图片即走小图加载。
+                if m["kind"] in ("videos", "silent", "images", "anim"):
                     tp = thumb_path(m["id"])
                     m["thumb"] = os.path.exists(tp) and os.path.getsize(tp) > 0
                 # 外部引用标注原文件是否还在(缺失则卡片提示,不再发起必然 404 的请求)
@@ -389,18 +394,58 @@ class Handler(BaseHTTPRequestHandler):
                                                          q.get("mode", ["auto"])[0])})
         if p == "/api/stats":
             ms = all_materials()
-            kinds = {}
+            # 始终返回完整 KINDS 分类体系(含 0 计数):让前端筛选器展示全部
+            # 素材分类(raw/project/vector/model3d/font 等),而非仅数据里出现的类。
+            kinds = {k: 0 for k in list(KINDS) + ["other"]}
+            # 内容形式分布:按 leaf id 计数(深层才有意义);前端按 form_descendants 聚合到上层。
+            forms = {}
+            topics = {}
+            usages = {}
             for m in ms:
-                kinds[m["kind"]] = kinds.get(m["kind"], 0) + 1
+                k = m.get("kind") or "other"
+                kinds[k] = kinds.get(k, 0) + 1
+                f = m.get("form") or "other"
+                if f not in ALL_FORMS and f != "other":
+                    f = "other"
+                forms[f] = forms.get(f, 0) + 1
+                for t in (m.get("topics") or "").split(","):
+                    t = t.strip()
+                    if t:
+                        topics[t] = topics.get(t, 0) + 1
+                for u in (m.get("usage") or "").split(","):
+                    u = u.strip()
+                    if u:
+                        usages[u] = usages.get(u, 0) + 1
             # 自动处理链待处理数(videos/silent/images 中还有缺项的素材条数)
             pending = sum(1 for m in ms
                           if m.get("kind") in ("videos", "silent", "images")
                           and any(pending_processing(m["id"]).values()))
             return self._json({"total": len(ms), "dupes": len(duplicates()), "kinds": kinds,
+                               "forms": forms, "topics": topics, "usages": usages,
                                "thumbs": thumbs_status(), "thumb_job": dict(_THUMB_JOB),
                                "external": external_stats(),
                                "embed": {**embed_status(), "job": dict(_EMBED_JOB)},
                                "auto": {"pending": pending}})
+
+        if p == "/api/taxonomy":
+            # 内容形式多层级树 + 题材/用途标签,供前端筛选器与上传表单渲染(单一真相源)。
+            return self._json({
+                "forms": FORM_TAXONOMY,
+                "form_groups": FORM_GROUP_LABELS,
+                "form_groups_en": FORM_GROUP_LABELS_EN,
+                "form_subgroups": FORM_SUBGROUP_LABELS,
+                "form_subgroups_en": FORM_SUBGROUP_LABELS_EN,
+                "form_options": FORM_OPTIONS,
+                "form_options_en": FORM_OPTIONS_EN,
+                "form_descendants": FORM_DESCENDANTS,
+                "topics": TOPICS,
+                "topics_en": TOPICS_EN,
+                "topic_taxonomy": TOPIC_TAXONOMY,
+                "topic_groups_en": TOPIC_GROUP_EN,
+                "topic_descendants": TOPIC_DESCENDANTS,
+                "usages": USAGES,
+                "usages_en": USAGES_EN,
+            })
         if p == "/api/agent":
             # Deep Agent 状态:?task_id= 始终读 checkpoint(每步落盘的 todos/progress)。
             # 任务进行中也要带回这些字段,否则前端轮询只能看到 running,进度条不走。
@@ -607,6 +652,10 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length) if length else b""
 
         if p == "/api/upload":
+            upq = urllib.parse.parse_qs(u.query)
+            up_form = (upq.get("form") or [""])[0].strip()
+            up_topics = (upq.get("topics") or [""])[0].strip()
+            up_usage = (upq.get("usage") or [""])[0].strip()
             ctype = self.headers.get("Content-Type", "")
             bm = re.search(r"boundary=([^;]+)", ctype)
             if not bm:
@@ -624,7 +673,8 @@ class Handler(BaseHTTPRequestHandler):
                         tmp = os.path.join(HUB, "ingest", sanitize_name(filename))
                         with open(tmp, "wb") as o:
                             o.write(content)
-                        r = ingest_file(tmp, move=True, source="upload")
+                        r = ingest_file(tmp, move=True, source="upload",
+                                        form=up_form, topics=up_topics, usage=up_usage)
                         if r and r.get("status") == "added":
                             any_added = True
                         results.append({"name": filename,
@@ -920,10 +970,24 @@ def main():
     auth = " (token required: VITUAL_HUB_TOKEN set)" if HUB_TOKEN else " (open, no token)"
     print(f"Materials Hub API -> http://{HUB_HOST}:{PORT}/api/*{auth}")
     print(f"  UI moved to transform: http://127.0.0.1:3000/zh/hub  (proxy /hub-api → this server)")
-    try:
-        srv.serve_forever()
-    except KeyboardInterrupt:
-        srv.shutdown()
+    # 自愈:主线程任何意外异常都不让进程退出,3s 后重建 server 继续服务
+    import sys as _sys, traceback as _tb
+    while True:
+        try:
+            srv.serve_forever()
+            break
+        except KeyboardInterrupt:
+            srv.shutdown()
+            break
+        except Exception as _e:
+            _sys.stderr.write("[hub] serve_forever crashed, restart in 3s: %r\n" % (_e,))
+            _tb.print_exc()
+            try:
+                srv.shutdown(); srv.server_close()
+            except Exception:
+                pass
+            time.sleep(3)
+            srv = ThreadingHTTPServer((HUB_HOST, PORT), Handler)
 
 
 if __name__ == "__main__":

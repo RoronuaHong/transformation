@@ -10,6 +10,7 @@ import os
 import pytest
 
 import core
+import decision_client
 
 # (query, 期望意图)
 GT_RULES = [
@@ -39,17 +40,18 @@ def test_rules_channel(q, expect):
     assert core._query_intent(q) == expect
 
 
-def test_default_is_pure_rules_no_decision():
-    """未设 VITUAL_DECISION_URL 时完全走规则，不产生任何网络调用。"""
-    saved = os.environ.pop("VITUAL_DECISION_URL", None)
-    try:
-        assert core.decision_endpoint() == ""
-        assert core.decision_choice_intent("这句台词是什么") is None
-        assert core._query_intent_decided("这句台词是什么") == "speech"
-        assert core._query_intent_decided("红烧鸡翅") == "text"
-    finally:
-        if saved is not None:
-            os.environ["VITUAL_DECISION_URL"] = saved
+def test_default_is_pure_rules_no_decision(monkeypatch, tmp_path):
+    """未设 VITUAL_DECISION_URL 且无 decision.conf 时完全走规则，不产生任何网络调用。
+
+    注意：开关契约是「env VITUAL_DECISION_URL > decision.conf > 关」，
+    故测「彻底关闭」必须同时屏蔽 env 与 decision.conf 两个来源。
+    """
+    monkeypatch.delenv("VITUAL_DECISION_URL", raising=False)
+    monkeypatch.setattr(decision_client, "_CONF_PATH", str(tmp_path / "absent.conf"))
+    assert core.decision_endpoint() == ""
+    assert core.decision_choice_intent("这句台词是什么") is None
+    assert core._query_intent_decided("这句台词是什么") == "speech"
+    assert core._query_intent_decided("红烧鸡翅") == "text"
 
 
 @pytest.mark.skipif(
