@@ -65,7 +65,6 @@ export type NavCopy = {
   feed: string;
   ask: string;
   hub: string;
-  watchlist: string;
   menu: string;
   themeLight: string;
   themeDark: string;
@@ -487,7 +486,6 @@ const en: UiCopy = {
     feed: "Library",
     ask: "Ask",
     hub: "Materials",
-    watchlist: "Watchlist",
     menu: "Menu",
     themeLight: "Light",
     themeDark: "Dark",
@@ -902,7 +900,6 @@ const zh: UiCopy = {
     feed: "列表",
     ask: "问问一桌",
     hub: "素材中心",
-    watchlist: "观察列表",
     menu: "菜单",
     themeLight: "浅色",
     themeDark: "深色",
@@ -1316,7 +1313,6 @@ const zhHant: UiCopy = {
     feed: "列表",
     ask: "問問一桌",
     hub: "素材中心",
-    watchlist: "觀察列表",
     menu: "選單",
     themeLight: "淺色",
     themeDark: "深色",
@@ -1534,7 +1530,7 @@ export const ui = {
       unlocking: "Реклама",
       morePoints: "ещё {n}",
     },
-    nav: { language: "Язык", feed: "Библиотека", watchlist: "Наблюдение" },
+    nav: { language: "Язык", feed: "Библиотека" },
   }),
   ja: overlay({
     feed: {
@@ -1556,7 +1552,7 @@ export const ui = {
       unlocking: "広告再生中",
       morePoints: "ほか {n} 件",
     },
-    nav: { language: "言語", feed: "一覧", watchlist: "ウォッチリスト" },
+    nav: { language: "言語", feed: "一覧" },
   }),
   ko: overlay({
     feed: {
@@ -1578,7 +1574,7 @@ export const ui = {
       unlocking: "광고 재생 중",
       morePoints: "{n}개 더",
     },
-    nav: { language: "언어", feed: "목록", watchlist: "관심 목록" },
+    nav: { language: "언어", feed: "목록" },
   }),
   pt: overlay({
     feed: { cta: "Ver os passos", },
@@ -1596,7 +1592,7 @@ export const ui = {
       unlocking: "Anúncio",
       morePoints: "mais {n}",
     },
-    nav: { language: "Idioma", watchlist: "Observação"},
+    nav: { language: "Idioma"},
   }),
   de: overlay({
     feed: { cta: "Schritte lesen", },
@@ -1614,7 +1610,7 @@ export const ui = {
       unlocking: "Werbung",
       morePoints: "noch {n}",
     },
-    nav: { language: "Sprache", watchlist: "Beobachtung"},
+    nav: { language: "Sprache"},
   }),
   es: overlay({
     feed: { cta: "Ver los pasos", },
@@ -1632,7 +1628,7 @@ export const ui = {
       unlocking: "Anuncio",
       morePoints: "{n} más",
     },
-    nav: { language: "Idioma", watchlist: "Observación"},
+    nav: { language: "Idioma"},
   }),
   fr: overlay({
     feed: { cta: "Lire les étapes", },
@@ -1650,7 +1646,7 @@ export const ui = {
       unlocking: "Publicité",
       morePoints: "{n} de plus",
     },
-    nav: { language: "Langue", watchlist: "Observation"},
+    nav: { language: "Langue"},
   }),
   ar: overlay({
     feed: { cta: "اقرأ الخطوات", },
@@ -1668,7 +1664,7 @@ export const ui = {
       unlocking: "الإعلان",
       morePoints: "{n} إضافية",
     },
-    nav: { language: "اللغة", watchlist: "المراقبة"},
+    nav: { language: "اللغة"},
   }),
   hi: overlay({
     feed: { cta: "चरण देखें", },
@@ -1686,7 +1682,7 @@ export const ui = {
       unlocking: "विज्ञापन",
       morePoints: "और {n}",
     },
-    nav: { language: "भाषा", watchlist: "वॉचलिस्ट"},
+    nav: { language: "भाषा"},
   }),
   id: overlay({
     feed: { cta: "Lihat langkah", },
@@ -1704,7 +1700,7 @@ export const ui = {
       unlocking: "Iklan",
       morePoints: "{n} lagi",
     },
-    nav: { language: "Bahasa", watchlist: "Pantauan"},
+    nav: { language: "Bahasa"},
   }),
   vi: overlay({
     feed: { cta: "Xem các bước", },
@@ -1722,7 +1718,7 @@ export const ui = {
       unlocking: "Quảng cáo",
       morePoints: "còn {n}",
     },
-    nav: { language: "Ngôn ngữ", watchlist: "Theo dõi"},
+    nav: { language: "Ngôn ngữ"},
   }),
   th: overlay({
     feed: { cta: "ดูขั้นตอน", },
@@ -1740,7 +1736,7 @@ export const ui = {
       unlocking: "โฆษณา",
       morePoints: "อีก {n}",
     },
-    nav: { language: "ภาษา", watchlist: "เฝ้าดู"},
+    nav: { language: "ภาษา"},
   }),
   tr: overlay({
     feed: { cta: "Adımları gör", },
@@ -1758,7 +1754,7 @@ export const ui = {
       unlocking: "Reklam",
       morePoints: "{n} tane daha",
     },
-    nav: { language: "Dil", watchlist: "İzleme"},
+    nav: { language: "Dil"},
   }),
 } as const satisfies Record<Locale, UiCopy>;
 

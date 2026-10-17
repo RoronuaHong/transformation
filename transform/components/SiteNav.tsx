@@ -66,9 +66,6 @@ export function SiteNav({ locale, nav }: { locale: Locale; nav: NavCopy }) {
         <Link href={`/${locale}/ask`} onClick={() => setOpen(false)}>
           {nav.ask}
         </Link>
-        <Link href={`/${locale}/watchlist`} onClick={() => setOpen(false)}>
-          {nav.watchlist}
-        </Link>
         <HubLink label={nav.hub} />
         <ThemeToggle locale={locale} />
         <LangSwitch locale={locale} />
