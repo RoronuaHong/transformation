@@ -114,6 +114,27 @@ def _file_has_video_stream(path: Path) -> bool:
     return bool(re.search(r"Stream #.*Video:", blob))
 
 
+def _file_has_audio_stream(path: Path) -> bool:
+    """True when ffmpeg reports an audio stream (video-only mp4 must not count)."""
+    try:
+        ffmpeg = find_ffmpeg()
+    except FileNotFoundError:
+        return False
+    try:
+        r = subprocess.run(
+            [ffmpeg, "-hide_banner", "-i", str(path)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+    except Exception:
+        return False
+    blob = f"{r.stderr or ''}\n{r.stdout or ''}"
+    return bool(re.search(r"Stream #.*Audio:", blob))
+
+
 def detect_bvid(url: str) -> str | None:
     m = re.search(r"(BV[\w]+)", url, re.I)
     return m.group(1) if m else None
@@ -518,6 +539,37 @@ def _ffmpeg_mux_copy(video: Path, audio: Path, dest: Path) -> None:
     if not tmp.is_file() or tmp.stat().st_size < 1000:
         raise RuntimeError(f"ffmpeg mux produced empty file: {tmp}")
     tmp.replace(dest)
+
+
+def _mux_sibling_audio_if_missing(media: Path, target: Path) -> bool:
+    """yt-dlp 合流失败时(bv+ba 分开放)，把旁落的音轨 mux 回源视频。
+
+    yt-dlp 用 `-f bv*+ba` 下载、合流失败时会留下形如 `source_video.f30280.m4a`
+    的独立音轨，而挑选源文件只看 .mp4，导致拿到无音轨的视频，后续 ASR 必挂。
+    Returns True when audio was merged in.
+    """
+    if not target.is_file() or _file_has_audio_stream(target):
+        return False
+    audio_exts = {".m4a", ".aac", ".mp3", ".opus", ".ogg", ".flac", ".wav"}
+    cands = [
+        p
+        for p in media.iterdir()
+        if p.is_file()
+        and p.suffix.lower() in audio_exts
+        and p.resolve() != target.resolve()
+    ]
+    # 优先本次下载留下的 DASH 音轨(source_video.f<id>.m4a)，再按体积取大
+    cands.sort(key=lambda p: ("source_video" in p.stem, p.stat().st_size), reverse=True)
+    for a in cands:
+        try:
+            _ffmpeg_mux_copy(target, a, target)
+        except Exception as e:  # noqa: BLE001 - 单个候选失败就试下一个
+            print(f"[fetch-video] mux audio {a.name} failed: {e}")
+            continue
+        if _file_has_audio_stream(target):
+            print(f"[fetch-video] merged missing audio from {a.name}")
+            return True
+    return False
 
 
 def resolve_bilibili_api_download(
@@ -1419,6 +1471,11 @@ def ensure_source_video(
         if target.exists():
             target.unlink()
         src.replace(target)
+    # yt-dlp 合流失败会留下独立音轨，补 mux 回来，否则下游 ASR 抽不到音频
+    try:
+        _mux_sibling_audio_if_missing(media, target)
+    except Exception as e:  # noqa: BLE001 - 补音频失败不应让整个下载失败
+        print(f"[fetch-video] audio repair skipped: {e}")
     print(f"[fetch-video] source -> {target.name} ({target.stat().st_size} bytes)")
     return target
 
