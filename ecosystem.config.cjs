@@ -22,6 +22,7 @@ module.exports = {
       env: {
         PYTHONUNBUFFERED: "1",
         VITUAL_REQUIRE_GPU: "1",
+        VITUAL_HUB_SYNC: "0",
       },
     },
     {
@@ -47,6 +48,7 @@ module.exports = {
       env: {
         PYTHONUNBUFFERED: "1",
         VITUAL_REQUIRE_GPU: "1",
+        VITUAL_HUB_SYNC: "0",
         VITUAL_ORT_THREADS: "4",
         VITUAL_GLYPHFILL_BATCH: "8",
       },

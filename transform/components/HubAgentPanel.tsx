@@ -835,6 +835,8 @@ export function HubAgentPanel({ copy }: { copy: HubCopy }) {
                             <img
                               src={a.previewUrl || hubThumbUrl(a.id)}
                               alt={a.name}
+                              loading="lazy"
+                              decoding="async"
                             />
                           ) : (
                             <span className="hub-chat-att-vid">VIDEO</span>
@@ -954,7 +956,7 @@ export function HubAgentPanel({ copy }: { copy: HubCopy }) {
                 <div key={a.localId} className="hub-chat-pending-item">
                   {a.previewUrl ? (
                     // eslint-disable-next-line @next/next/no-img-element
-                    <img src={a.previewUrl} alt={a.name} />
+                    <img src={a.previewUrl} alt={a.name} loading="lazy" decoding="async" />
                   ) : (
                     <span className="hub-chat-att-vid">VIDEO</span>
                   )}

@@ -175,6 +175,7 @@ export function ArticleMediaPreview({
                       className="article-media-viewer-asset"
                       src={active.src}
                       alt={active.title}
+                      decoding="async"
                     />
                   ) : (
                     <video
@@ -257,7 +258,7 @@ export function ArticleMediaPreview({
                   <span className="article-media-thumb" aria-hidden="true">
                     {item.kind === "gif" ? (
                       // eslint-disable-next-line @next/next/no-img-element
-                      <img src={item.src} alt="" loading="lazy" />
+                      <img src={item.src} alt="" loading="lazy" decoding="async" />
                     ) : (
                       <span className="article-media-play">▶</span>
                     )}

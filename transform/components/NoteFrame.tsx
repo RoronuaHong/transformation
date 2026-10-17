@@ -39,7 +39,7 @@ export function NoteFrame({
         aria-label={viewLabel}
       >
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img className="note-frame" src={src} alt="" loading="lazy" />
+        <img className="note-frame" src={src} alt="" loading="lazy" decoding="async" />
         <span className="note-frame-cue">{viewLabel}</span>
       </button>
       {open ? (
@@ -65,7 +65,7 @@ export function NoteFrame({
               </button>
             </header>
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img className="frame-modal-img" src={src} alt="" />
+            <img className="frame-modal-img" src={src} alt="" decoding="async" />
           </div>
         </div>
       ) : null}

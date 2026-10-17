@@ -45,12 +45,18 @@ export type HubMaterial = {
   hit_shot?: number;
   hit_end?: number;
   hit_via?: string;
+  form?: string;
+  topics?: string;
+  usage?: string;
 };
 
 export type HubStats = {
   total: number;
   dupes: number;
   kinds: Record<string, number>;
+  forms?: Record<string, number>;
+  topics?: Record<string, number>;
+  usages?: Record<string, number>;
   thumbs?: { ffmpeg?: boolean };
   external?: { external?: number; broken?: number };
 };
@@ -291,12 +297,18 @@ export type HubUploadResult = {
 export function hubUploadFile(
   file: File,
   onProgress?: (pct: number) => void,
+  opts?: { form?: string; topics?: string; usage?: string },
 ): Promise<HubUploadResult> {
   return new Promise((resolve, reject) => {
     const fd = new FormData();
     fd.append("file", file, file.name);
+    const qs = new URLSearchParams();
+    if (opts?.form) qs.set("form", opts.form);
+    if (opts?.topics) qs.set("topics", opts.topics);
+    if (opts?.usage) qs.set("usage", opts.usage);
+    const url = hubUploadUrl() + (qs.toString() ? `?${qs.toString()}` : "");
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", hubUploadUrl());
+    xhr.open("POST", url);
     // 真实上传进度(fetch 不暴露 upload 事件)
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProgress) {

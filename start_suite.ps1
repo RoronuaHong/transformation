@@ -37,5 +37,14 @@ if ($env:VITUAL_START_DECISION -ne '1') {
 }
 
 Start-Sleep -Seconds 3
-Set-Location (Join-Path $ROOT materials_hub)
-python server.py
+# 素材中心后端:后台分离启动(关掉本启动窗口也不会杀进程);日志落盘;端口占用则跳过避免重复实例
+$hubDir = Join-Path $ROOT materials_hub
+$hubLog = Join-Path $hubDir "hub_server.log"
+# 外部引用白名单:登记在素材中心之外的个人资源(桌面/视频/下载)原路径,预览才不会被沙箱拦
+$env:VITUAL_HUB_EXT_ROOTS = 'C:\Users\msi\Desktop;C:\Users\msi\Videos;C:\Users\msi\Downloads'
+if (Test-Port 8000) {
+  Write-Host "skip-hub (端口 8000 已占用)"
+} else {
+  Write-Host "start-hub (detached, log -> $hubLog)"
+  Start-Process -WindowStyle Hidden -FilePath python -WorkingDirectory $hubDir -ArgumentList server.py -RedirectStandardOutput $hubLog -RedirectStandardError $hubLog
+}
