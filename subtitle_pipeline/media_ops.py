@@ -36,7 +36,7 @@ CAPTION_SCAN_HIT = 0.28
 DENSE_COVERAGE_FULL = float(os.environ.get("VITUAL_CAPTION_FULL_COVERAGE", "0.75") or 0.75)
 HARDSUB_VLM_MODEL = os.environ.get("VITUAL_DEHARDSUB_VLM", "gemma4:e2b")
 DEHARDSUB_MODES = ("auto", "vlm", "band", "delogo", "fill", "crop")
-DEHARDSUB_ENGINES = ("sttn", "opencv", "lama")
+DEHARDSUB_ENGINES = ("sttn", "opencv", "lama", "propainter", "diffusion")
 POSTPROC_MODES = ("fast", "balanced", "quality")
 DEFAULT_DEHARDSUB_ENGINE = (
     str(os.environ.get("VITUAL_DEHARDSUB_ENGINE", "sttn") or "sttn").strip().lower()
@@ -950,6 +950,135 @@ def locate_hardsub_box_watermark(
     }
 
 
+def locate_hardsub_box_up_watermark(
+    video: Path,
+    width: int,
+    height: int,
+) -> dict[str, Any] | None:
+    """Top-right UP-master watermark (e.g. Bilibili "XXXbilibili" credit).
+
+    The generic top-title detector only catches yellow text in the top-LEFT and
+    the bottom-right detector only covers the lower corner, so the persistent
+    top-right copyright credit is currently missed entirely (visible in clean
+    output). Scan the top-right ROI for bright outlined glyphs (white/colored)
+    and return a static region. Route it through STTN glyph holes so only the
+    text is repainted and the (transparent) corner stays natural.
+    """
+    import cv2
+    import numpy as np
+
+    video = Path(video)
+    dur = probe_duration_sec(video) or 0.0
+    if dur <= 0.4:
+        return None
+    hits: list[tuple[int, int, int, int]] = []
+    for frac in (0.3, 0.55, 0.8):
+        raw = _grab_bgr_frame(video, dur * frac)
+        if raw is None:
+            continue
+        if raw.shape[1] != width or raw.shape[0] != height:
+            raw = cv2.resize(raw, (width, height), interpolation=cv2.INTER_AREA)
+        y0 = max(0, int(height * 0.005))
+        y1 = int(height * 0.05)
+        x0 = int(width * 0.45)
+        roi = raw[y0:y1, x0:width]
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        # 半透明白字：亮填充 + 暗描边，或亮描边（与右下角水印同口径）。
+        bright = gray >= 185
+        dark = gray <= 105
+        near_dark = cv2.dilate(dark.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=1) > 0
+        edge = cv2.morphologyEx(gray, cv2.MORPH_GRADIENT, np.ones((3, 3), np.uint8))
+        mask = ((bright & near_dark) | (bright & (edge >= 20))).astype(np.uint8) * 255
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((2, 4), np.uint8), iterations=1)
+        mask = cv2.dilate(mask, np.ones((2, 2), np.uint8), iterations=1)
+        frac_m = float((mask > 0).mean())
+        if frac_m < 0.001 or frac_m > 0.18:
+            continue
+        n_cc, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        keep = np.zeros_like(mask)
+        for i in range(1, n_cc):
+            area = int(stats[i, cv2.CC_STAT_AREA])
+            if area < 16:
+                continue
+            bx = int(stats[i, cv2.CC_STAT_LEFT])
+            bw = int(stats[i, cv2.CC_STAT_WIDTH])
+            # 只保留最右侧块（UP 水印在右上角）。
+            if bx + bw < int(roi.shape[1] * 0.30):
+                continue
+            keep[labels == i] = 255
+        # 只取【最顶部】的字行簇：UP 水印文字在头像/在线人数/关闭按钮的上方，
+        # 直接取并集会把那些大块亮色内容一并纳入框，STTN 会把头像涂抹毁掉
+        # （实测 clip15 clean 顶部头像/1853 计数被涂成白色色块）。
+        ys_all, _ = np.where(keep > 0)
+        rh = keep.shape[0]
+        row_proj = np.zeros(rh, dtype=int)
+        np.add.at(row_proj, ys_all, 1)
+        clusters: list[list[int]] = []
+        start = None
+        for yi in range(rh):
+            if row_proj[yi] > 0:
+                if start is None:
+                    start = yi
+            elif start is not None:
+                clusters.append([start, yi])
+                start = None
+        if start is not None:
+            clusters.append([start, rh])
+        if not clusters:
+            continue
+        merged_c = [list(clusters[0])]
+        for c in clusters[1:]:
+            # 间距阈值 3：文字行与下方头像行通常只隔 ~4px，阈值大了会把头像
+            # 一并并进顶部簇（实测 clip15 框被撑到 y38-128 连头像一起毁）。
+            if c[0] - merged_c[-1][1] < 3:
+                merged_c[-1][1] = c[1]
+            else:
+                merged_c.append(list(c))
+        top_band = merged_c[0]
+        keep = keep[top_band[0] : top_band[1], :]
+        ys, xs = np.where(keep > 0)
+        if len(xs) < 16:
+            continue
+        pad = 8
+        # 注意 keep 已被切成顶部字行带，ys 相对 top_band[0]，需加回偏移。
+        hits.append(
+            (
+                x0 + max(0, int(xs.min()) - pad),
+                y0 + top_band[0] + max(0, int(ys.min()) - pad),
+                x0 + min(roi.shape[1], int(xs.max()) + pad + 1),
+                y0 + top_band[0] + min(keep.shape[0], int(ys.max()) + pad + 1),
+            )
+        )
+    if not hits:
+        return None
+    x0a = min(h[0] for h in hits)
+    y0a = min(h[1] for h in hits)
+    x1a = max(h[2] for h in hits)
+    y1a = max(h[3] for h in hits)
+    box = clamp_hardsub_box(
+        {"x": x0a, "y": y0a, "w": max(8, x1a - x0a), "h": max(8, y1a - y0a)},
+        width,
+        height,
+        zone="top",
+        max_h_ratio=0.10,
+        max_h_px=90,
+        min_y_ratio=0.0,
+    )
+    return {
+        "box": box,
+        "norm": {
+            "x": box["x"] / width,
+            "y": box["y"] / height,
+            "w": box["w"] / width,
+            "h": box["h"] / height,
+        },
+        "hits": len(hits),
+        "source": "up_watermark",
+        "zone": "top",
+        "role": "up_watermark",
+    }
+
+
 def resolve_hardsub_box(
     video: Path,
     width: int,
@@ -1045,38 +1174,70 @@ def expand_dialogue_box_full_line(
         ys, xs = np.where(keep > 0)
         if len(xs) < 30:
             continue
+        # 只取【最底部字幕簇】作字幕范围：按行投影找连续有字行块，合并间距<45px 的
+        # 相邻块（兼容两行字幕）；上方弹幕是独立高位块，被天然排除。逐帧都只取
+        # 最底部块，跨帧再取中位(见下)，可抗弹幕每帧漂移的 outlier。
+        rh = keep.shape[0]
+        row_proj = np.zeros(rh, dtype=int)
+        np.add.at(row_proj, ys, 1)
+        clusters: list[list[int]] = []
+        start = None
+        for yi in range(rh):
+            if row_proj[yi] > 0:
+                if start is None:
+                    start = yi
+            elif start is not None:
+                clusters.append([start, yi])
+                start = None
+        if start is not None:
+            clusters.append([start, rh])
+        if not clusters:
+            continue
+        merged_c = [list(clusters[0])]
+        for c in clusters[1:]:
+            if c[0] - merged_c[-1][1] < 45:
+                merged_c[-1][1] = c[1]
+            else:
+                merged_c.append(list(c))
+        bot = merged_c[-1]
         xs0.append(x_lo + int(xs.min()))
         xs1.append(x_lo + int(xs.max()) + 1)
-        ys0.append(y_lo + int(ys.min()))
-        ys1.append(y_lo + int(ys.max()) + 1)
+        ys0.append(y_lo + int(bot[0]))
+        ys1.append(y_lo + int(bot[1]))
 
     if not xs0:
         return clamp_hardsub_box(seed, width, height, zone="bottom")
 
+    # 跨帧取【中位】位置：字幕固定在底部 → 中位即字幕带；弹幕每帧漂移 → 中位抗
+    # 1~2 个 outlier。框只贴合字幕本身，不外扩到上方弹幕、也不下探到半透明 UI 栏
+    # （UI 栏被纳入正是 clean 在 y1813-1823 涂抹出亮痕的根因）。
+    ys0v = int(np.median(ys0))
+    ys1v = int(np.median(ys1))
+    # 允许底部取更大值以覆盖两行/降部，但仅当距中位 ≤45px（防弹幕 outlier 拉高）。
+    cand = [v for v in ys1 if v - ys0v < 45]
+    if cand:
+        ys1v = max(ys1v, max(cand))
+    glyph_h = max(1, ys1v - ys0v)
     pad_x = max(14, (max(xs1) - min(xs0)) // 24)
-    pad_y = max(12, (max(ys1) - min(ys0)) // 3)
+    pad_y_top = max(12, glyph_h // 3)   # 上留白：覆盖上伸笔画
+    pad_y_bot = 8                        # 下留白：仅盖降部，绝不探入半透明 UI 栏(y≥1813)
+    box_top = max(y_lo, ys0v - pad_y_top)
+    box_bot = min(height, ys1v + pad_y_bot)
     box = {
         "x": max(0, min(xs0) - pad_x),
-        "y": max(y_lo, min(ys0) - pad_y),
+        "y": box_top,
         "w": min(width, max(xs1) + pad_x) - max(0, min(xs0) - pad_x),
-        "h": min(height, max(ys1) + pad_y) - max(y_lo, min(ys0) - pad_y),
+        "h": box_bot - box_top,
     }
-    # Expand *width* with the seed so long lines aren't clipped; keep glyph height
-    # (merging seed Y re-inflates tall locate bands into STTN/glyph routes).
+    # 宽度与 seed 取并集（防止长行被裁）；高度严格以字幕簇为准，不向 seed 底边生长。
     sx, sy, sw, sh = int(seed["x"]), int(seed["y"]), int(seed["w"]), int(seed["h"])
     x0 = min(box["x"], sx)
     x1 = max(box["x"] + box["w"], sx + sw)
-    y0 = int(box["y"])
-    y1 = int(box["y"] + box["h"])
-    # If glyph height is oddly short vs seed, allow a little downward growth only.
-    seed_bottom = sy + sh
-    if seed_bottom > y1 and (seed_bottom - y1) <= max(24, sh // 4):
-        y1 = seed_bottom
     merged = {
         "x": max(0, x0 - 6),
-        "y": max(y_lo, y0 - 4),
+        "y": max(y_lo, box_top - 4),
         "w": min(width, x1 + 6) - max(0, x0 - 6),
-        "h": min(height, y1 + 8) - max(y_lo, y0 - 4),
+        "h": min(height, box_bot + 2) - max(y_lo, box_top - 4),
     }
     return clamp_hardsub_box(
         merged, width, height, zone="bottom", max_h_ratio=0.14, max_h_px=160
@@ -1182,6 +1343,12 @@ def resolve_hardsub_boxes(
         )
         out.append(mark)
 
+    # 右上角 UP 主水印（"XXXbilibili"）此前被 top-title(左上黄字) 与 watermark(右下)
+    # 两个检测器双双漏掉 → 此处补上，走 STTN 字形洞只去文字、保留透明角落。
+    up = locate_hardsub_box_up_watermark(video, width, height)
+    if up and up.get("box"):
+        out.append(dict(up))
+
     return out
 
 
@@ -1220,7 +1387,7 @@ def _encode_dehardsub_fill(
             "-preset",
             "veryfast",
             "-crf",
-            "23",
+            "18",
             "-movflags",
             "+faststart",
             str(dest),
@@ -1239,7 +1406,7 @@ def _encode_dehardsub_delogo(
     box: dict[str, int],
 ) -> None:
     vf = hardsub_delogo_vf_box(box)
-    _x264_out(ffmpeg, src, dest, vf=vf, crf=23)
+    _x264_out(ffmpeg, src, dest, vf=vf, crf=18)
 
 
 def _hardsub_chroma_mask(bgr: Any) -> Any:
@@ -1584,7 +1751,7 @@ def _encode_dehardsub_inpaint(
             "-preset",
             "veryfast",
             "-crf",
-            "23",
+            "18",
             "-pix_fmt",
             "yuv420p",
             "-movflags",
@@ -1673,6 +1840,14 @@ def _bottom_band_gray_bytes(
     return r.stdout
 
 
+# 底带亮像素占比上限：字幕字形是细笔画，即便密集也填不满整个底带
+# （实测 B 站片段底带 bright_frac≈0.03-0.08）。整片发亮的底带（白底网页/
+# 过曝/雪景，实测录屏样例 0.65）亮的是**背景**而非字形 —— 按亮度线性打分
+# 会饱和成 1.0 假阳性，让管线对无字幕视频触发破坏性修复。超过此上限直接
+# 判 0 分。偏安全取向：假阳性破坏画面，假阴性只是漏处理罕见的实心底字幕。
+HARDSUB_MAX_BAND_BRIGHT = 0.5
+
+
 def score_hardsub_band(raw: bytes) -> dict[str, float]:
     """Heuristic: burned captions → bright glyphs + high local contrast in bottom band."""
     if not raw:
@@ -1682,6 +1857,9 @@ def score_hardsub_band(raw: bytes) -> dict[str, float]:
     var = sum((b - mean) ** 2 for b in raw) / n
     std = var**0.5
     bright = sum(1 for b in raw if b >= 200) / n
+    if bright > HARDSUB_MAX_BAND_BRIGHT:
+        return {"score": 0.0, "mean": round(mean, 2), "std": round(std, 2),
+                "bright_frac": round(bright, 4), "note": "solid_bright"}
     score = min(1.0, bright * 5.0 + min(std, 70.0) / 140.0)
     return {
         "score": round(score, 4),
@@ -1689,6 +1867,14 @@ def score_hardsub_band(raw: bytes) -> dict[str, float]:
         "std": round(std, 2),
         "bright_frac": round(bright, 4),
     }
+
+
+# 局部性判别阈值：底部亮带 bright_frac 超过整帧 bright_frac 的此倍数才算
+# 「局部化字幕带」。字幕字形是空间局部的（底部亮、其余暗）；白底页面/过曝
+# 场景则整帧都亮（实测网页录屏 band 0.873 vs frame 0.481 = 1.82 倍 → 抑制；
+# 实心字幕条 fixture ≈5.6 倍 → 保留检出）。取 2.5 居中，且偏安全：
+# 假阳性会对无字幕视频触发破坏性修复，假阴性只是跳过。
+HARDSUB_LOCALITY_RATIO = 2.5
 
 
 def detect_hardsubs(
@@ -1740,7 +1926,10 @@ def detect_hardsubs(
         "need_hits": need_hits,
         "band_ratio": band_ratio,
         "frames": details,
-        "reason": "hardsub_band" if detected else "below_threshold",
+        "reason": ("hardsub_band" if detected
+                   else "solid_bright"
+                   if any(d.get("note") == "solid_bright" for d in details)
+                   else "below_threshold"),
     }
 
 
@@ -1854,6 +2043,21 @@ def _merge_time_windows(
     return out
 
 
+def _count_frames(ffmpeg: str, path: Path) -> int:
+    """解码到 null 统计视频帧数（无 ffprobe 时用）。"""
+    try:
+        r = subprocess.run(
+            [ffmpeg, "-hide_banner", "-i", str(path), "-map", "0:v:0", "-f", "null", "-"],
+            capture_output=True,
+            text=True,
+            timeout=3600,
+        )
+    except Exception:
+        return 0
+    m = re.findall(r"frame=\s*(\d+)", r.stderr or "")
+    return int(m[-1]) if m else 0
+
+
 def _concat_demuxer(paths: list[Path], dest: Path) -> Path:
     if not paths:
         raise MediaOpsError("concat demuxer needs at least one clip")
@@ -1886,6 +2090,39 @@ def _concat_demuxer(paths: list[Path], dest: Path) -> Path:
         _run_ffmpeg(cmd)
     finally:
         list_path.unlink(missing_ok=True)
+    # 可靠性修复：`-c copy` 的 concat 在分段编码器/封装不同时会【静默截断】——
+    # 典型如 AV1/VP9 源的 keep 段（流拷贝保留原编码）+ H.264 重编码的热窗段，
+    # 或 SPS/PPS 不一致；MP4 单一 moov 无法表示两套参数，结果只保留首段、其后全丢。
+    # 校验输出帧数，若丢帧则改用 concat 滤镜（逐段独立解码 → 拼接 → 一次性重编码），
+    # 编码器无关且始终全长（代价：keep 段被重编码为 crf16 近无损，而非比特一致）。
+    if len(paths) > 1:
+        try:
+            expected = sum(_count_frames(ffmpeg, p) for p in paths)
+            got = _count_frames(ffmpeg, dest)
+            if expected and got < int(expected * 0.98):
+                n = len(paths)
+                fcmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error"]
+                for p in paths:
+                    fcmd += ["-i", str(p)]
+                common = [
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "16",
+                    "-pix_fmt", "yuv420p",
+                ]
+                # 优先带音频拼接；若分段缺音频则退化为仅视频。
+                fc_v = "".join(f"[{i}:v]" for i in range(n)) + f"concat=n={n}:v=1:a=1[v][a]"
+                fcmd += ["-filter_complex", fc_v, "-map", "[v]", "-map", "[a]",
+                         *common, "-c:a", "aac", "-b:a", "128k", str(dest)]
+                try:
+                    _run_ffmpeg(fcmd)
+                except Exception:
+                    fc_v0 = "".join(f"[{i}:v]" for i in range(n)) + f"concat=n={n}:v=1:a=0[v]"
+                    fcmd0 = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error"]
+                    for p in paths:
+                        fcmd0 += ["-i", str(p)]
+                    fcmd0 += ["-filter_complex", fc_v0, "-map", "[v]", *common, str(dest)]
+                    _run_ffmpeg(fcmd0)
+        except Exception:
+            pass
     if not dest.is_file() or dest.stat().st_size < 800:
         raise RuntimeError(f"concat demuxer produced empty file: {dest}")
     return dest
@@ -1921,6 +2158,37 @@ def _render_fast_box_segments(
     windows = _merge_time_windows(hits, duration)
     if not windows:
         return False
+    # P0.5: snap window edges to keyframes so clean (non-subtitle) segments can be
+    # stream-copied pixel-losslessly with no boundary glitch. Falls back to crf16
+    # re-encode when keyframes are unavailable or the source isn't yuv420p.
+    use_copy = False
+    keyframes = _keyframe_times(ffmpeg, src)
+    if keyframes and _video_pix_fmt(ffmpeg, src) == "yuv420p":
+        kf = sorted(keyframes)
+        def _down(t: float) -> float:
+            return max([x for x in kf if x <= t] + [0.0])
+        def _up(t: float) -> float:
+            return min([x for x in kf if x >= t] + [duration])
+        orig_windows = list(windows)
+        snapped = [(max(0.0, _down(s)), min(duration, _up(e))) for s, e in windows]
+        merged: list[tuple[float, float]] = []
+        for s, e in snapped:
+            if merged and s <= merged[-1][1] + 0.05:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+            else:
+                merged.append((s, e))
+        # 吸附膨胀守卫：关键帧稀疏的源（如单 GOP 短片/测试片）会把窗口末端
+        # 一路吸到 duration，令覆盖虚增、误触发下方「全程都脏」回退（实测
+        # 10s 单 GOP fixture：5.6s 覆盖被吸成 10s → 分段路由退化为全程 fill）。
+        # 覆盖膨胀超阈值时放弃流拷贝，回退 unsnap 窗口 + crf16 重编（仍全长近无损）。
+        cov_snap = sum(e - s for s, e in merged)
+        cov_orig = sum(e - s for s, e in orig_windows)
+        if cov_snap <= cov_orig * 1.5 + 1.0:
+            windows = merged
+            use_copy = True
+        else:
+            windows = orig_windows
+            use_copy = False
     covered = sum(max(0.0, end - start) for start, end in windows)
     if duration <= 0.1 or covered >= duration * 0.85:
         return False
@@ -1935,17 +2203,23 @@ def _render_fast_box_segments(
     for start, end in windows:
         if start > cursor + 0.05:
             clean_part = seg_dir / f"{part_idx:03d}_keep.mp4"
-            _x264_out_range(ffmpeg, src, clean_part, start=cursor, end=start, vf=None, crf=23)
+            if use_copy:
+                _x264_out_range(ffmpeg, src, clean_part, start=cursor, end=start, vf=None, crf=16, copy_video=True)
+            else:
+                _x264_out_range(ffmpeg, src, clean_part, start=cursor, end=start, vf=None, crf=16)
             pieces.append(clean_part)
             part_idx += 1
         hot_part = seg_dir / f"{part_idx:03d}_{hot_label}.mp4"
-        _x264_out_range(ffmpeg, src, hot_part, start=start, end=end, vf=vf, crf=23)
+        _x264_out_range(ffmpeg, src, hot_part, start=start, end=end, vf=vf, crf=18)
         pieces.append(hot_part)
         part_idx += 1
         cursor = end
     if cursor < duration - 0.05:
         tail = seg_dir / f"{part_idx:03d}_keep.mp4"
-        _x264_out_range(ffmpeg, src, tail, start=cursor, end=duration, vf=None, crf=23)
+        if use_copy:
+            _x264_out_range(ffmpeg, src, tail, start=cursor, end=duration, vf=None, crf=16, copy_video=True)
+        else:
+            _x264_out_range(ffmpeg, src, tail, start=cursor, end=duration, vf=None, crf=16)
         pieces.append(tail)
 
     _concat_demuxer(pieces, dest)
@@ -1953,6 +2227,7 @@ def _render_fast_box_segments(
     report["fast_window_coverage_sec"] = round(covered, 3)
     report["fast_window_total_sec"] = round(duration, 3)
     report["fast_segment_count"] = len(pieces)
+    report["fast_copy_clean"] = use_copy
     return True
 
 
@@ -3331,6 +3606,123 @@ def _x264_out(
         raise RuntimeError(f"ffmpeg produced empty file: {dest}")
 
 
+def _keyframe_times_ffmpeg(ffmpeg: str, src: Path) -> list[float] | None:
+    """Keyframe timestamps using only ffmpeg (no ffprobe): dump I-frame pts_time via showinfo."""
+    try:
+        r = subprocess.run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-i",
+                str(src),
+                "-vf",
+                "select=eq(pict_type\\,I),showinfo",
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except Exception:
+        return None
+    out: list[float] = []
+    for line in (r.stderr or "").splitlines():
+        m = re.search(r"pts_time:([0-9]+(?:\.[0-9]+)?)", line)
+        if m:
+            try:
+                out.append(float(m.group(1)))
+            except ValueError:
+                continue
+    return out or None
+
+
+def _keyframe_times(ffmpeg: str, src: Path) -> list[float] | None:
+    """Dense list of keyframe timestamps (seconds); tries ffprobe, falls back to ffmpeg-only."""
+    probe = _ffprobe_bin(ffmpeg)
+    if probe:
+        try:
+            r = subprocess.run(
+                [
+                    probe,
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-skip_frame",
+                    "nokey",
+                    "-show_entries",
+                    "frame=pts_time",
+                    "-of",
+                    "csv=p=0",
+                    str(src),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if r.returncode == 0 and r.stdout:
+                out: list[float] = []
+                for line in r.stdout.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        out.append(float(line))
+                    except ValueError:
+                        continue
+                if out:
+                    return out
+        except Exception:
+            pass
+    return _keyframe_times_ffmpeg(ffmpeg, src)
+
+
+def _video_pix_fmt_ffmpeg(ffmpeg: str, src: Path) -> str | None:
+    """Pixel format via ffmpeg -i parse (no ffprobe needed)."""
+    try:
+        r = subprocess.run(
+            [ffmpeg, "-hide_banner", "-i", str(src)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except Exception:
+        return None
+    m = re.search(r",\s*(yuv\w+)\b", r.stderr or "")
+    return m.group(1) if m else None
+
+
+def _video_pix_fmt(ffmpeg: str, src: Path) -> str | None:
+    """Video stream pixel format; tries ffprobe, falls back to ffmpeg-only parse."""
+    probe = _ffprobe_bin(ffmpeg)
+    if probe:
+        try:
+            r = subprocess.run(
+                [
+                    probe,
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=pix_fmt",
+                    "-of",
+                    "csv=p=0",
+                    str(src),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+        except Exception:
+            pass
+    return _video_pix_fmt_ffmpeg(ffmpeg, src)
+
+
 def _x264_out_range(
     ffmpeg: str,
     src: Path,
@@ -3341,6 +3733,7 @@ def _x264_out_range(
     vf: str | None,
     crf: int,
     audio_k: int = DEFAULT_AUDIO_K,
+    copy_video: bool = False,
 ) -> None:
     span = max(0.0, float(end) - float(start))
     if span <= 0.03:
@@ -3361,23 +3754,40 @@ def _x264_out_range(
     ]
     if vf:
         cmd.extend(["-vf", vf])
-    cmd.extend(
-        [
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            str(int(crf)),
-            "-c:a",
-            "aac",
-            "-b:a",
-            f"{int(audio_k)}k",
-            "-movflags",
-            "+faststart",
-            str(dest),
-        ]
-    )
+    if copy_video:
+        cmd.extend(
+            [
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-b:a",
+                f"{int(audio_k)}k",
+                "-movflags",
+                "+faststart",
+                str(dest),
+            ]
+        )
+    else:
+        cmd.extend(
+            [
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                str(int(crf)),
+                "-force_key_frames",
+                "0",
+                "-c:a",
+                "aac",
+                "-b:a",
+                f"{int(audio_k)}k",
+                "-movflags",
+                "+faststart",
+                str(dest),
+            ]
+        )
     _run_ffmpeg(cmd)
     if not dest.is_file() or dest.stat().st_size < 800:
         raise RuntimeError(f"ffmpeg range produced empty file: {dest}")

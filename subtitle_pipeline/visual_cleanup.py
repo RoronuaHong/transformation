@@ -550,10 +550,29 @@ def _encode_sttn_active_windows(
         for start, end in active_windows
         if float(end) - float(start) > 0.05
     ]
+    # P0.6: snap window edges to keyframes so clean (non-subtitle) segments can be
+    # stream-copied pixel-losslessly; fall back to crf16 when keyframes/format unavailable.
+    use_copy = False
+    ffmpeg = mops.find_ffmpeg()
+    keyframes = mops._keyframe_times(ffmpeg, src)
+    if keyframes and mops._video_pix_fmt(ffmpeg, src) == "yuv420p":
+        kf = sorted(keyframes)
+        def _down(t: float) -> float:
+            return max([x for x in kf if x <= t] + [0.0])
+        def _up(t: float) -> float:
+            return min([x for x in kf if x >= t] + [duration])
+        snapped = [(max(0.0, _down(s)), min(duration, _up(e))) for s, e in windows]
+        merged: list[tuple[float, float]] = []
+        for s, e in snapped:
+            if merged and s <= merged[-1][1] + 0.05:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+            else:
+                merged.append((s, e))
+        windows = merged
+        use_copy = True
     covered = _window_coverage(windows)
     if not windows or covered >= duration * 0.85:
         return None
-    ffmpeg = mops.find_ffmpeg()
     seg_dir = dest.parent / "_sttn_segments"
     seg_dir.mkdir(parents=True, exist_ok=True)
     for old in seg_dir.glob("*.mp4"):
@@ -579,12 +598,15 @@ def _encode_sttn_active_windows(
     for start, end in windows:
         if start > cursor + 0.05:
             keep = seg_dir / f"{idx:03d}_keep.mp4"
-            mops._x264_out_range(ffmpeg, src, keep, start=cursor, end=start, vf=None, crf=23)
+            if use_copy:
+                mops._x264_out_range(ffmpeg, src, keep, start=cursor, end=start, vf=None, crf=16, copy_video=True)
+            else:
+                mops._x264_out_range(ffmpeg, src, keep, start=cursor, end=start, vf=None, crf=16)
             pieces.append(keep)
             idx += 1
         hot_src = seg_dir / f"{idx:03d}_hot_src.mp4"
         hot_out = seg_dir / f"{idx:03d}_hot_clean.mp4"
-        mops._x264_out_range(ffmpeg, src, hot_src, start=start, end=end, vf=None, crf=23)
+        mops._x264_out_range(ffmpeg, src, hot_src, start=start, end=end, vf=None, crf=18)
         # Prefer classify-forced route already in env; short-route is a speed hint
         # only when FORCE is still auto (do not override tiles→flat).
         env_force = (os.environ.get("VITUAL_STTN_FORCE") or "auto").strip().lower()
@@ -656,7 +678,10 @@ def _encode_sttn_active_windows(
         cursor = end
     if cursor < duration - 0.05:
         tail = seg_dir / f"{idx:03d}_keep.mp4"
-        mops._x264_out_range(ffmpeg, src, tail, start=cursor, end=duration, vf=None, crf=23)
+        if use_copy:
+            mops._x264_out_range(ffmpeg, src, tail, start=cursor, end=duration, vf=None, crf=16, copy_video=True)
+        else:
+            mops._x264_out_range(ffmpeg, src, tail, start=cursor, end=duration, vf=None, crf=16)
         pieces.append(tail)
     mops._concat_demuxer(pieces, dest)
     if progress_path is not None:
@@ -677,6 +702,7 @@ def _encode_sttn_active_windows(
         "engine": "sttn_segments",
         "segments": seg_stats,
         "window_count": len(windows),
+        "copy_clean": use_copy,
         "window_coverage_sec": round(covered, 3),
         "window_total_sec": round(duration, 3),
         "frames": int(sum(int(s.get("frames") or 0) for s in seg_stats)),
@@ -832,7 +858,7 @@ def encode_cleanup_pass(
             "-preset",
             "veryfast",
             "-crf",
-            "23",
+            "18",
             "-pix_fmt",
             "yuv420p",
             "-movflags",
@@ -931,7 +957,12 @@ def encode_cleanup_pass(
     return {"frames": frames, "masked_ops": masked, "bytes": dest.stat().st_size}
 
 
-def residual_ghost_mask(bgr: Any, box: dict[str, int], *, thr: float = 14.0) -> Any:
+def residual_ghost_mask(
+    bgr: Any,
+    box: dict[str, int],
+    *,
+    thr: float = 14.0,
+) -> Any:
     """STTN/lerp 后残影 mask：框内相对局部中位数的笔画状偏差（OCR 已看不到字时仍可用）。"""
     import cv2
     import numpy as np
@@ -970,13 +1001,253 @@ def residual_ghost_mask(bgr: Any, box: dict[str, int], *, thr: float = 14.0) -> 
     return mask
 
 
-def _lama_box_mask(bgr: Any, box: dict[str, int], mode: str) -> Any:
+def build_dialogue_clean_plate(
+    video: Path,
+    box: dict[str, int],
+    *,
+    k: int = 25,
+    white_thr: float = 185.0,
+    sat_thr: float = 70.0,
+    max_temporal_l1: float = 10.0,
+) -> tuple[Any, dict[str, float]] | None:
+    """PS「图层 > 智能对象 > 堆栈模式 > 中间值」的等价实现。
+
+    对话区是【静态半透明输入栏 + 持久 UI（爱心/表情/占位符/发送箭头）】，
+    字幕白字是瞬态遮挡且位置逐帧变化 → 逐像素时序中值即可还原无字干净底板，
+    并 1:1 保留所有持久 UI（实测 clip15 底板中 占位符/笑脸/爱心/礼物/箭头 全部
+    清晰完好）。返回 (plate_bgr, stats)；背景运动过大（非文字帧 temporal L1 超
+    max_temporal_l1）或采样不足时返回 None（调用方回退 STTN 结果）。
+    """
+    import cv2
+    import numpy as np
+
+    video = Path(video)
+    x0 = int(box["x"])
+    y0 = int(box["y"])
+    w = int(box["w"])
+    h = int(box["h"])
+    if w <= 4 or h <= 4:
+        return None
+    cap = cv2.VideoCapture(str(video))
+    if not cap.isOpened():
+        return None
+    try:
+        n_hint = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        if n_hint < 8:
+            return None
+        idxs = np.linspace(0, n_hint - 1, int(min(k, n_hint))).astype(int)
+        stack: list[Any] = []
+        tmasks: list[Any] = []
+        for idx in idxs:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
+            ok, frame = cap.read()
+            if not ok:
+                continue
+            roi = frame[y0 : y0 + h, x0 : x0 + w]
+            if roi.shape[0] != h or roi.shape[1] != w:
+                continue
+            hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            # 字幕白字笔画：亮且低饱和 → 掩掉，不参与逐像素中值。
+            tmask = (gray >= white_thr) & (hsv[..., 1] <= sat_thr)
+            stack.append(roi.astype(np.float32))
+            tmasks.append(tmask.astype(bool))
+        if len(stack) < 8:
+            return None
+        st = np.stack(stack)
+        tm = np.stack(tmasks)
+        med_plain = np.median(st, axis=0)
+        vals = np.where(tm[..., None], np.nan, st)
+        with np.errstate(all="ignore"):
+            med_masked = np.nanmedian(vals, axis=0)
+        all_text = np.all(tm, axis=0)
+        plate = np.where(all_text[..., None], med_plain, med_masked)
+        plate = np.nan_to_num(plate, nan=0.0)
+        # 背景稳定性：相邻采样帧在【非文字】像素上的平均 L1（越低越静态）。
+        diffs: list[float] = []
+        valid = ~tm
+        for j in range(len(st) - 1):
+            m = valid[j] & valid[j + 1]
+            if int(m.sum()) > 50:
+                diffs.append(float(np.abs(st[j][m] - st[j + 1][m]).mean()))
+        tl1 = float(np.mean(diffs)) if diffs else 255.0
+        if tl1 > max_temporal_l1:
+            return None
+        return (
+            np.clip(plate, 0, 255).astype(np.uint8),
+            {
+                "temporal_l1": round(tl1, 2),
+                "text_frac": round(float(tm.mean()), 4),
+                "samples": int(len(st)),
+            },
+        )
+    finally:
+        cap.release()
+
+
+def _encode_rawvideo_pipe(
+    src_video: Path,
+    dest_video: Path,
+    *,
+    tag: str,
+    per_frame: "Callable[[Any], Any | None]",
+    progress_every: int = 120,
+    frame_wh: "tuple[int, int] | None" = None,
+) -> dict[str, Any]:
+    """共享的 ffmpeg rawvideo 管道编码器（plate 与 lama 共用，去除重复样板）。
+
+    逐帧读取 src_video，对每帧调用 per_frame(frame) -> BGR(np.uint8) 写盘；
+    返回 None 表示跳过该帧。音频从 src mux，输出 fMP4。失败时抛 RuntimeError。
+    """
+    from typing import Callable
+
+    import cv2
+    import numpy as np
+    import subprocess
+
+    src_video = Path(src_video)
+    dest_video = Path(dest_video)
+    dest_video.parent.mkdir(parents=True, exist_ok=True)
+    mops = _media()
+    if frame_wh is None:
+        frame_wh = mops.probe_video_wh(src_video)
+        if frame_wh is None:
+            raise RuntimeError(f"cannot probe video: {src_video}")
+    frame_w, frame_h = frame_wh
+    cap = cv2.VideoCapture(str(src_video))
+    if not cap.isOpened():
+        raise RuntimeError(f"cannot open {src_video}")
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0) or 25.0
+    n_hint = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    from fetch_media import find_ffmpeg
+
+    ffmpeg = find_ffmpeg()
+    writing = dest_video.with_name(dest_video.stem + f"_{tag}_writing.mp4")
+    if writing.is_file():
+        writing.unlink(missing_ok=True)
+    cmd = [
+        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{frame_w}x{frame_h}",
+        "-r", f"{fps:.4f}", "-i", "pipe:0", "-i", str(src_video), "-map", "0:v:0",
+    ]
+    if mops.has_audio_stream(src_video):
+        cmd.extend(["-map", "1:a:0?", "-c:a", "aac", "-b:a", f"{mops.DEFAULT_AUDIO_K}k"])
+    else:
+        cmd.append("-an")
+    cmd.extend([
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        "-g", str(max(12, min(60, int(round(fps)) or 25))),
+        "-keyint_min", str(max(12, min(60, int(round(fps)) or 25))),
+        "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
+        "-flush_packets", "1",
+        "-shortest", str(writing),
+    ])
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert proc.stdin is not None
+    frames_done = 0
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            out = per_frame(frame)
+            if out is None:
+                continue
+            proc.stdin.write(np.ascontiguousarray(out).astype(np.uint8).tobytes())
+            frames_done += 1
+            if n_hint and frames_done % progress_every == 0:
+                print(f"[{tag}] wrote {frames_done}/{n_hint}", flush=True)
+    except Exception:
+        proc.kill()
+        raise
+    finally:
+        cap.release()
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
+    stderr = proc.communicate(timeout=600)[1]
+    if proc.returncode != 0 or frames_done < 1:
+        err = (stderr or b"").decode("utf-8", errors="replace")[:400]
+        try:
+            writing.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise RuntimeError(f"{tag} encode failed ({proc.returncode}): {err}")
+    if writing.resolve() != dest_video.resolve():
+        from sttn_inpaint import _finalize_writing_mp4
+
+        _finalize_writing_mp4(writing, dest_video)
+    return {"frames": frames_done}
+
+
+def encode_composite_plate(
+    src_video: Path,
+    dest_video: Path,
+    plates: list[tuple[dict[str, int], Any]],
+    *,
+    feather: float = 8.0,
+) -> dict[str, Any] | None:
+    """把干净底板合成回视频：框内整体用底板，边缘高斯羽化避免接缝。
+
+    用于对话区（静态半透明栏）：底板同时完成「去字幕 + 保留持久 UI」，
+    优于 STTN 时序填充（后者会把爱心/表情涂毁并留下灰白 wash）。
+    """
+    import cv2
+    import numpy as np
+
+    if not plates:
+        return None
+    src_video = Path(src_video)
+    dest_video = Path(dest_video)
+    wh = _media().probe_video_wh(src_video)
+    if wh is None:
+        return None
+    frame_w, frame_h = wh
+    alphas: list[tuple[dict[str, int], Any, Any]] = []
+    for b, plate in plates:
+        bx = max(0, int(b["x"]))
+        by = max(0, int(b["y"]))
+        bw = max(2, min(frame_w - bx, int(b["w"])))
+        bh = max(2, min(frame_h - by, int(b["h"])))
+        m = np.zeros((frame_h, frame_w), dtype=np.float32)
+        m[by : by + bh, bx : bx + bw] = 1.0
+        if feather and feather > 0:
+            m = cv2.GaussianBlur(m, (0, 0), float(feather))
+        alphas.append(({"x": bx, "y": by, "w": bw, "h": bh}, plate.astype(np.float32), m[..., None]))
+
+    def _frame(frame: Any) -> Any:
+        out = frame.astype(np.float32)
+        for b, plate, a in alphas:
+            bx, by, bw, bh = b["x"], b["y"], b["w"], b["h"]
+            comp = out.copy()
+            comp[by : by + bh, bx : bx + bw] = plate
+            out = out * (1.0 - a) + comp * a
+        return np.clip(out, 0, 255).astype(np.uint8)
+
+    stats = _encode_rawvideo_pipe(
+        src_video, dest_video, tag="plate", progress_every=120, frame_wh=wh,
+        per_frame=_frame,
+    )
+    stats.update({"engine": "plate", "mode": "median_stack", "boxes": len(alphas)})
+    print(f"[plate] frames={stats['frames']} boxes={len(alphas)}", flush=True)
+    return stats
+
+
+def _lama_box_mask(
+    bgr: Any,
+    box: dict[str, int],
+    mode: str,
+    *,
+    thr: float = 14.0,
+) -> Any:
     """glyph = OCR 笔画；residual = 残影；auto = 有字用 glyph，否则 residual。"""
     from sttn_inpaint import glyph_mask_hybrid
 
     mode_s = (mode or "glyph").strip().lower()
     if mode_s == "residual":
-        return residual_ghost_mask(bgr, box)
+        return residual_ghost_mask(bgr, box, thr=thr)
     glyph = glyph_mask_hybrid(bgr, box)
     if mode_s == "glyph":
         return glyph
@@ -1018,40 +1289,6 @@ def encode_lama_boxes(
     if wh is None:
         raise RuntimeError(f"cannot probe video: {src}")
     frame_w, frame_h = wh
-    cap = cv2.VideoCapture(str(src))
-    if not cap.isOpened():
-        raise RuntimeError(f"cannot open {src}")
-    fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0) or 25.0
-    n_hint = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    from fetch_media import find_ffmpeg
-
-    ffmpeg = find_ffmpeg()
-    writing = dest.with_name(dest.stem + "_lama_writing.mp4")
-    if writing.is_file():
-        writing.unlink(missing_ok=True)
-    cmd = [
-        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
-        "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{frame_w}x{frame_h}",
-        "-r", f"{fps:.4f}", "-i", "pipe:0", "-i", str(src), "-map", "0:v:0",
-    ]
-    if mops.has_audio_stream(src):
-        cmd.extend(["-map", "1:a:0?", "-c:a", "aac", "-b:a", f"{mops.DEFAULT_AUDIO_K}k"])
-    else:
-        cmd.append("-an")
-    cmd.extend([
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-        "-pix_fmt", "yuv420p",
-        # Match sttn_inpaint: fMP4 + flush so mid-run writing files open in players.
-        "-g", str(max(12, min(60, int(round(fps)) or 25))),
-        "-keyint_min", str(max(12, min(60, int(round(fps)) or 25))),
-        "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
-        "-flush_packets", "1",
-        "-shortest", str(writing),
-    ])
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-    assert proc.stdin is not None
-    frames_done = 0
-    lama_frames = 0
     kernel = np.ones((3, 3), np.uint8)
     boxes_n = [
         {k: int(b[k]) for k in ("x", "y", "w", "h")}
@@ -1059,84 +1296,60 @@ def encode_lama_boxes(
         if b and all(k in b for k in ("x", "y", "w", "h"))
     ]
     mode_s = (mask_mode or "glyph").strip().lower()
-    try:
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            out = frame
-            for mb in mosaic_regions or []:
-                x = max(0, min(frame_w - 2, int(mb["x"])))
-                y = max(0, min(frame_h - 2, int(mb["y"])))
-                w = max(2, min(frame_w - x, int(mb["w"])))
-                h = max(2, min(frame_h - y, int(mb["h"])))
-                roi = out[y : y + h, x : x + w]
-                mask = build_mosaic_mask(roi, dilate=1)
-                if int(mask.max()) == 0:
-                    continue
-                full = np.zeros(out.shape[:2], dtype=np.uint8)
-                full[y : y + h, x : x + w] = mask
-                try:
-                    out = lama_inpaint(out, full)
-                except Exception:
-                    from demosaic_codeformer import restore_mosaic_crop
+    counters = {"lama_frames": 0}
 
-                    restored, _bg = restore_mosaic_crop(
-                        roi, mask, None, radius=7, use_neural=False
-                    )
-                    out = out.copy()
-                    out[y : y + h, x : x + w] = restored
-            hit = False
-            for box in boxes_n:
-                mask = _lama_box_mask(out, box, mode_s)
-                if int(mask.max()) == 0:
-                    continue
-                if dilate > 0:
-                    mask = cv2.dilate(mask, kernel, iterations=int(dilate))
-                out = lama_inpaint(out, mask)
-                hit = True
-            if hit:
-                lama_frames += 1
-            proc.stdin.write(np.ascontiguousarray(out).tobytes())
-            frames_done += 1
-            if n_hint and frames_done % 60 == 0:
-                print(
-                    f"[lama] wrote {frames_done}/{n_hint} boxes={len(boxes_n)} mode={mode_s}",
-                    flush=True,
-                )
-    except Exception:
-        proc.kill()
-        raise
-    finally:
-        cap.release()
-        try:
-            proc.stdin.close()
-        except Exception:
-            pass
-    stderr = proc.communicate(timeout=600)[1]
-    if proc.returncode != 0 or frames_done < 1:
-        err = (stderr or b"").decode("utf-8", errors="replace")[:400]
-        try:
-            writing.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise RuntimeError(f"lama encode failed ({proc.returncode}): {err}")
-    if writing.resolve() != dest.resolve():
-        from sttn_inpaint import _finalize_writing_mp4
+    def _frame(frame: Any) -> Any:
+        out = frame
+        for mb in mosaic_regions or []:
+            x = max(0, min(frame_w - 2, int(mb["x"])))
+            y = max(0, min(frame_h - 2, int(mb["y"])))
+            w = max(2, min(frame_w - x, int(mb["w"])))
+            h = max(2, min(frame_h - y, int(mb["h"])))
+            roi = out[y : y + h, x : x + w]
+            mask = build_mosaic_mask(roi, dilate=1)
+            if int(mask.max()) == 0:
+                continue
+            full = np.zeros(out.shape[:2], dtype=np.uint8)
+            full[y : y + h, x : x + w] = mask
+            try:
+                out = lama_inpaint(out, full)
+            except Exception:
+                from demosaic_codeformer import restore_mosaic_crop
 
-        _finalize_writing_mp4(writing, dest)
+                restored, _bg = restore_mosaic_crop(roi, mask, None, radius=7, use_neural=False)
+                out = out.copy()
+                out[y : y + h, x : x + w] = restored
+        hit = False
+        for box in boxes_n:
+            mask = _lama_box_mask(out, box, mode_s)
+            if int(mask.max()) == 0:
+                continue
+            if dilate > 0:
+                mask = cv2.dilate(mask, kernel, iterations=int(dilate))
+            out = lama_inpaint(out, mask)
+            hit = True
+        if hit:
+            counters["lama_frames"] += 1
+        return out
+
+    stats = _encode_rawvideo_pipe(
+        src, dest, tag="lama", progress_every=60, frame_wh=wh, per_frame=_frame
+    )
+    stats.update(
+        {
+            "engine": "lama",
+            "mode": mode_s,
+            "lama_runs": counters["lama_frames"],
+            "boxes": len(boxes_n),
+            "bytes": dest.stat().st_size,
+        }
+    )
     print(
-        f"[lama] frames={frames_done} lama_hits={lama_frames} boxes={len(boxes_n)} mode={mode_s}",
+        f"[lama] frames={stats['frames']} lama_hits={stats['lama_runs']} "
+        f"boxes={len(boxes_n)} mode={mode_s}",
         flush=True,
     )
-    return {
-        "engine": "lama",
-        "mode": mode_s,
-        "frames": frames_done,
-        "lama_runs": lama_frames,
-        "boxes": len(boxes_n),
-        "bytes": dest.stat().st_size,
-    }
+    return stats
 
 
 def run_multipass_cleanup(
@@ -1360,6 +1573,62 @@ def run_multipass_cleanup(
             **locate_meta,
         }
 
+    if engine_s == "propainter" and dehardsub and box is not None:
+        try:
+            from propainter_inpaint import PropainterUnavailable, inpaint_video
+        except ImportError:
+            PropainterUnavailable = None  # type: ignore[assignment]
+        if PropainterUnavailable is not None:
+            try:
+                prop_stats = inpaint_video(src, dest, box, width=width, height=height)
+                return {
+                    "action": "propainter_cleanup",
+                    "engine": "propainter",
+                    "passes": [{"pass": 1, "encode": prop_stats}],
+                    "pass_count": 1,
+                    "regions": regions,
+                    "mosaic_regions": mosaic_regions,
+                    "demosaic": demosaic,
+                    "dehardsub": dehardsub,
+                    "src_size": f"{width}x{height}",
+                    **locate_meta,
+                    "encode": prop_stats,
+                }
+            except PropainterUnavailable as exc:
+                print(f"[cleanup] propainter unavailable ({exc}); falling back to sttn")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[cleanup] propainter failed ({exc}); falling back to sttn")
+        # 降级：继续走下方 STTN 分支
+        engine_s = "sttn"
+
+    if engine_s == "diffusion" and dehardsub and box is not None:
+        try:
+            from diffusion_inpaint import DiffusionUnavailable, inpaint_video
+        except ImportError:
+            DiffusionUnavailable = None  # type: ignore[assignment]
+        if DiffusionUnavailable is not None:
+            try:
+                diff_stats = inpaint_video(src, dest, box, width=width, height=height)
+                return {
+                    "action": "diffusion_cleanup",
+                    "engine": "diffusion",
+                    "passes": [{"pass": 1, "encode": diff_stats}],
+                    "pass_count": 1,
+                    "regions": regions,
+                    "mosaic_regions": mosaic_regions,
+                    "demosaic": demosaic,
+                    "dehardsub": dehardsub,
+                    "src_size": f"{width}x{height}",
+                    **locate_meta,
+                    "encode": diff_stats,
+                }
+            except DiffusionUnavailable as exc:
+                print(f"[cleanup] diffusion unavailable ({exc}); falling back to sttn")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[cleanup] diffusion failed ({exc}); falling back to sttn")
+        # 降级：继续走下方 STTN 分支
+        engine_s = "sttn"
+
     if engine_s == "lama" and dehardsub and box is not None:
         try:
             from inpaint_lama import LamaUnavailable
@@ -1450,6 +1719,7 @@ def run_multipass_cleanup(
         current = sttn_in
         temps: list[Path] = []
         pass_stats: list[dict[str, Any]] = []
+        dlg_plate_boxes: list[dict[str, int]] = []
         try:
             from inpaint_lama import LamaUnavailable
         except ImportError:
@@ -1462,12 +1732,12 @@ def run_multipass_cleanup(
             tag: str,
             *,
             mask_mode: str = "glyph",
-        ) -> dict[str, Any] | None:
+            ) -> dict[str, Any] | None:
             if LamaUnavailable is None:
                 return None
             try:
                 stats = encode_lama_boxes(
-                    inp, outp, boxes_l, dilate=2, mask_mode=mask_mode
+                    inp, outp, boxes_l, dilate=2, mask_mode=mask_mode,
                 )
                 stats = dict(stats)
                 stats["role"] = tag
@@ -1506,11 +1776,19 @@ def run_multipass_cleanup(
                     rb = (route_info or {}).get("box")
                     if isinstance(rb, dict):
                         box_i = {k: int(rb[k]) for k in ("x", "y", "w", "h")}
+                # title / watermark 走整框 static fill（box_inpaint / edge_patch）：
+                # 两者都是【静态】覆盖层（每一帧都在），STTN 时序修复没有干净参考帧
+                # 会幻视涂抹（实测 title 卡片头像被涂白、up_watermark 框过大连带头像
+                # 一起毁）。up_watermark 框收紧到纯文字行后走 STTN 字形洞。
                 box_run = (
                     expand_static_overlay_box(box_i, width, height, role=role)
                     if role in ("title", "watermark")
                     else box_i
                 )
+                if role == "dialogue":
+                    dlg_plate_boxes.append(
+                        {k: int(box_run[k]) for k in ("x", "y", "w", "h")}
+                    )
                 # Skip edgefill only when overlay heavily overlaps the caption plate
                 # (decorative chrome beside the plate still gets cleaned).
                 if any_glyph_black and role in ("title", "watermark") and plate_boxes:
@@ -1641,7 +1919,7 @@ def run_multipass_cleanup(
                     continue
                 env_prev = None
                 force_mode = ""
-                if role in ("title", "watermark"):
+                if role == "up_watermark":
                     force_mode = "tiles"
                 elif role == "dialogue":
                     # Classify after tighten — never force tiles from a single
@@ -1706,8 +1984,41 @@ def run_multipass_cleanup(
                 pass_stats.append(used)
                 current = out_i
 
+            # 对话区干净底板（PS「堆栈模式-中间值」）：字幕白字是瞬态遮挡且位置
+            # 逐帧变化，而半透明输入栏 + 持久 UI（爱心/表情/占位符/发送箭头）恒定
+            # → 逐像素时序中值底板可同时【去字幕 + 1:1 保留持久 UI】，优于 STTN
+            # 时序填充（后者会把爱心涂毁并留下灰白 wash）。背景运动过大时自动
+            # 回退 STTN 结果（build_dialogue_clean_plate 返回 None）。
+            if dlg_plate_boxes:
+                plates: list[tuple[dict[str, int], Any]] = []
+                for b in dlg_plate_boxes:
+                    bp = build_dialogue_clean_plate(src, b)
+                    if bp is not None:
+                        plates.append((b, bp[0]))
+                        print(
+                            f"[cleanup] dialogue plate ok box={b} stats={bp[1]}",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"[cleanup] dialogue plate skipped (背景运动/采样不足) box={b}",
+                            flush=True,
+                        )
+                if plates:
+                    tmp = dest.with_name("_dlg_plate.mp4")
+                    used = encode_composite_plate(current, tmp, plates)
+                    if used is not None:
+                        used["role"] = "dialogue"
+                        pass_stats.append(used)
+                        current = tmp
+                        temps.append(tmp)
+
             # Residual polish: only static overlays are safe for LaMa touch-up here.
-            polish_roles = {"title", "watermark"}
+            # 对话区【不】走 LaMa 残影精修：字幕条是半透明 UI 栏覆盖在运动画面上，
+            # LaMa 没有干净空间上下文可分，会对残影 hallucinate 出亮色涂抹
+            # （实测 run5：对话区 亮白 0.2%→3.7%、闪烁 1.46→1.82 全面变差）。
+            # 对话残影由 STTN 字形洞已能压到 亮白~0.2%，保持不动为最佳。
+            polish_roles = {"title", "watermark", "up_watermark"}
             polish_boxes = [
                 expand_static_overlay_box(
                     {k: int(hb[k]) for k in ("x", "y", "w", "h")},

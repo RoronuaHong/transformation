@@ -1126,7 +1126,11 @@ def glyph_hole_adaptive(bgr: Any, box: dict[str, int]) -> Any:
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
     roi = gray[y0:y1, x0:x1]
     bg_med = float(np.median(roi))
-    contrast = np.abs(roi - bg_med) > 60.0
+    # 阈值 60→42：原阈值把白字笔画的 AA 柔边(gray~165-185)漏在洞外，
+    # 导致 STTN 不重绘这些像素 → 残留白色鬼影(实测 clip15 去字幕后底部字幕区
+    # 仍有 faint 白痕)。降到 42 把柔边纳入洞，配合下方膨胀盖描边 → 彻底清除。
+    # 占比门卫 0.55 仍兜底：复杂场景宁可漏字也不误毁画面。
+    contrast = np.abs(roi - bg_med) > 42.0
     # Yellow title paint (may sit near bg luminance after blur).
     bch = bgr[y0:y1, x0:x1, 0].astype(np.int16)
     gch = bgr[y0:y1, x0:x1, 1].astype(np.int16)
@@ -1139,7 +1143,7 @@ def glyph_hole_adaptive(bgr: Any, box: dict[str, int]) -> Any:
         return np.zeros(bgr.shape[:2], dtype=np.uint8)
     m = (contrast.astype(np.uint8) * 255)
     m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8), iterations=2)
-    m = cv2.dilate(m, np.ones((3, 3), np.uint8), iterations=2)
+    m = cv2.dilate(m, np.ones((3, 3), np.uint8), iterations=3)
     full = np.zeros(bgr.shape[:2], dtype=np.uint8)
     full[y0:y1, x0:x1] = m
     return full
@@ -1213,9 +1217,11 @@ def glyph_mask_hybrid(bgr: Any, box: dict[str, int]) -> Any:
         if roi.size == 0:
             continue
         med = float(np.median(roi))
-        strokes = (np.abs(roi - med) > 50.0).astype(np.uint8) * 255
+        # 阈值 50→35：同 glyph_hole_adaptive，把白字笔画 AA 柔边纳入洞，
+        # 否则 STTN 不重绘 → 残留白色鬼影。膨胀 iter 2→3 盖描边。
+        strokes = (np.abs(roi - med) > 35.0).astype(np.uint8) * 255
         strokes = cv2.morphologyEx(strokes, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8), iterations=2)
-        strokes = cv2.dilate(strokes, np.ones((3, 3), np.uint8), iterations=2)
+        strokes = cv2.dilate(strokes, np.ones((3, 3), np.uint8), iterations=3)
         if int(strokes.max()) == 0:
             # 细化后为空（bbox 内全是背景）→ 保留矩形洞兜底，确保该行被处理
             strokes = np.full_like(strokes, 255)

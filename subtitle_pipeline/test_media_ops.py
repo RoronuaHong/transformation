@@ -750,7 +750,7 @@ def _tiny_mp4_with_bottom_bar(path: Path, *, seconds: float = 1.0) -> None:
             "lavfi",
             "-i",
             f"color=c=0x224466:s=640x360:d={seconds}:r=25,"
-            f"drawbox=x=0:y=ih*0.82:w=iw:h=ih*0.18:color=white:t=fill",
+            f"drawbox=x=0:y=ih*0.90:w=iw:h=ih*0.06:color=white:t=fill",
             "-f",
             "lavfi",
             "-i",
@@ -867,6 +867,34 @@ def test_hardsub_fulltime_captions_use_full_delogo(tmp_path: Path, monkeypatch) 
     assert meta["action"] == "delogo_full"
     assert float(meta.get("caption_coverage") or 0.0) >= 0.75
     assert probe_video_wh(cleaned) == src_wh
+
+
+def test_detect_hardsubs_ignores_solid_bright_band(tmp_path: Path) -> None:
+    """白底画面（网页录屏/过曝）底带亮的是背景而非字形 → 不得判为字幕。
+
+    实测回归样例：网页录屏底带 bright_frac=0.65 曾按亮度线性打分饱和成
+    score=1.0 假阳性 → 管线对无字幕视频触发破坏性修复。
+    """
+    from media_ops import _run_ffmpeg, detect_hardsubs, find_ffmpeg
+
+    media = tmp_path / "media"
+    media.mkdir()
+    src = media / "white_page.mp4"
+    ffmpeg = find_ffmpeg()
+    _run_ffmpeg(
+        [
+            ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i",
+            "color=c=white:s=640x360:d=1.2:r=25,"
+            "drawbox=x=40:y=ih*0.30:w=iw*0.5:h=ih*0.30:color=black:t=fill",
+            "-f", "lavfi", "-i", "sine=f=440:d=1.2",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-shortest", str(src),
+        ]
+    )
+    report = detect_hardsubs(src, samples=4)
+    assert report["detected"] is False
+    assert report["reason"] == "solid_bright"
 
 
 def test_hardsub_fast_fill_uses_segment_windows(tmp_path: Path, monkeypatch) -> None:
