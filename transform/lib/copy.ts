@@ -65,6 +65,7 @@ export type NavCopy = {
   feed: string;
   ask: string;
   hub: string;
+  watchlist: string;
   menu: string;
   themeLight: string;
   themeDark: string;
@@ -300,6 +301,14 @@ export type HubCopy = {
   kindModel3d: string;
   kindFont: string;
   kindOther: string;
+  formFilter: string;
+  topicFilter: string;
+  usageFilter: string;
+  formAll: string;
+  formUnclassified: string;
+  uploadForm: string;
+  uploadTopics: string;
+  uploadUsage: string;
   upload: string;
   refresh: string;
   openCrop: string;
@@ -340,6 +349,14 @@ export type HubCopy = {
   loading: string;
   statTotal: string;
   tags: string;
+  mediaType: string;
+  uploadDefaults: string;
+  uploadDefaultsHint: string;
+  formPickSearch: string;
+  formPickEmpty: string;
+  filterSearch: string;
+  filterSort: string;
+  sysTags: string;
   clear: string;
   save: string;
   close: string;
@@ -470,6 +487,7 @@ const en: UiCopy = {
     feed: "Library",
     ask: "Ask",
     hub: "Materials",
+    watchlist: "Watchlist",
     menu: "Menu",
     themeLight: "Light",
     themeDark: "Dark",
@@ -707,6 +725,14 @@ const en: UiCopy = {
     kindModel3d: "3D",
     kindFont: "Fonts",
     kindOther: "Other",
+    formFilter: "Content form",
+    topicFilter: "Topic",
+    usageFilter: "Usage",
+    formAll: "All forms",
+    formUnclassified: "Unclassified",
+    uploadForm: "Form",
+    uploadTopics: "Topics",
+    uploadUsage: "Usage",
     upload: "Upload",
     refresh: "Refresh",
     openCrop: "Open crop workbench",
@@ -747,6 +773,14 @@ const en: UiCopy = {
     loading: "Loading…",
     statTotal: "Items",
     tags: "Tags",
+    mediaType: "Media type",
+    uploadDefaults: "Upload defaults",
+    uploadDefaultsHint: "Applies to files you upload from now on — not a filter for the list below.",
+    formPickSearch: "Search form / topic / usage…",
+    formPickEmpty: "No match",
+    filterSearch: "Search",
+    filterSort: "Sort",
+    sysTags: "System tags",
     clear: "Clear filters",
     save: "Save",
     close: "Close",
@@ -868,6 +902,7 @@ const zh: UiCopy = {
     feed: "列表",
     ask: "问问一桌",
     hub: "素材中心",
+    watchlist: "观察列表",
     menu: "菜单",
     themeLight: "浅色",
     themeDark: "深色",
@@ -1104,6 +1139,14 @@ const zh: UiCopy = {
     kindModel3d: "三维",
     kindFont: "字体",
     kindOther: "其他",
+    formFilter: "内容形式",
+    topicFilter: "题材",
+    usageFilter: "用途",
+    formAll: "全部形式",
+    formUnclassified: "未归类",
+    uploadForm: "内容形式",
+    uploadTopics: "题材",
+    uploadUsage: "用途",
     upload: "上传",
     refresh: "刷新",
     openCrop: "打开裁剪工作台",
@@ -1144,6 +1187,14 @@ const zh: UiCopy = {
     loading: "加载中…",
     statTotal: "共",
     tags: "标签",
+    mediaType: "媒体类型",
+    uploadDefaults: "上传默认分类",
+    uploadDefaultsHint: "只对之后上传的文件生效,不会筛选下方列表。",
+    formPickSearch: "搜索形式 / 题材 / 用途…",
+    formPickEmpty: "无匹配项",
+    filterSearch: "搜索",
+    filterSort: "排序",
+    sysTags: "系统标签",
     clear: "清除筛选",
     save: "保存",
     close: "关闭",
@@ -1265,6 +1316,7 @@ const zhHant: UiCopy = {
     feed: "列表",
     ask: "問問一桌",
     hub: "素材中心",
+    watchlist: "觀察列表",
     menu: "選單",
     themeLight: "淺色",
     themeDark: "深色",
@@ -1400,6 +1452,14 @@ const zhHant: UiCopy = {
     deleted: "已刪除",
     uploadSummary: "入庫 {a} · 重複 {d} · 失敗 {f}",
     asideFilter: "篩選",
+    mediaType: "媒體類型",
+    uploadDefaults: "上傳預設分類",
+    uploadDefaultsHint: "只對之後上傳的檔案生效,不會篩選下方列表。",
+    formPickSearch: "搜尋形式 / 題材 / 用途…",
+    formPickEmpty: "無符合項",
+    filterSearch: "搜尋",
+    filterSort: "排序",
+    sysTags: "系統標籤",
     gridAuto: "自適應列數",
     gridTwo: "一行 2 個",
     gridOne: "一行 1 個",
@@ -1474,7 +1534,7 @@ export const ui = {
       unlocking: "Реклама",
       morePoints: "ещё {n}",
     },
-    nav: { language: "Язык", feed: "Библиотека" },
+    nav: { language: "Язык", feed: "Библиотека", watchlist: "Наблюдение" },
   }),
   ja: overlay({
     feed: {
@@ -1496,7 +1556,7 @@ export const ui = {
       unlocking: "広告再生中",
       morePoints: "ほか {n} 件",
     },
-    nav: { language: "言語", feed: "一覧" },
+    nav: { language: "言語", feed: "一覧", watchlist: "ウォッチリスト" },
   }),
   ko: overlay({
     feed: {
@@ -1518,7 +1578,7 @@ export const ui = {
       unlocking: "광고 재생 중",
       morePoints: "{n}개 더",
     },
-    nav: { language: "언어", feed: "목록" },
+    nav: { language: "언어", feed: "목록", watchlist: "관심 목록" },
   }),
   pt: overlay({
     feed: { cta: "Ver os passos", },
@@ -1536,7 +1596,7 @@ export const ui = {
       unlocking: "Anúncio",
       morePoints: "mais {n}",
     },
-    nav: { language: "Idioma"},
+    nav: { language: "Idioma", watchlist: "Observação"},
   }),
   de: overlay({
     feed: { cta: "Schritte lesen", },
@@ -1554,7 +1614,7 @@ export const ui = {
       unlocking: "Werbung",
       morePoints: "noch {n}",
     },
-    nav: { language: "Sprache"},
+    nav: { language: "Sprache", watchlist: "Beobachtung"},
   }),
   es: overlay({
     feed: { cta: "Ver los pasos", },
@@ -1572,7 +1632,7 @@ export const ui = {
       unlocking: "Anuncio",
       morePoints: "{n} más",
     },
-    nav: { language: "Idioma"},
+    nav: { language: "Idioma", watchlist: "Observación"},
   }),
   fr: overlay({
     feed: { cta: "Lire les étapes", },
@@ -1590,7 +1650,7 @@ export const ui = {
       unlocking: "Publicité",
       morePoints: "{n} de plus",
     },
-    nav: { language: "Langue"},
+    nav: { language: "Langue", watchlist: "Observation"},
   }),
   ar: overlay({
     feed: { cta: "اقرأ الخطوات", },
@@ -1608,7 +1668,7 @@ export const ui = {
       unlocking: "الإعلان",
       morePoints: "{n} إضافية",
     },
-    nav: { language: "اللغة"},
+    nav: { language: "اللغة", watchlist: "المراقبة"},
   }),
   hi: overlay({
     feed: { cta: "चरण देखें", },
@@ -1626,7 +1686,7 @@ export const ui = {
       unlocking: "विज्ञापन",
       morePoints: "और {n}",
     },
-    nav: { language: "भाषा"},
+    nav: { language: "भाषा", watchlist: "वॉचलिस्ट"},
   }),
   id: overlay({
     feed: { cta: "Lihat langkah", },
@@ -1644,7 +1704,7 @@ export const ui = {
       unlocking: "Iklan",
       morePoints: "{n} lagi",
     },
-    nav: { language: "Bahasa"},
+    nav: { language: "Bahasa", watchlist: "Pantauan"},
   }),
   vi: overlay({
     feed: { cta: "Xem các bước", },
@@ -1662,7 +1722,7 @@ export const ui = {
       unlocking: "Quảng cáo",
       morePoints: "còn {n}",
     },
-    nav: { language: "Ngôn ngữ"},
+    nav: { language: "Ngôn ngữ", watchlist: "Theo dõi"},
   }),
   th: overlay({
     feed: { cta: "ดูขั้นตอน", },
@@ -1680,7 +1740,7 @@ export const ui = {
       unlocking: "โฆษณา",
       morePoints: "อีก {n}",
     },
-    nav: { language: "ภาษา"},
+    nav: { language: "ภาษา", watchlist: "เฝ้าดู"},
   }),
   tr: overlay({
     feed: { cta: "Adımları gör", },
@@ -1698,7 +1758,7 @@ export const ui = {
       unlocking: "Reklam",
       morePoints: "{n} tane daha",
     },
-    nav: { language: "Dil"},
+    nav: { language: "Dil", watchlist: "İzleme"},
   }),
 } as const satisfies Record<Locale, UiCopy>;
 
