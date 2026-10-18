@@ -1602,6 +1602,8 @@ def _write_sttn_progress(home: Path, frames: int, total: int) -> None:
 
     Without this the dehardsub job looks stuck at the hard-coded "products
     exist → 85%" placeholder while STTN is still encoding thousands of frames.
+    Written on every flush (the previous %600 throttle almost never triggered
+    because frames_done rarely lands exactly on a multiple of 600).
     """
     try:
         import json
@@ -1609,15 +1611,22 @@ def _write_sttn_progress(home: Path, frames: int, total: int) -> None:
 
         p = Path(home) / ".sttn_progress.json"
         tmp = p.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps(
-                {"frames": int(frames), "total": int(total), "ts": time.time()}
-            ),
-            encoding="utf-8",
+        payload = json.dumps(
+            {"frames": int(frames), "total": int(total), "ts": time.time()}
         )
-        tmp.replace(p)
-    except Exception:
-        pass
+        last_err: Exception | None = None
+        for _ in range(5):
+            try:
+                tmp.write_text(payload, encoding="utf-8")
+                tmp.replace(p)
+                return
+            except OSError as exc:
+                last_err = exc
+                time.sleep(0.05)
+        if last_err is not None:
+            print(f"[sttn] progress write failed: {last_err}", flush=True)
+    except Exception as exc:  # noqa: BLE001 - never let progress I/O kill STTN
+        print(f"[sttn] progress write error: {exc}", flush=True)
 
 
 def _clear_sttn_progress(home: Path) -> None:
@@ -2227,8 +2236,7 @@ def encode_sttn(
             frames_done += 1
         if n_hint:
             print(f"[sttn] wrote {frames_done}/{n_hint}", flush=True)
-            if last or frames_done <= 300 or frames_done % 600 == 0:
-                _write_sttn_progress(dest.parent, frames_done, n_hint)
+            _write_sttn_progress(dest.parent, frames_done, n_hint)
         keep = n - write_n
         if keep > 0:
             pending[:] = bgr_frames[-keep:]
