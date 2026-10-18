@@ -1597,6 +1597,36 @@ def _tile_x_ramps(tiles: list[dict[str, int]], overlap: int = 64) -> list[Any]:
 _WRITE_MOVFLAGS = "+frag_keyframe+empty_moov+default_base_moof"
 
 
+def _write_sttn_progress(home: Path, frames: int, total: int) -> None:
+    """Persist STTN frame progress so the queue API can report a live percent.
+
+    Without this the dehardsub job looks stuck at the hard-coded "products
+    exist → 85%" placeholder while STTN is still encoding thousands of frames.
+    """
+    try:
+        import json
+        import time
+
+        p = Path(home) / ".sttn_progress.json"
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(
+            json.dumps(
+                {"frames": int(frames), "total": int(total), "ts": time.time()}
+            ),
+            encoding="utf-8",
+        )
+        tmp.replace(p)
+    except Exception:
+        pass
+
+
+def _clear_sttn_progress(home: Path) -> None:
+    try:
+        Path(home).joinpath(".sttn_progress.json").unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def _open_ffmpeg_writer(
     src: Path,
     dest: Path,
@@ -2197,6 +2227,8 @@ def encode_sttn(
             frames_done += 1
         if n_hint:
             print(f"[sttn] wrote {frames_done}/{n_hint}", flush=True)
+            if last or frames_done <= 300 or frames_done % 600 == 0:
+                _write_sttn_progress(dest.parent, frames_done, n_hint)
         keep = n - write_n
         if keep > 0:
             pending[:] = bgr_frames[-keep:]
@@ -2233,6 +2265,7 @@ def encode_sttn(
             pass
         raise RuntimeError(f"STTN encode failed ({proc.returncode}): {err}")
     _finalize_writing_mp4(writing, dest)
+    _clear_sttn_progress(dest.parent)
     return {
         "engine": "sttn",
         "mode": "tiles",

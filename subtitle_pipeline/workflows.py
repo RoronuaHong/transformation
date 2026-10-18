@@ -400,6 +400,22 @@ def workflow_products(work_dir: Path, workflow: str) -> list[dict[str, Any]]:
     return out
 
 
+def _read_sttn_progress(work_dir: Path) -> "dict | None":
+    """Read the live STTN frame-progress sidecar written by sttn_inpaint."""
+    try:
+        import json
+
+        p = Path(work_dir) / WORKFLOW_HOME[WORKFLOW_DEHARDSUB] / ".sttn_progress.json"
+        if not p.is_file():
+            return None
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or not data.get("total"):
+            return None
+        return {"frames": int(data.get("frames", 0)), "total": int(data["total"])}
+    except Exception:
+        return None
+
+
 def infer_workflow_progress(
     workflow: str,
     status: str,
@@ -423,6 +439,22 @@ def infer_workflow_progress(
             "detail": None,
             "active": False,
         }
+
+    # dehardsub: report live STTN frame progress instead of the hard-coded
+    # "some product exists → 85%" placeholder, which makes a multi-hour job
+    # look frozen at 85% the whole time.
+    if st == "processing" and wf == WORKFLOW_DEHARDSUB:
+        prog = _read_sttn_progress(work_dir)
+        if prog:
+            frac = prog["frames"] / max(1, prog["total"])
+            pct = int(round(8 + 90 * frac))  # 8%..98%, leaves head/tail room
+            pct = max(8, min(98, pct))
+            return {
+                "percent": pct,
+                "stage": "dehardsub",
+                "detail": f"{prog['frames']}/{prog['total']} 帧",
+                "active": active,
+            }
 
     # processing
     products = workflow_products(work_dir, wf)
