@@ -34,6 +34,7 @@ from langs import (
     lang_name,
     normalize_lang,
     resolve_targets,
+    same_language,
     whisper_lang,
 )
 from multipass_asr import (
@@ -602,11 +603,16 @@ def translate_segments(
     tgt_name = lang_name(target_lang)
     gloss = format_glossary(glossary or {})
     translated: list[dict] = []
+
+    # 源语言 → 同一语言：恒等返回（resolve_targets 正常已排除，双保险）
+    if same_language(target_lang, source_lang):
+        return [dict(s) for s in segments]
+
     total = len(segments)
-    for start in range(0, total, batch_size):
-        chunk = segments[start : start + batch_size]
+
+    def _chunk_prompt(chunk: list[dict]) -> str:
         numbered = "\n".join(f"{i+1}. {s['text']}" for i, s in enumerate(chunk))
-        prompt = (
+        return (
             f"Translate these {src_name} subtitle lines into {tgt_name}.\n"
             "Rules:\n"
             "- Natural spoken subtitles (MTPE-ready: concise, not padded).\n"
@@ -621,22 +627,52 @@ def translate_segments(
             "Return ONLY a JSON array of strings.\n\n"
             f"{numbered}"
         )
+
+    def _translate_chunk(chunk: list[dict]) -> list[str]:
+        """翻一个分块：整块重试一次 → 对半细分 → 单行简版提示 → 保留原文。"""
+        prompt = _chunk_prompt(chunk)
+        tag = file_tag(target_lang)
+        for attempt in (1, 2):
+            try:
+                raw = ollama_chat(ollama, model, prompt, role="translate")
+                arr = [str(x).strip() for x in extract_json_array(raw)]
+                out = [arr[i] if i < len(arr) and arr[i] else "" for i in range(len(chunk))]
+                if any(out):
+                    return out
+            except Exception as e:  # noqa: BLE001 — 细分/兜底在下面
+                locked_print(
+                    f"[translate-retry] {tag} chunk({len(chunk)}) "
+                    f"attempt {attempt} failed: {type(e).__name__}"
+                )
+        if len(chunk) > 1:
+            mid = max(1, len(chunk) // 2)
+            locked_print(f"[translate-split] {tag} {len(chunk)} → {mid}+{len(chunk)-mid}")
+            return _translate_chunk(chunk[:mid]) + _translate_chunk(chunk[mid:])
+        # 单行：简版提示再试，仍失败保留原文（由调用方回落）
+        seg = chunk[0]
+        try:
+            text = ollama_chat(
+                ollama,
+                model,
+                f"Translate to {tgt_name}. Output only the translation:\n{seg['text']}",
+                role="translate",
+            )
+            return [text.splitlines()[0].strip() if text else ""]
+        except Exception as e:  # noqa: BLE001 — 保留原文
+            locked_print(
+                f"[translate-skip] {tag} keep source for 1 cue: {type(e).__name__}"
+            )
+            return [""]
+
+    for start in range(0, total, batch_size):
+        chunk = segments[start : start + batch_size]
         locked_print(
             f"[translate {file_tag(target_lang)}] {start+1}-{start+len(chunk)}/{total}"
         )
-        raw = ollama_chat(ollama, model, prompt, role="translate")
-        arr = [str(x).strip() for x in extract_json_array(raw)]
+        arr = _translate_chunk(chunk)
         for i, seg in enumerate(chunk):
-            text = arr[i] if i < len(arr) and arr[i] else ""
-            if not text:
-                text = ollama_chat(
-                    ollama,
-                    model,
-                    f"Translate to {tgt_name}. Output only the translation:\n{seg['text']}",
-                    role="translate",
-                )
-                text = text.splitlines()[0].strip() if text else seg["text"]
-            text = re.sub(r'^["“]|["”]$', "", text).strip()
+            text = (arr[i] if i < len(arr) else "") or ""
+            text = re.sub(r'^["“]|["”]$', "", text.strip()).strip()
             src_t = (seg.get("text") or "").strip()
             # Reject empty / extreme padding (MTPE: keep cue count & timing locked).
             if not text:
@@ -1878,6 +1914,11 @@ def transcribe_video(args: argparse.Namespace) -> tuple[list[dict], Path, str, P
                 release_cuda=release_cuda,
                 relisten=bool(getattr(args, "relisten", True)),
             )
+            # multipass 的检测语言此前只打印不回传，导致 auto 模式回退成 "en"，
+            # 源字幕被误命名 en.srt、src_lang 解析成 en，源语言反成翻译目标。
+            mp_lang = str((raw or {}).get("lang") or "").strip()
+            if mp_lang:
+                detected_lang = mp_lang
             return segs, raw
         print(f"[whisper] single-pass lang={args.source_lang} on {device}...")
         segs, detected_lang = transcribe(wav, args.whisper_model, device, args.source_lang)

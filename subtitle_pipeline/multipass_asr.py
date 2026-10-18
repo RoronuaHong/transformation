@@ -340,7 +340,9 @@ def apply_relisten(
     return segs
 
 
-def _run_one_pass(model, wav: Path, name: str, language: str | None, **kwargs) -> list[dict]:
+def _run_one_pass(
+    model, wav: Path, name: str, language: str | None, **kwargs
+) -> tuple[list[dict], str]:
     print(f"[whisper-mp] pass {name} ...")
     kw = dict(kwargs)
     if language:
@@ -360,11 +362,12 @@ def _run_one_pass(model, wav: Path, name: str, language: str | None, **kwargs) -
                 "no_speech_prob": float(getattr(s, "no_speech_prob", 0.0) or 0.0),
             }
         )
+    detected = str(getattr(info, "language", "") or "")
     print(
         f"[whisper-mp] pass {name} done n={len(out)} "
-        f"lang={info.language} p={info.language_probability:.2f}"
+        f"lang={detected} p={info.language_probability:.2f}"
     )
-    return out
+    return out, detected
 
 
 # Silero VAD defaults aligned with faster-whisper production guides.
@@ -399,7 +402,7 @@ def transcribe_multipass(
         num_workers=1,
     )
     try:
-        pass_a = _run_one_pass(
+        pass_a, lang_a = _run_one_pass(
             model,
             wav,
             "A_baseline",
@@ -429,8 +432,8 @@ def transcribe_multipass(
             # Vocabulary seed only (not instructions) — faster-whisper best practice.
             b_kw["initial_prompt"] = hotwords.strip()[:224]
             b_kw["hotwords"] = hotwords.strip()[:64]
-        pass_b = _run_one_pass(model, wav, "B_hotwords", language, **b_kw)
-        pass_c = _run_one_pass(
+        pass_b, _lang_b = _run_one_pass(model, wav, "B_hotwords", language, **b_kw)
+        pass_c, _lang_c = _run_one_pass(
             model,
             wav,
             "C_novad",
@@ -445,7 +448,7 @@ def transcribe_multipass(
             no_speech_threshold=0.6,
         )
 
-        raw = {"A": pass_a, "B": pass_b, "C": pass_c}
+        raw = {"A": pass_a, "B": pass_b, "C": pass_c, "lang": lang_a}
         merged = merge_passes(pass_a, pass_b, pass_c)
         merged = mark_suspicious(merged, pass_a, pass_b, pass_c)
         if relisten:

@@ -1,10 +1,19 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from shutil import which
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+
+
+def _strip_ansi(text: str) -> str:
+    """ollama CLI 的进度条/光标控制符会污染错误信息。"""
+    return _ANSI_RE.sub("", text or "").replace("\r", "\n").strip()
 
 
 class OllamaClient:
@@ -23,13 +32,21 @@ class OllamaClient:
         self.temperature = temperature
         self.ollama_bin = ollama_bin or which("ollama")
 
-    def complete(self, prompt: str, *, timeout: int = 300) -> str:
+    def _post(self, prompt: str, timeout: int) -> str:
         body = json.dumps(
             {
                 "model": self.model,
                 "prompt": prompt,
                 "stream": False,
-                "options": {"temperature": self.temperature},
+                "options": {
+                    "temperature": self.temperature,
+                    # 抑制小模型在长列表任务上的 token 重复退化
+                    # （"prediction aborted, token repeat limit reached"）
+                    "repeat_penalty": 1.1,
+                    # ollama 默认 num_ctx=2048，管线的大提示词（整篇转写/结构化笔记）
+                    # 会超限 → 模型返回空 → 静默空笔记。显式开到 16K。
+                    "num_ctx": 16384,
+                },
             }
         ).encode("utf-8")
         req = urllib.request.Request(
@@ -38,10 +55,18 @@ class OllamaClient:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return (data.get("response") or "").strip()
+
+    def complete(self, prompt: str, *, timeout: int = 300) -> str:
+        # HTTP 路径重试一次，避免瞬时错误直接落到慢且噪音大的 CLI 兜底
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                return (data.get("response") or "").strip()
+            try:
+                return self._post(prompt, timeout)
+            except Exception:
+                time.sleep(2)
+                return self._post(prompt, timeout)
         except Exception:
             if not self.ollama_bin:
                 raise
@@ -54,8 +79,8 @@ class OllamaClient:
                 timeout=timeout,
             )
             if r.returncode != 0:
-                raise RuntimeError(r.stderr or r.stdout)
-            return (r.stdout or "").strip()
+                raise RuntimeError(_strip_ansi(r.stderr or r.stdout or "ollama run failed"))
+            return _strip_ansi(r.stdout)
 
     def ensure_ready(self) -> None:
         try:

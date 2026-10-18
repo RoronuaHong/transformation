@@ -1464,8 +1464,16 @@ def _load_generator(ckpt: Path, device: Any) -> Any:
     import torch
 
     root = Path(__file__).resolve().parent / "sttn"
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
+    if str(root) in sys.path:
+        sys.path.remove(str(root))
+    sys.path.insert(0, str(root))
+    # 长驻进程（如 try 队列 worker）里 sys.modules['core'] 可能已被同名
+    # 非包模块占用，导致 sttn/model/sttn.py 的 `from core.spectral_norm`
+    # 报 "'core' is not a package"。这里清掉污染项，让 core 解析到 sttn/core。
+    _c = sys.modules.get("core")
+    if _c is not None and not hasattr(_c, "__path__"):
+        for _k in [k for k in list(sys.modules) if k == "core" or k.startswith("core.")]:
+            sys.modules.pop(_k, None)
     from model.sttn import InpaintGenerator  # type: ignore
 
     model = InpaintGenerator().to(device)

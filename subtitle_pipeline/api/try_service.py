@@ -160,6 +160,52 @@ def _deps_satisfied(queue: QueueDB, job) -> bool:
     return True
 
 
+def _cascade_fail_dependents(
+    queue: QueueDB,
+    platform: str,
+    video_id: str,
+    failed_workflow: str,
+    reason: str,
+) -> int:
+    """A failed WF must not leave its dependents pending forever.
+
+    Without this, notes/frames wait on a `done` dependency that can never
+    arrive — the batch never reaches a terminal state and the form stays
+    locked on "处理中…". Transitively mark pending pack jobs whose
+    depends_on includes an already failed workflow as failed.
+    """
+    failed_wfs = {str(failed_workflow or "").strip()}
+    changed = 0
+    while True:
+        rows = queue._conn.execute(
+            """
+            SELECT id, meta_json FROM jobs
+            WHERE platform=? AND video_id=? AND status='pending'
+            """,
+            (platform, video_id),
+        ).fetchall()
+        newly: list[int] = []
+        for row in rows:
+            meta = _job_meta_dict(row)
+            deps = meta.get("depends_on") or []
+            if not isinstance(deps, list):
+                continue
+            if any(str(d or "").strip() in failed_wfs for d in deps):
+                newly.append(int(row["id"]))
+        if not newly:
+            break
+        for jid in newly:
+            queue.mark_failed(jid, reason)
+            job = queue.get_job(jid)
+            wf = _job_workflow(job) if job else ""
+            if wf:
+                failed_wfs.add(wf)
+            changed += 1
+        if changed > 50:  # safety valve against cycles
+            break
+    return changed
+
+
 def _normalize_input_from_map(raw: dict | None) -> dict[str, str]:
     if not isinstance(raw, dict):
         return {}
@@ -1089,9 +1135,18 @@ def reap_stale_try_jobs(*, stale_sec: int = _STALE_SEC) -> int:
             latest = _latest_mtime(_work_dir(platform, video_id))
             if latest is not None and (now - latest) < stale_sec:
                 continue
+            job = queue.get_job(jid)
+            wf = _job_workflow(job) if job else ""
             queue.mark_failed(
                 jid,
                 "任务已中断（后台重启或超时）。请重新提交。",
+            )
+            _cascade_fail_dependents(
+                queue,
+                platform,
+                video_id,
+                wf,
+                "依赖任务已中断（后台重启或超时）。请重新提交。",
             )
             reaped += 1
             print(f"[try] reaped stale job#{jid} {platform}:{video_id}")
@@ -2490,6 +2545,13 @@ def run_try_job(job_id: int) -> dict:
                     queue.cancel_job(job_id, reason="用户已取消")
                     return job_snapshot(job_id)
                 queue.mark_failed(job_id, str(e)[:2000])
+                _cascade_fail_dependents(
+                    queue,
+                    platform,
+                    video_id,
+                    workflow,
+                    f"依赖任务失败：{workflow}（{str(e)[:120]}）",
+                )
                 raise
 
             if job_id in _cancel_requested:

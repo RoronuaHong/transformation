@@ -21,6 +21,8 @@ module.exports = {
       max_memory_restart: "1G",
       env: {
         PYTHONUNBUFFERED: "1",
+        PYTHONUTF8: "1",
+        PYTHONIOENCODING: "utf-8",
         VITUAL_REQUIRE_GPU: "1",
         VITUAL_HUB_SYNC: "0",
       },

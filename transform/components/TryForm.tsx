@@ -262,9 +262,23 @@ function progressDetail(copy: TryCopy, progress?: Progress) {
   if (!progress?.detail) return null;
   if (progress.stage === "translate" || progress.stage === "localize") {
     const [n, total] = progress.detail.split("/");
-    return copy.progressLangs.replace("{n}", n).replace("{total}", total);
+    // 仅当 detail 形如 "n/total" 时才按「种语言」渲染；
+    // pack 任务的 detail 可能是产物计数（如 "1"），不能套模板。
+    if (n && total) {
+      return copy.progressLangs.replace("{n}", n).replace("{total}", total);
+    }
+    return null;
   }
   return progress.detail;
+}
+
+/** 子进程 stderr 常混入 ANSI 转义序列（进度条/光标控制），直接展示会是乱码。 */
+function stripAnsi(s?: string | null): string {
+  if (!s) return "";
+  return s
+    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "")
+    .trim();
 }
 
 function parseRanges(rows: ClipRow[], segmentMax: number, max: number) {
@@ -2275,7 +2289,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
           (poll.status === "failed" ||
             poll.status === "dead" ||
             poll.status === "cancelled") ? (
-            <p className="try-error">{poll.error}</p>
+            <p className="try-error">{stripAnsi(poll.error)}</p>
           ) : null}
           {poll.status === "done" && poll.derived ? (
             <div className="try-derived">
@@ -2458,7 +2472,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                     </p>
                   ) : null}
                   {j.error && (j.status === "failed" || j.status === "dead" || j.status === "cancelled") ? (
-                    <p className="try-error try-batch-job-error">{j.error}</p>
+                    <p className="try-error try-batch-job-error">{stripAnsi(j.error)}</p>
                   ) : null}
                 </li>
               );
