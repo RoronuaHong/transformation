@@ -37,6 +37,13 @@ function derivedRemix(slug: string) {
   };
 }
 
+/** Dehardsub (captions removed) output, if present in public/derived. */
+function derivedDehardsub(slug: string) {
+  const dir = path.join(process.cwd(), "public", "derived", slug);
+  if (!existsSync(path.join(dir, "clean.mp4"))) return null;
+  return { video: `/derived/${slug}/clean.mp4` };
+}
+
 /** Try/export rewrites articles.json often — never bake a stale pack into HTML. */
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -144,6 +151,7 @@ export default async function TopicArticlePage({ params }: { params: Promise<Par
   const previewGifs = gifRangeFrames(downloadPoints);
   const previewClips = rangeVideoClips(downloadPoints);
   const remix = derivedRemix(a.slug);
+  const dehardsub = derivedDehardsub(a.slug);
 
   return (
     <main className="article-page">
@@ -165,6 +173,10 @@ export default async function TopicArticlePage({ params }: { params: Promise<Par
             vttUrl={remix.vtt}
             label={chrome.remixPlay}
           />
+        ) : null}
+
+        {dehardsub ? (
+          <RemixPlayer src={dehardsub.video} label={chrome.dehardsubPlay ?? "去烧录字幕版"} />
         ) : null}
 
         {previewGifs.length || previewClips.length ? (

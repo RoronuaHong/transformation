@@ -1352,6 +1352,58 @@ def encode_lama_boxes(
     return stats
 
 
+def _count_frames_ffmpeg(ff: str, p: "Path", wh: tuple[int, int]) -> int:
+    """Reliable frame count via ffmpeg raw decode (cv2 CAP_PROP_FRAME_COUNT lies)."""
+    import subprocess
+
+    w, h = wh
+    r = subprocess.run(
+        [ff, "-hide_banner", "-loglevel", "error", "-i", str(p),
+         "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
+        stdout=subprocess.PIPE, bufsize=-1,
+    )
+    n = len(r.stdout)
+    return n // (w * h * 3) if n else 0
+
+
+def _enforce_frame_count(src: "Path", dest: "Path") -> None:
+    """Ensure dest has exactly the same frame count as src.
+
+    The shared ffmpeg writer occasionally emits 1–2 extra frames (audio-duration
+    extension); ``-frames:v`` in copy mode cannot trim them. Re-encode-trim the
+    final output to the source's true frame count so verification / slice concat
+    stay frame-aligned. Cheap (one final pass) and route-agnostic.
+    """
+    import subprocess
+
+    from media_ops import find_ffmpeg
+
+    try:
+        ff = find_ffmpeg()
+        wh = _media().probe_video_wh(src)
+        if not wh:
+            return
+        n_src = _count_frames_ffmpeg(ff, src, wh)
+        n_dst = _count_frames_ffmpeg(ff, dest, wh)
+        if n_dst == n_src or n_dst == 0 or n_src == 0:
+            return
+        fixed = dest.with_name(dest.stem + "_framefix.mp4")
+        vf = f"select='lt(n\\,{n_src})',setpts=N/FRAME_RATE/TB"
+        r = subprocess.run(
+            [ff, "-y", "-loglevel", "error", "-i", str(dest),
+             "-vf", vf, "-vsync", "0",
+             "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+             "-c:a", "copy", str(fixed)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        if fixed.is_file() and fixed.stat().st_size > 800:
+            fixed.replace(dest)
+        else:
+            print(f"[cleanup] frame-align warn: {n_dst}->{n_src} failed: {(r.stderr or '')[-200:]}", flush=True)
+    except Exception as _e:  # noqa: BLE001
+        print(f"[cleanup] frame-align skipped: {_e}", flush=True)
+
+
 def run_multipass_cleanup(
     src: Path,
     dest: Path,
@@ -1371,6 +1423,7 @@ def run_multipass_cleanup(
     active_windows: list[tuple[float, float]] | None = None,
     dialogue_short_route: str = "auto",
     progress_path: Path | None = None,
+    boxes_override: list[dict] | None = None,
 ) -> dict[str, Any]:
     """Locate caption box → STTN (default) or OpenCV fill; optional mosaic pass."""
     src = Path(src)
@@ -1389,15 +1442,28 @@ def run_multipass_cleanup(
     box: dict[str, Any] | None = None
     hardsub_boxes: list[dict[str, int]] = []
     if dehardsub:
-        located_list = mops.resolve_hardsub_boxes(
-            src,
-            width,
-            height,
-            mode=("vlm" if locate_mode == "auto" else locate_mode),
-            ratio=ratio,
-            vlm_model=model,
-            work_dir=work_dir,
-        )
+        if boxes_override:
+            located_list = [
+                {
+                    "box": {
+                        "x": int(b["x"]), "y": int(b["y"]),
+                        "w": int(b["w"]), "h": int(b["h"]),
+                    },
+                    "role": b.get("role", "dialogue"),
+                    "source": "override",
+                }
+                for b in boxes_override
+            ]
+        else:
+            located_list = mops.resolve_hardsub_boxes(
+                src,
+                width,
+                height,
+                mode=("vlm" if locate_mode == "auto" else locate_mode),
+                ratio=ratio,
+                vlm_model=model,
+                work_dir=work_dir,
+            )
         located = located_list[0]
         for loc in located_list:
             b = loc["box"]
@@ -1917,6 +1983,65 @@ def run_multipass_cleanup(
                     pass_stats.append(used)
                     current = out_i
                     continue
+                if role == "dialogue" and route_kind == "spatial_fill":
+                    from sttn_inpaint import encode_dialogue_spatial_fill
+
+                    if progress_path is not None:
+                        try:
+                            mops = _media()
+                            mops._write_meta(
+                                progress_path,
+                                {
+                                    "kind": "dehardsub_spatial_fill",
+                                    "status": "running",
+                                    "role": role,
+                                    "box": box_run,
+                                    "route": "spatial_fill",
+                                },
+                            )
+                        except Exception:
+                            pass
+                    used = encode_dialogue_spatial_fill(current, out_i, box_run)
+                    used = dict(used)
+                    used["role"] = role
+                    used["box"] = box_run
+                    used["route"] = "spatial_fill"
+                    if route_info:
+                        used["route_info"] = {
+                            k: route_info.get(k)
+                            for k in (
+                                "ok",
+                                "route",
+                                "black_hits",
+                                "flat_hits",
+                                "bg_flat_hits",
+                                "band_med_gray",
+                                "samples",
+                                "box",
+                                "seed_box",
+                            )
+                        }
+                    if progress_path is not None:
+                        try:
+                            mops = _media()
+                            mops._write_meta(
+                                progress_path,
+                                {
+                                    "kind": "dehardsub_spatial_fill",
+                                    "status": "done",
+                                    "role": role,
+                                    "frames": used.get("frames"),
+                                    "filled_px": used.get("filled_px"),
+                                    "skipped_flat": used.get("skipped_flat"),
+                                    "skipped_gate": used.get("skipped_gate"),
+                                    "route": "spatial_fill",
+                                },
+                            )
+                        except Exception:
+                            pass
+                    pass_stats.append(used)
+                    current = out_i
+                    continue
                 env_prev = None
                 force_mode = ""
                 if role == "up_watermark":
@@ -2072,6 +2197,10 @@ def run_multipass_cleanup(
                 pass
         if sttn_out.resolve() != dest.resolve():
             sttn_out.replace(dest)
+        # Global frame-align: the last pass re-encodes with the shared writer,
+        # which can overproduce 1-2 frames (audio-duration extension). Trim the
+        # final output to the source's true frame count so verify/concat stay aligned.
+        _enforce_frame_count(src, dest)
         print(
             f"[cleanup] hybrid frames={sttn_stats.get('frames')} "
             f"regions={len(boxes_run)} mosaic_pre={'on' if mosaic_tmp is not None else 'off'} "
@@ -2140,6 +2269,7 @@ def run_multipass_cleanup(
 
     if current.resolve() != dest.resolve():
         current.replace(dest)
+    _enforce_frame_count(src, dest)
 
     for p in tmp_paths:
         try:

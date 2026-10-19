@@ -481,6 +481,7 @@ def classify_dialogue_route(
          (TBE+lerp ghosts on those; STTN tiles with glyph holes fill cleaner)
     """
     import cv2
+    import numpy as np
 
     seed = {k: int(box[k]) for k in ("x", "y", "w", "h")}
     cap = cv2.VideoCapture(str(video))
@@ -495,8 +496,10 @@ def classify_dialogue_route(
     black_hits = 0
     flat_hits = 0
     glyph_flat_hits = 0
+    bg_flat_hits = 0
     checked = 0
     found_boxes: list[dict[str, int]] = []
+    band_medians: list[float] = []
     try:
         for idx in idxs:
             cap.set(cv2.CAP_PROP_POS_FRAMES, float(idx))
@@ -504,6 +507,39 @@ def classify_dialogue_route(
             if not ok:
                 continue
             checked += 1
+            # Band darkness gate: an opaque BLACK plate dominates its tight ROI, so
+            # the ROI gray median stays low. Dark TEXT on bright footage also trips
+            # find_black_caption_box, but keeps the ROI median bright — painting
+            # those strokes black would leave black blobs (实测 gray_med=203 的亮底
+            # 黑字被误判后整条涂黑). Bright band → never route to glyph_black.
+            ry0 = max(0, seed["y"])
+            ry1 = min(fr.shape[0], seed["y"] + seed["h"])
+            rx0 = max(0, seed["x"])
+            rx1 = min(fr.shape[1], seed["x"] + seed["w"])
+            if ry1 > ry0 and rx1 > rx0:
+                roi_gray = cv2.cvtColor(
+                    fr[ry0:ry1, rx0:rx1], cv2.COLOR_BGR2GRAY
+                )
+                band_medians.append(float(np.median(roi_gray)))
+                # 平色背景检测（spatial_fill 路由）：字幕压在纯平色底上时，
+                # STTN 时序取材会产生鬼影（同句字幕持续 ~3s，邻帧全有字），
+                # 逐帧空间填充才是对的。判据：高饱和亮色占 ROI>25%（有主导
+                # 平色底）且距该底色 <=40 的像素占比 >55%（背景确实平）。
+                roi_bgr = fr[ry0:ry1, rx0:rx1]
+                hsv_r = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
+                ss = hsv_r[..., 1].astype(np.int16)
+                vv = hsv_r[..., 2].astype(np.int16)
+                bgm = (ss > 60) & (vv > 200)
+                if float(bgm.mean()) > 0.25:
+                    bgc = np.median(
+                        roi_bgr[bgm].reshape(-1, 3), axis=0
+                    ).astype(np.float32)
+                    dr = np.linalg.norm(
+                        roi_bgr.astype(np.float32) - bgc.reshape(1, 1, 3),
+                        axis=2,
+                    )
+                    if float((dr <= 40).mean()) > 0.55:
+                        bg_flat_hits += 1
             found = find_black_caption_box(fr, seed)
             if found is not None:
                 black_hits += 1
@@ -548,8 +584,12 @@ def classify_dialogue_route(
                 "h": int(h),
             }
 
-    if black_hits >= need:
+    band_med = float(np.median(band_medians)) if band_medians else 255.0
+    if black_hits >= need and band_med <= 120:
         route = "glyph_black"
+    elif bg_flat_hits >= need:
+        # 亮色平底上的烧录字幕：逐帧空间填充（STTN 时序取材会鬼影）。
+        route = "spatial_fill"
     elif flat_hits >= need and glyph_flat_hits == 0:
         # Pure flat bars (no text glyphs) keep the fast TBE path.
         route = "flat"
@@ -560,9 +600,11 @@ def classify_dialogue_route(
         "route": route,
         "box": tight,
         "seed_box": seed,
+        "band_med_gray": band_med,
         "black_hits": int(black_hits),
         "flat_hits": int(flat_hits),
         "glyph_flat_hits": int(glyph_flat_hits),
+        "bg_flat_hits": int(bg_flat_hits),
         "samples": int(checked),
     }
 
@@ -831,6 +873,209 @@ def encode_glyph_black_fill(
         ),
     }
 
+
+
+def encode_dialogue_spatial_fill(
+    src: Any,
+    dest: Any,
+    seed_box: dict[str, int],
+    *,
+    pad: int = 25,
+) -> dict[str, Any]:
+    """Per-frame spatial fill for dialogue subtitles over a FLAT background.
+
+    适用场景（2026-10-19 实测定稿）：字幕压在纯平色背景上（商品开箱粉底、白墙等）。
+    STTN tiles 从时序邻帧取材，但同句字幕持续 ~3s、邻帧全有字 → 黑色鬼影；
+    PS 中值堆栈要求背景静态（temporal_l1<=10），镜头缓动即被拒。
+    本路线完全不做时序取材：逐帧用「与粉底参考色的颜色距离」出字形 mask
+    （黑字核/白边/描边全部远离粉底色；medianBlur 局部背景在 65px 窄带内失效，
+    字行占满带高时局部中值=字本身），mask 内直接填粉底色+固定位置微噪声
+    （TELEA inpaint 会从 mask 边界 AA 过渡像素取色产生白晕，纯平背景直接填充更净）。
+    """
+    from pathlib import Path
+
+    import cv2
+    import numpy as np
+
+    src_p = Path(src)
+    dest_p = Path(dest)
+    dest_p.parent.mkdir(parents=True, exist_ok=True)
+    cap = cv2.VideoCapture(str(src_p))
+    if not cap.isOpened():
+        raise RuntimeError(f"cannot open {src_p}")
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0) or 25.0
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)  # 仅进度显示分母；cv2 帧数不可靠，不作逻辑依据
+    cap.release()
+    # 源用 ffmpeg 解码（与 verify_dehardsub 同解码器），保证帧数/逐帧对齐与自检一致；
+    # cv2 读源帧数会与 ffmpeg 不一致（同文件 cv2=900 / ffmpeg=902），不可依赖 cv2 计数。
+    from media_ops import find_ffmpeg
+
+    ff = find_ffmpeg()
+    rdr = subprocess.Popen(
+        [ff, "-hide_banner", "-loglevel", "error", "-i", str(src_p),
+         "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
+        stdout=subprocess.PIPE, bufsize=-1,
+    )
+    assert rdr.stdout is not None
+    _frame_bytes = width * height * 3
+
+    x0 = max(0, int(seed_box["x"]))
+    x1 = min(width, x0 + max(1, int(seed_box["w"])))
+    y0 = max(0, int(seed_box["y"]) - pad)
+    y1 = min(height, int(seed_box["y"]) + max(1, int(seed_box["h"])) + pad)
+    bw, bh = x1 - x0, y1 - y0
+    if bw < 8 or bh < 8:
+        cap.release()
+        raise RuntimeError(f"spatial fill box too small: {seed_box}")
+
+    # 固定位置微噪声：帧间同位置噪声相同 → 无闪烁
+    rng = np.random.RandomState(7)
+    noise = rng.normal(0, 2.0, (bh, bw, 1)).astype(np.float32)
+
+    writing = dest_p.with_name(f"_{dest_p.stem}_spatialfill_writing.mp4")
+    proc = _open_ffmpeg_writer(src_p, writing, width, height, fps)
+    assert proc.stdin is not None
+
+    frames = 0
+    touched = 0
+    filled_px = 0
+    skipped_flat = 0  # 无主导平色背景（bgm 采样不足）→ 不动
+    skipped_gate = 0  # mask 占比超门卫 → 不动
+
+    try:
+        while True:
+            buf = rdr.stdout.read(_frame_bytes)
+            if len(buf) < _frame_bytes:
+                break
+            fr = np.frombuffer(buf, np.uint8).reshape(height, width, 3).copy()
+            roi = fr[y0:y1, x0:x1]
+            hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+            s_ch = hsv[..., 1].astype(np.int16)
+            v_ch = hsv[..., 2].astype(np.int16)
+            bgm = (s_ch > 60) & (v_ch > 200)
+            if float(bgm.mean()) < 0.20:
+                skipped_flat += 1
+                proc.stdin.write(np.ascontiguousarray(fr).tobytes())
+                frames += 1
+                continue
+            bg = np.median(roi[bgm].reshape(-1, 3), axis=0).astype(np.float32)
+            d = np.linalg.norm(roi.astype(np.float32) - bg.reshape(1, 1, 3), axis=2)
+            m0 = d > 40
+            m = cv2.dilate(m0.astype(np.uint8) * 255, np.ones((11, 11), np.uint8), 1)
+            m = m > 0
+            # 行级过滤：字幕行是稀疏笔画（密度 2–47%），内容行是实心块（密度 76–100%）。
+            # 判据只靠【密度】区分：单行 masked 像素占比 >70% 判为实心内容块（黄衣/商品/
+            # 彩条）整行剔除；<=70% 的稀疏行视为字幕笔画予以保留填充。
+            # 不再用「白占比/彩占比」做行级门卫——彩色字幕（黄/蓝/红字）既无白核、彩占比
+            # 又高，原 (row_white>=0.1)|(row_col<=0.3) 会整行误杀，导致字幕原样残留
+            # （demo 实测 232/891 帧假残留，帧 300 仅 7/115 行过关）。白墙等无主导平色底
+            # 已由上方 bgm_mean<0.20 的 flat-skip 拦掉，无需在此用颜色二次过滤。
+            # 关键：密度判据作用于【未膨胀】的字形 mask(m0)，膨胀只用于实际填充。
+            row_tot = m0.sum(axis=1)
+            # 上限放宽到 0.98*bw：字幕常是「实心横幅 + 文字」整块（连排粗体/带底栏），单行
+            # masked 占比可达 90%+，原 0.70 上限会把整行判为「实心内容块」整行剔除 → 字幕
+            # 原样残留（帧 300 有 54 行 row_tot 高达 844/861）。真正需剔除的实心块由全局
+            # frac>0.93 闸门兜底（整帧 >93% 被遮 → 跳过），无需在此用行密度误杀字幕。
+            keep = (row_tot > 0.005 * bw) & (row_tot <= 0.98 * bw)
+            m &= keep[:, None]
+            frac = float(m.mean())
+            if frac < 0.005 or frac > 0.93:
+                skipped_gate += 1
+                proc.stdin.write(np.ascontiguousarray(fr).tobytes())
+                frames += 1
+                continue
+            fill = np.clip(bg.reshape(1, 1, 3) + noise, 0, 255).astype(np.uint8)
+            out = roi.copy()
+            out[m] = fill[m]
+            fr = fr.copy()
+            fr[y0:y1, x0:x1] = out
+            filled_px += int(m.sum())
+            touched += 1
+            proc.stdin.write(np.ascontiguousarray(fr).tobytes())
+            frames += 1
+            if n and frames % 300 == 0:
+                print(
+                    f"[spatialfill] wrote {frames}/{n} touched={touched} "
+                    f"px={filled_px} skip(flat={skipped_flat},gate={skipped_gate})",
+                    flush=True,
+                )
+    except Exception:
+        try:
+            rdr.kill()
+        except Exception:
+            pass
+        proc.kill()
+        raise
+    finally:
+        try:
+            rdr.kill()
+        except Exception:
+            pass
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
+    stderr = proc.communicate(timeout=300)[1]
+    if proc.returncode != 0 or frames < 1:
+        err = (stderr or b"").decode("utf-8", errors="replace")[:400]
+        raise RuntimeError(f"dialogue spatial fill failed ({proc.returncode}): {err}")
+    _finalize_writing_mp4(writing, dest_p)
+    # 帧数严格对齐源：源用 ffmpeg 解码，frames 即真实帧数。writer 因音频时长扩展
+    # 偶发多写 1–2 帧（copy 模式 -frames:v 无法裁掉，已验证失效），故用重新编码 +
+    # select 取前 frames 帧，保证与 verify/合成逐帧不错位。
+    try:
+        _fixed = dest_p.with_name(dest_p.stem + "_framefix.mp4")
+        _vf = f"select='lt(n\\,{frames})',setpts=N/FRAME_RATE/TB"
+        _r = subprocess.run(
+            [
+                ff,
+                "-y",
+                "-loglevel",
+                "error",
+                "-i",
+                str(dest_p),
+                "-vf",
+                _vf,
+                "-vsync",
+                "0",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "18",
+                "-c:a",
+                "copy",
+                str(_fixed),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if _fixed.is_file() and _fixed.stat().st_size > 800:
+            _fixed.replace(dest_p)
+        else:
+            print(
+                f"[spatialfill] frame-align warn: trim to {frames} failed: {(_r.stderr or '')[-200:]}",
+                flush=True,
+            )
+    except Exception as _e:  # noqa: BLE001
+        print(f"[spatialfill] frame-align skipped: {_e}", flush=True)
+    return {
+        "engine": "spatialfill",
+        "mode": "flat_bg_spatial_fill",
+        "frames": frames,
+        "filled_frames": touched,
+        "filled_px": filled_px,
+        "skipped_flat": skipped_flat,
+        "skipped_gate": skipped_gate,
+        "bytes": dest_p.stat().st_size if dest_p.is_file() else 0,
+        "seed_box": {k: int(seed_box[k]) for k in ("x", "y", "w", "h")},
+        "roi": {"x": int(x0), "y": int(y0), "w": int(bw), "h": int(bh)},
+    }
 
 
 def encode_black_caption_fill(
@@ -1691,6 +1936,8 @@ def _open_ffmpeg_writer(
             _WRITE_MOVFLAGS,
             "-flush_packets",
             "1",
+            "-fps_mode",
+            "passthrough",
             "-shortest",
             str(dest),
         ]

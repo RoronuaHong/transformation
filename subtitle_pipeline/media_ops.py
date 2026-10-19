@@ -1244,6 +1244,101 @@ def expand_dialogue_box_full_line(
     )
 
 
+def detect_dialogue_box_ocr(
+    video: Path,
+    width: int,
+    height: int,
+    *,
+    samples: int = 12,
+) -> dict[str, Any] | None:
+    """OCR-based dialogue subtitle locator (primary; replaces fragile band scan).
+
+    Samples frames, runs RapidOCR, keeps lower-region text lines, then clusters the
+    detected boxes by vertical overlap. The dialogue subtitle is the *bottom-most*
+    persistent cluster (largest y-center); on-screen labels and danmaku sit higher up
+    and are ignored. Returns ``{"box": {...}, "hits": int, "source": "ocr"}`` or ``None``.
+    """
+    import cv2
+    import numpy as np
+
+    try:
+        from glyph_detect import detect_text_boxes, GlyphDetectUnavailable
+    except Exception:
+        return None
+    dur = probe_duration_sec(video) or 0.0
+    if dur <= 0.5:
+        return None
+    boxes: list[dict[str, int]] = []
+    fracs = np.linspace(0.08, 0.95, max(4, samples))
+    for f in fracs:
+        raw = _grab_bgr_frame(video, dur * float(f))
+        if raw is None:
+            continue
+        if raw.shape[1] != width or raw.shape[0] != height:
+            raw = cv2.resize(raw, (width, height), interpolation=cv2.INTER_AREA)
+        try:
+            bs = detect_text_boxes(raw)
+        except GlyphDetectUnavailable:
+            return None
+        except Exception:
+            continue
+        for b in bs:
+            cy = b["y"] + b["h"] / 2
+            if cy > height * 0.45:  # lower ~55% only (dialogue subtitle)
+                boxes.append({
+                    "x": int(b["x"]), "y": int(b["y"]),
+                    "w": int(b["w"]), "h": int(b["h"]),
+                })
+    if len(boxes) < 3:
+        return None
+
+    # Cluster by vertical overlap (1D on y). Relative-overlap>0.3 merges the same
+    # line across frames into one cluster but keeps distinct lines apart.
+    clusters: list[dict] = []
+    for b in sorted(boxes, key=lambda q: q["y"]):
+        by0, by1 = b["y"], b["y"] + b["h"]
+        placed = False
+        for c in clusters:
+            ov = min(by1, c["y1"]) - max(by0, c["y0"])
+            ref = min(by1 - by0, c["y1"] - c["y0"])
+            if ov > 0 and (ov / ref) > 0.3:
+                c["y0"] = min(c["y0"], by0)
+                c["y1"] = max(c["y1"], by1)
+                c["xs"].append(b["x"])
+                c["xs1"].append(b["x"] + b["w"])
+                c["n"] += 1
+                placed = True
+                break
+        if not placed:
+            clusters.append({
+                "y0": by0, "y1": by1,
+                "xs": [b["x"]], "xs1": [b["x"] + b["w"]], "n": 1,
+            })
+    # A real burnt subtitle persists across many frames (n>=2); lone danmaku won't.
+    clusters = [c for c in clusters if c["n"] >= 2]
+    if not clusters:
+        return None
+    # The dialogue subtitle is the bottom-most persistent cluster (largest center).
+    best = max(clusters, key=lambda c: (c["y0"] + c["y1"]) / 2)
+    y0, y1 = best["y0"], best["y1"]
+    if (y1 - y0) < 8:  # a single thin sliver is not a real subtitle line
+        return None
+    pad_top = max(24, int((y1 - y0) // 3))
+    pad_bot = 16
+    x0, x1 = min(best["xs"]), max(best["xs1"])
+    box = {
+        "x": max(1, int(x0 - 10)),
+        "y": max(1, int(y0 - pad_top)),
+        "w": min(width - 2, int(x1 + 10) - max(1, int(x0 - 10))),
+        "h": min(height - 2, int(y1 + pad_bot) - max(1, int(y0 - pad_top))),
+    }
+    return {
+        "box": clamp_hardsub_box(box, width, height, zone="bottom"),
+        "hits": len(boxes),
+        "source": "ocr",
+    }
+
+
 def resolve_hardsub_boxes(
     video: Path,
     width: int,
@@ -1257,21 +1352,32 @@ def resolve_hardsub_boxes(
     """Locate all burned-in text regions: dialogue + top title + watermark."""
     mode_s = (mode or "vlm").strip().lower()
     dialogue: dict[str, Any] | None = None
-    if mode_s == "vlm":
-        dialogue = locate_hardsub_box_vlm(
-            video, width, height, model=vlm_model, work_dir=work_dir
-        )
-        if dialogue is None:
+    # OCR primary (2026-10-19): directly locate the burnt subtitle glyph band; far
+    # more robust than the brightness band scan that drifted to the wrong strip.
+    ocr_d = detect_dialogue_box_ocr(video, width, height)
+    if ocr_d and ocr_d.get("box"):
+        dialogue = ocr_d
+    if dialogue is None:
+        if mode_s == "vlm":
+            dialogue = locate_hardsub_box_vlm(
+                video, width, height, model=vlm_model, work_dir=work_dir
+            )
+            if dialogue is None:
+                dialogue = locate_hardsub_box_band(video, width, height)
+        elif mode_s == "band":
             dialogue = locate_hardsub_box_band(video, width, height)
-    elif mode_s == "band":
-        dialogue = locate_hardsub_box_band(video, width, height)
 
     out: list[dict[str, Any]] = []
     if dialogue and dialogue.get("box"):
         seed = dialogue["box"]
-        tight = tighten_hardsub_box(video, width, height, seed, zone="bottom")
-        # Repair clipped long lines (do not trust watermark carve / short VLM).
-        full = expand_dialogue_box_full_line(video, width, height, tight)
+        if dialogue.get("source") == "ocr":
+            # OCR already returns the precise glyph band — use it directly; skip the
+            # brightness tighten/expand that previously drifted the box off-subtitle.
+            full = clamp_hardsub_box(seed, width, height, zone="bottom")
+        else:
+            tight = tighten_hardsub_box(video, width, height, seed, zone="bottom")
+            # Repair clipped long lines (do not trust watermark carve / short VLM).
+            full = expand_dialogue_box_full_line(video, width, height, tight)
         row = dict(dialogue)
         row["box_seed"] = {
             "x": int(seed["x"]),
@@ -2231,6 +2337,92 @@ def _render_fast_box_segments(
     return True
 
 
+def _draw_region_preview(video: Path, boxes: list[dict], out_path: Path) -> bool:
+    """Draw region boxes on a sampled frame for human review."""
+    import cv2
+
+    dur = probe_duration_sec(video) or 0.0
+    if dur <= 0.5:
+        return False
+    fr = _grab_bgr_frame(video, dur * 0.3)
+    if fr is None:
+        fr = _grab_bgr_frame(video, dur * 0.5)
+    if fr is None:
+        return False
+    colors = {
+        "dialogue": (0, 0, 255),
+        "title": (0, 200, 255),
+        "watermark": (255, 0, 0),
+        "up_watermark": (255, 0, 255),
+    }
+    for b in boxes:
+        c = colors.get(b.get("role"), (0, 255, 0))
+        x, y, w, h = int(b["x"]), int(b["y"]), int(b["w"]), int(b["h"])
+        cv2.rectangle(fr, (x, y), (x + w, y + h), c, 6)
+        cv2.putText(
+            fr, b.get("role", ""),
+            (x, max(0, y - 10)), cv2.FONT_HERSHEY_SIMPLEX, 1.2, c, 3,
+        )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(out_path), fr)
+    return True
+
+
+def detect_dehardsub_regions(
+    work_dir: Path,
+    *,
+    mode: str = "auto",
+    ratio: float = HARDSUB_CROP_RATIO,
+    vlm_model: str | None = None,
+) -> dict[str, Any]:
+    """Stage 1 of the detect → confirm → process flow.
+
+    Resolve subtitle regions (OCR-primary) and persist them for human review:
+    writes ``media/dehardsub/dehardsub_regions.json`` (``confirmed:false``) and a
+    ``dehardsub_regions_preview.jpg`` with the boxes drawn. Returns the payload.
+    """
+    work_dir = Path(work_dir)
+    dest_dir = job_dehardsub_dir(work_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    from note_frames import existing_source_video
+
+    src = existing_source_video(work_dir)
+    if src is None or not src.is_file():
+        raise FileNotFoundError(f"dehardsub needs a source video in {work_dir}")
+    wh = probe_video_wh(src)
+    if wh is None:
+        raise RuntimeError("cannot probe video size")
+    width, height = wh
+    located = resolve_hardsub_boxes(
+        src, width, height, mode=mode, ratio=ratio,
+        vlm_model=vlm_model or HARDSUB_VLM_MODEL, work_dir=work_dir,
+    )
+    boxes = []
+    for loc in located:
+        b = loc.get("box") or {}
+        boxes.append({
+            "x": int(b["x"]), "y": int(b["y"]),
+            "w": int(b["w"]), "h": int(b["h"]),
+            "role": loc.get("role", "dialogue"),
+        })
+    payload = {
+        "confirmed": False,
+        "detected_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "width": width,
+        "height": height,
+        "note": (
+            "Review dehardsub_regions_preview.jpg. Edit boxes if needed, "
+            "set confirmed:true, then run the process stage."
+        ),
+        "boxes": boxes,
+    }
+    (dest_dir / "dehardsub_regions.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    _draw_region_preview(src, boxes, dest_dir / "dehardsub_regions_preview.jpg")
+    return payload
+
+
 def strip_hardsubs(
     work_dir: Path,
     *,
@@ -2245,6 +2437,9 @@ def strip_hardsubs(
     demosaic_engine: str | None = None,
     polish_residual_floor: float = 0.012,
     dialogue_short_route: str = "auto",
+    boxes_override: list[dict] | None = None,
+    detect_only: bool = False,
+    require_confirm: bool = False,
 ) -> tuple[Path, dict[str, Any]]:
     """Remove burned-in captions (+ optional mosaic) — keep full frame.
 
@@ -2315,6 +2510,37 @@ def strip_hardsubs(
         raise RuntimeError(f"cannot probe video size: {src}")
     width, height = wh
     report["src_size"] = f"{width}x{height}"
+
+    # ---- detect → confirm → process gate (2026-10-19) ----
+    if detect_only:
+        payload = detect_dehardsub_regions(
+            work_dir, mode=mode_s, ratio=ratio, vlm_model=model
+        )
+        report["action"] = "detect_only"
+        report["awaiting_confirm"] = True
+        report["regions"] = payload["boxes"]
+        _write_meta(meta_path, report)
+        print(
+            f"[dehardsub] detected {len(payload['boxes'])} region(s); "
+            f"preview: media/dehardsub/dehardsub_regions_preview.jpg"
+        )
+        return src, report
+    if require_confirm and not boxes_override:
+        rj = dest_dir / "dehardsub_regions.json"
+        if not (rj.is_file() and json.loads(rj.read_text(encoding="utf-8")).get("confirmed")):
+            payload = detect_dehardsub_regions(
+                work_dir, mode=mode_s, ratio=ratio, vlm_model=model
+            )
+            report["action"] = "awaiting_confirm"
+            report["awaiting_confirm"] = True
+            report["regions"] = payload["boxes"]
+            _write_meta(meta_path, report)
+            print(
+                f"[dehardsub] awaiting confirmation: {len(payload['boxes'])} region(s); "
+                f"edit media/dehardsub/dehardsub_regions.json (set confirmed:true) then re-run"
+            )
+            return src, report
+        boxes_override = json.loads(rj.read_text(encoding="utf-8")).get("boxes")
 
     ffmpeg = find_ffmpeg()
     encode_dest = dest
@@ -2431,6 +2657,7 @@ def strip_hardsubs(
                 active_windows=active_windows,
                 dialogue_short_route=str(dialogue_short_route or "auto"),
                 progress_path=progress_path,
+                boxes_override=boxes_override,
             )
             report.update(cleanup)
             box = cleanup.get("box") or box

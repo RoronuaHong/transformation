@@ -56,6 +56,7 @@ export type ArticleCopy = {
   lockedHint: string;
   morePoints: string;
   remixPlay: string;
+  dehardsubPlay?: string;
 };
 
 export type NavCopy = {
@@ -478,6 +479,7 @@ const en: UiCopy = {
     lockedHint: "Core points and watch-outs unlock after the ad.",
     morePoints: "{n} more points",
     remixPlay: "9:16 remix (captions overlay, not burned in)",
+    dehardsubPlay: "Cleaned video (captions removed)",
   },
   nav: {
     language: "Language",
@@ -892,6 +894,7 @@ const zh: UiCopy = {
     lockedHint: "重点和难点在广告后开放。",
     morePoints: "还有 {n} 条",
     remixPlay: "9:16 二创（字幕叠在画面上，不烧进视频）",
+    dehardsubPlay: "去烧录字幕版（干净画面）",
   },
   nav: {
     language: "语言",
