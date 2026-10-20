@@ -1369,12 +1369,20 @@ def _count_frames_ffmpeg(ff: str, p: "Path", wh: tuple[int, int]) -> int:
 def _enforce_frame_count(src: "Path", dest: "Path") -> None:
     """Ensure dest has exactly the same frame count as src.
 
-    The shared ffmpeg writer occasionally emits 1–2 extra frames (audio-duration
-    extension); ``-frames:v`` in copy mode cannot trim them. Re-encode-trim the
-    final output to the source's true frame count so verification / slice concat
-    stay frame-aligned. Cheap (one final pass) and route-agnostic.
+    The shared ffmpeg writer can emit 1–2 extra frames (audio-duration
+    extension) *or* drop a few; ``-frames:v`` in copy mode fixes neither, and
+    ffmpeg's ``tpad`` filter proved unreliable on our build (it silently added
+    no frames). So this does it deterministically in Python, streaming frame by
+    frame (constant memory, safe for long videos):
+      * over-produced → stop after ``n_src`` frames;
+      * under-produced → repeat the last frame to reach ``n_src``.
+    Video is re-encoded to a temp, then the *original* audio is muxed back so the
+    soundtrack is preserved. Frame-exact output keeps verify / slice concat
+    frame-aligned.
     """
     import subprocess
+
+    import cv2
 
     from media_ops import find_ffmpeg
 
@@ -1385,23 +1393,109 @@ def _enforce_frame_count(src: "Path", dest: "Path") -> None:
             return
         n_src = _count_frames_ffmpeg(ff, src, wh)
         n_dst = _count_frames_ffmpeg(ff, dest, wh)
-        if n_dst == n_src or n_dst == 0 or n_src == 0:
+        if n_dst == 0 or n_src == 0 or n_dst == n_src:
             return
-        fixed = dest.with_name(dest.stem + "_framefix.mp4")
-        vf = f"select='lt(n\\,{n_src})',setpts=N/FRAME_RATE/TB"
-        r = subprocess.run(
-            [ff, "-y", "-loglevel", "error", "-i", str(dest),
-             "-vf", vf, "-vsync", "0",
+        w, h = int(wh[0]), int(wh[1])
+        cap = cv2.VideoCapture(str(dest))
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0) or 25.0
+        cap.release()
+        fs = w * h * 3
+
+        tmp_v = dest.with_name(dest.stem + "_vfix.mp4")
+        rd = subprocess.Popen(
+            [ff, "-hide_banner", "-loglevel", "error", "-i", str(dest),
+             "-pix_fmt", "bgr24", "-f", "rawvideo", "-"],
+            stdout=subprocess.PIPE, bufsize=-1,
+        )
+        wr = subprocess.Popen(
+            [ff, "-y", "-hide_banner", "-loglevel", "error",
+             "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{w}x{h}",
+             "-r", f"{fps}", "-i", "-", "-an",
              "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-             "-c:a", "copy", str(fixed)],
+             "-pix_fmt", "yuv420p", str(tmp_v)],
+            stdin=subprocess.PIPE,
+        )
+        written = 0
+        last: bytes | None = None
+        try:
+            assert rd.stdout is not None and wr.stdin is not None
+            while written < n_src:
+                b = rd.stdout.read(fs)
+                if len(b) < fs:
+                    break
+                wr.stdin.write(b)
+                last = b
+                written += 1
+            # under-produced → hold the last frame to reach n_src exactly
+            if last is not None:
+                while written < n_src:
+                    wr.stdin.write(last)
+                    written += 1
+            wr.stdin.close()
+        except Exception:
+            rd.kill()
+            wr.kill()
+            raise
+        finally:
+            rd.kill()
+        wr.wait()
+        if not (tmp_v.is_file() and tmp_v.stat().st_size > 800):
+            print(f"[cleanup] frame-align warn: video fix failed {n_dst}->{n_src}", flush=True)
+            tmp_v.unlink(missing_ok=True)
+            return
+
+        # Mux the original (untouched) audio back onto the frame-exact video.
+        fixed = dest.with_name(dest.stem + "_framefix.mp4")
+        r = subprocess.run(
+            [ff, "-y", "-hide_banner", "-loglevel", "error",
+             "-i", str(tmp_v), "-i", str(dest),
+             "-map", "0:v:0", "-map", "1:a:0?",
+             "-c:v", "copy", "-c:a", "copy", str(fixed)],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
         if fixed.is_file() and fixed.stat().st_size > 800:
             fixed.replace(dest)
+            tmp_v.unlink(missing_ok=True)
         else:
-            print(f"[cleanup] frame-align warn: {n_dst}->{n_src} failed: {(r.stderr or '')[-200:]}", flush=True)
+            print(f"[cleanup] frame-align warn: mux failed: {(r.stderr or '')[-200:]}", flush=True)
+            tmp_v.unlink(missing_ok=True)
     except Exception as _e:  # noqa: BLE001
         print(f"[cleanup] frame-align skipped: {_e}", flush=True)
+
+
+def _box_text_energy(src: Path, box: dict[str, int], samples: int = 6) -> float:
+    """Median Laplacian (stroke) energy inside ``box`` over a few sampled frames.
+
+    Used to sanity-check a tightened dialogue box: if narrowing locked onto an
+    empty sub-band, this collapses vs the original box and the caller falls back.
+    """
+    import cv2
+    import numpy as np
+
+    x, y, w, h = int(box["x"]), int(box["y"]), int(box["w"]), int(box["h"])
+    if w <= 0 or h <= 0:
+        return 0.0
+    cap = cv2.VideoCapture(str(src))
+    try:
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        if total <= 0:
+            return 0.0
+        idxs = {int(round(i * (total - 1) / max(1, samples - 1))) for i in range(samples)}
+        vals: list[float] = []
+        i = 0
+        while True:
+            ok, fr = cap.read()
+            if not ok:
+                break
+            if i in idxs:
+                roi = fr[y : y + h, x : x + w]
+                if roi.size:
+                    g = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                    vals.append(float(cv2.Laplacian(g, cv2.CV_64F).var()))
+            i += 1
+    finally:
+        cap.release()
+    return float(np.median(vals)) if vals else 0.0
 
 
 def run_multipass_cleanup(
@@ -1530,6 +1624,20 @@ def run_multipass_cleanup(
                     if isinstance(rb, dict)
                     else {k: int(hb[k]) for k in ("x", "y", "w", "h")}
                 )
+                # Guard: a tightened box must still carry the dialogue text. If
+                # narrowing locked onto an empty sub-band (stroke energy collapses
+                # vs the original box), the real subtitle is left behind — fall
+                # back to the full detected box.
+                if isinstance(rb, dict):
+                    e_full = _box_text_energy(src, hb)
+                    e_tight = _box_text_energy(src, box_use)
+                    if e_tight < 0.5 * e_full:
+                        print(
+                            f"[cleanup] dialogue[{i}] tighten dropped text "
+                            f"(edge {e_tight:.0f} < 0.5*{e_full:.0f}); keep full box",
+                            flush=True,
+                        )
+                        box_use = {k: int(hb[k]) for k in ("x", "y", "w", "h")}
                 dialogue_boxes_all.append(box_use)
                 hardsub_boxes[i] = box_use
                 if route_i.get("route") in ("glyph_black", "flat"):

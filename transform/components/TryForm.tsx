@@ -23,6 +23,11 @@ import { parseUrlLines, type UrlProbeResult } from "@/lib/try-urls";
 import { tryApiBase } from "@/lib/api-base";
 import type { Locale } from "@/lib/locales";
 import { localeNames, localePath, locales } from "@/lib/locales";
+import {
+  DehardsubConfirmModal,
+  type DhBox,
+  type DhDynamic,
+} from "@/components/DehardsubConfirmModal";
 
 /** Same-origin proxy — avoids browser extensions blocking cross-origin :8901 fetch. */
 const API = tryApiBase();
@@ -360,6 +365,26 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
   const [langsOpen, setLangsOpen] = useState(false);
   const [langsQuery, setLangsQuery] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  // Dehardsub human-confirm gate (detect → modal → confirm → enqueue).
+  const [dhConfirm, setDhConfirm] = useState<null | {
+    previewSrc: string;
+    width: number;
+    height: number;
+    boxes: DhBox[];
+    dynamicWatermarks: DhDynamic[];
+    work_dir: string;
+    loading: boolean;
+    error: string | null;
+  }>(null);
+  const [dhTask, setDhTask] = useState<null | {
+    task_id: string;
+    status: string;
+    work_dir: string;
+    result_url: string | null;
+    error: string | null;
+  }>(null);
+  const dhGateRef = useRef({ skip: false, forceNoDehardsub: false });
+  const onSubmitRef = useRef<((e: React.FormEvent) => void) | null>(null);
   const [poll, setPoll] = useState<Poll | null>(null);
   const [batchJobs, setBatchJobs] = useState<
     Array<{
@@ -1056,8 +1081,80 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     };
   }, [tab, urlsText, sessionid, files.length, copy.apiDown]);
 
+  // Keep a latest ref so the confirm modal can resume the real submit.
+  onSubmitRef.current = onSubmit;
+
+  async function onDehardsubConfirm(boxes: DhBox[], dynamic: DhDynamic[]) {
+    const dh = dhConfirm;
+    if (!dh) return;
+    setDhConfirm({ ...dh, loading: true, error: null });
+    try {
+      const r = await fetch(`${API}/api/try/dehardsub/confirm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          work_dir: dh.work_dir,
+          boxes,
+          dynamic,
+          engine: "sttn",
+        }),
+      });
+      const j = await r.json();
+      if (!j.ok) {
+        setDhConfirm({ ...dh, loading: false, error: j.detail || j.error || "启动去字幕失败" });
+        return;
+      }
+      setDhTask({
+        task_id: j.task_id,
+        status: "processing",
+        work_dir: dh.work_dir,
+        result_url: null,
+        error: null,
+      });
+      setDhConfirm(null);
+      // Resume the real submit: skip the gate; pipeline won't re-run dehardsub.
+      dhGateRef.current.skip = true;
+      dhGateRef.current.forceNoDehardsub = true;
+      onSubmitRef.current?.({ preventDefault() {} } as unknown as React.FormEvent);
+    } catch (e) {
+      setDhConfirm({ ...dh, loading: false, error: String(e) });
+    }
+  }
+
+  // Poll the dehardsub background task until it finishes.
+  useEffect(() => {
+    if (!dhTask || dhTask.status !== "processing") return;
+    let alive = true;
+    const timer = setInterval(async () => {
+      try {
+        const r = await fetch(`${API}/api/try/dehardsub/status/${dhTask.task_id}`);
+        const j = await r.json();
+        if (!alive) return;
+        if (j.status === "done") {
+          setDhTask((t) => (t ? { ...t, status: "done", result_url: j.result_url } : t));
+          clearInterval(timer);
+        } else if (j.status === "error") {
+          setDhTask((t) => (t ? { ...t, status: "error", error: j.error } : t));
+          clearInterval(timer);
+        }
+      } catch {
+        /* keep polling */
+      }
+    }, 3000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [dhTask]);
+
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
+    // Consume one-shot gate flags: a confirm-resumed submit skips the gate and
+    // tells the main pipeline not to run dehardsub again (handled separately).
+    const resumeSubmit = dhGateRef.current.skip;
+    const forceNoDehardsub = dhGateRef.current.forceNoDehardsub;
+    dhGateRef.current.skip = false;
+    dhGateRef.current.forceNoDehardsub = false;
     setErr(null);
     setPoll(null);
     setBatchJobs([]);
@@ -1086,6 +1183,53 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     if ((wantTranslate || wantNotes) && targetLangs.length === 0) {
       setErr(copy.langsNeedOne);
       return;
+    }
+
+    // Dehardsub human-confirm gate (single URL): detect regions first, show the
+    // preview modal, and only enqueue after the user confirms/adjusts boxes.
+    if (!resumeSubmit && tab === "url" && wantDehardsub) {
+      const gateUrls = parseUrlLines(urlsText);
+      if (gateUrls.length === 1) {
+        setSubmitting(true);
+        try {
+          const r = await fetch(`${API}/api/try/dehardsub/detect`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url: gateUrls[0] }),
+          });
+          const j = await r.json();
+          if (!j.ok) {
+            setErr(j.detail || j.error || "去字幕区域检测失败");
+            setSubmitting(false);
+            return;
+          }
+          setDhConfirm({
+            previewSrc: j.preview_b64
+              ? `data:${j.preview_mime || "image/jpeg"};base64,${j.preview_b64}`
+              : "",
+            width: Number(j.width) || 0,
+            height: Number(j.height) || 0,
+            boxes: (j.boxes || []).map((b: DhBox) => ({
+              ...b,
+              x: +b.x,
+              y: +b.y,
+              w: +b.w,
+              h: +b.h,
+              role: b.role || "dialogue",
+            })),
+            dynamicWatermarks: (j.dynamic_watermarks || []) as DhDynamic[],
+            work_dir: j.work_dir,
+            loading: false,
+            error: null,
+          });
+          setSubmitting(false);
+          return;
+        } catch (e) {
+          setErr(isFetchNetworkError(e) ? copy.apiDown : String(e));
+          setSubmitting(false);
+          return;
+        }
+      }
     }
 
     setSubmitting(true);
@@ -1125,7 +1269,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
             want_translate: wantTranslate,
             want_notes: wantNotes,
             want_clips: wantClips,
-            want_dehardsub: wantDehardsub,
+            want_dehardsub: wantDehardsub && !forceNoDehardsub,
             want_deblur: wantDeblur,
             want_enhance: wantEnhance,
             want_compress: wantCompress,
@@ -2361,6 +2505,51 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                 ) : null}
               </ul>
             </div>
+          ) : null}
+
+          {dhTask ? (
+            <div className="try-derived">
+              <p className="try-derived-title">{copy.workflowRailDehardsub}</p>
+              {dhTask.status === "processing" ? (
+                <p>去字幕处理中…（可离开此页，完成后在此显示）</p>
+              ) : null}
+              {dhTask.status === "error" ? (
+                <p className="try-error">{dhTask.error}</p>
+              ) : null}
+              {dhTask.status === "done" && dhTask.result_url ? (
+                <ul>
+                  <li>
+                    <video
+                      src={dhTask.result_url}
+                      controls
+                      style={{ maxWidth: 320, borderRadius: 8 }}
+                    />
+                  </li>
+                  <li>
+                    <a href={dhTask.result_url} download>
+                      下载去字幕成品（clean.mp4）
+                    </a>
+                  </li>
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
+
+          {dhConfirm ? (
+            <DehardsubConfirmModal
+              previewSrc={dhConfirm.previewSrc}
+              width={dhConfirm.width}
+              height={dhConfirm.height}
+              boxes={dhConfirm.boxes}
+              dynamicWatermarks={dhConfirm.dynamicWatermarks}
+              loading={dhConfirm.loading}
+              error={dhConfirm.error}
+              onCancel={() => {
+                setDhConfirm(null);
+                setSubmitting(false);
+              }}
+              onConfirm={onDehardsubConfirm}
+            />
           ) : null}
           {poll.status === "done" && poll.path && batchJobs.length <= 1 ? (
             <p>

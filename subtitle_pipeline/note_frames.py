@@ -42,12 +42,21 @@ def clip_workers(explicit: int | None = None) -> int:
 
 def existing_source_video(work_dir: Path) -> Path | None:
     media = job_media_dir(work_dir)
+    # Canonical source always wins over derived artifacts (clean.mp4,
+    # compare_*.mp4, etc.) that may sit in media/ or the work_dir root and
+    # otherwise look "newest". A wrong pick here silently feeds dehardsub
+    # detect/verify the wrong video (e.g. a band-crop clip → bogus box).
+    canonical = media / "source.mp4"
+    if canonical.is_file() and _has_video_stream(canonical):
+        return canonical
     candidates: list[Path] = []
     for folder in (media, Path(work_dir)):
         if not folder.is_dir():
             continue
         for p in folder.iterdir():
             if p.is_file() and p.suffix.lower() in VIDEO_SUFFIXES:
+                if p.resolve() == canonical.resolve():
+                    continue
                 if _has_video_stream(p):
                     candidates.append(p)
     if not candidates:

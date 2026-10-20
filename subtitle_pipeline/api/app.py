@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
@@ -1060,3 +1061,259 @@ def try_poll(job_id: int) -> dict:
     if not snap.get("ok"):
         raise HTTPException(status_code=404, detail=snap.get("error") or "not found")
     return snap
+
+
+# ---------------------------------------------------------------------------
+# Dehardsub detect → human confirm → process (decoupled from the main pipeline)
+#
+# Flow: POST /api/try/dehardsub/detect  → boxes + preview (base64)
+#       human reviews/edits boxes in the frontend modal
+#       POST /api/try/dehardsub/confirm  → background strip_hardsubs(boxes_override)
+#       GET  /api/try/dehardsub/status/{task_id} → poll result
+#       GET  /api/try/dehardsub/file?work_dir=..&rel=.. → serve clean.mp4
+# ---------------------------------------------------------------------------
+import base64 as _b64mod
+import threading as _threading
+import uuid as _uuidmod
+
+_DEHARDSUB_TASKS: dict[str, dict[str, Any]] = {}
+_DEHARDSUB_LOCK = _threading.Lock()
+
+
+class DehardsubDetectBody(BaseModel):
+    url: str | None = Field(
+        default=None, description="source video URL (fetched idempotently)"
+    )
+    work_dir: str | None = Field(
+        default=None, description="existing work dir (platform_videoid); if given, skip fetch"
+    )
+
+
+class DehardsubConfirmBody(BaseModel):
+    work_dir: str = Field(..., description="work dir relative to downloads/batch")
+    boxes: list[dict[str, Any]]
+    engine: str = "sttn"
+    dynamic: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="opt-in moving-watermark items (each with trajectory/fps/width/height)",
+    )
+    repair: bool = Field(
+        default=True,
+        description="re-scan output and inpaint only frames the self-check flags as residual",
+    )
+
+
+def _dehardsub_resolve_work_dir(work_dir_rel: str) -> Path:
+    """Resolve a work dir under WORK_ROOT, refusing path traversal."""
+    from api.try_service import WORK_ROOT
+
+    base = WORK_ROOT.resolve()
+    p = (base / str(work_dir_rel)).resolve()
+    if p != base and base not in p.parents:
+        raise HTTPException(status_code=400, detail="invalid work_dir")
+    return p
+
+
+@app.post("/api/try/dehardsub/detect")
+def dehardsub_detect(body: DehardsubDetectBody) -> dict:
+    from api.try_service import WORK_ROOT
+    from media_ops import detect_dehardsub_regions, job_dehardsub_dir
+
+    if body.work_dir:
+        work_dir = _dehardsub_resolve_work_dir(body.work_dir)
+        work_dir_rel = body.work_dir
+    elif body.url:
+        from discover.run_inbox import parse_url
+        from fetch_media import ensure_source_video
+
+        try:
+            platform, video_id = parse_url(body.url)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=f"cannot parse url: {e}") from None
+        work_dir_rel = f"{platform}_{video_id}"
+        work_dir = WORK_ROOT / work_dir_rel
+        try:
+            ensure_source_video(body.url, work_dir, cookies_from_browser=None)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"fetch failed: {e}") from None
+    else:
+        raise HTTPException(status_code=400, detail="provide url or work_dir")
+
+    try:
+        payload = detect_dehardsub_regions(work_dir)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"detect failed: {e}") from None
+
+    # Opt-in dynamic (moving) watermark suggestion. Returned SEPARATELY and never
+    # auto-merged into boxes: the heuristic detector can over-report on busy real
+    # content (risk of removing real imagery), so the user must explicitly opt in
+    # per item in the UI. Static boxes are excluded from the moving-blob search.
+    dynamic_wms: list[dict[str, Any]] = []
+    try:
+        from note_frames import existing_source_video
+        from dynamic_watermark import detect_moving_watermark
+
+        src = existing_source_video(work_dir)
+        if src is not None:
+            dyn = detect_moving_watermark(src, ignore_boxes=payload.get("boxes") or [])
+            if dyn:
+                dynamic_wms.append(dyn)
+    except Exception:  # noqa: BLE001 — detection is best-effort, never fatal
+        dynamic_wms = []
+
+    preview = job_dehardsub_dir(work_dir) / "dehardsub_regions_preview.jpg"
+    b64 = ""
+    if preview.is_file():
+        b64 = _b64mod.b64encode(preview.read_bytes()).decode("ascii")
+    return {
+        "ok": True,
+        "work_dir": work_dir_rel,
+        "width": payload.get("width"),
+        "height": payload.get("height"),
+        "boxes": payload.get("boxes") or [],
+        "dynamic_watermarks": dynamic_wms,
+        "preview_b64": b64,
+        "preview_mime": "image/jpeg",
+    }
+
+
+@app.post("/api/try/dehardsub/confirm")
+def dehardsub_confirm(body: DehardsubConfirmBody, background: BackgroundTasks) -> dict:
+    work_dir = _dehardsub_resolve_work_dir(body.work_dir)
+    boxes: list[dict[str, Any]] = []
+    for b in body.boxes or []:
+        try:
+            boxes.append(
+                {
+                    "x": int(b["x"]),
+                    "y": int(b["y"]),
+                    "w": int(b["w"]),
+                    "h": int(b["h"]),
+                    "role": str(b.get("role") or "dialogue"),
+                }
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not boxes and not body.dynamic:
+        raise HTTPException(status_code=400, detail="no valid boxes or dynamic watermarks")
+
+    task_id = _uuidmod.uuid4().hex[:12]
+    with _DEHARDSUB_LOCK:
+        _DEHARDSUB_TASKS[task_id] = {
+            "status": "processing",
+            "work_dir": body.work_dir,
+            "result_rel": None,
+            "result_url": None,
+            "error": None,
+            "report": None,
+        }
+
+    def _run() -> None:
+        try:
+            from media_ops import strip_hardsubs, job_dehardsub_dir
+
+            # Static regions first (multi-pass + STTN), then opt-in moving
+            # watermarks chained per-frame on the result.
+            from note_frames import existing_source_video
+
+            src_path = Path(existing_source_video(work_dir))
+            if boxes:
+                cur, rep = strip_hardsubs(
+                    work_dir, mode="auto", boxes_override=boxes, engine=body.engine
+                )
+            else:
+                cur = src_path
+                rep = {"action": "dynamic_only"}
+            cur = Path(cur)
+
+            dyn_report: list[dict[str, Any]] = []
+            for i, dyn in enumerate(body.dynamic or []):
+                traj = dyn.get("trajectory") or []
+                if not traj:
+                    continue
+                fps = float(dyn.get("fps") or 25.0) or 25.0
+                dw_w = int(dyn.get("width") or 0)
+                dw_h = int(dyn.get("height") or 0)
+                if not dw_w or not dw_h:
+                    from media_ops import probe_video_wh
+
+                    dw_w, dw_h = probe_video_wh(cur)
+                from dynamic_watermark import strip_moving_watermark
+
+                nxt = job_dehardsub_dir(work_dir) / f"_dyn_{i}.mp4"
+                strip_moving_watermark(
+                    cur, nxt, traj, fps=fps, width=dw_w, height=dw_h
+                )
+                cur = nxt
+                dyn_report.append(
+                    {"motion_px": dyn.get("motion_px"), "frames": len(traj)}
+                )
+
+            # Self-check → repair loop: re-scan the output and inpaint ONLY the
+            # frames the gate flags as residual (clean still holds the source's
+            # text-edge energy). Other frames pass through untouched, so a frame
+            # the main pass already fixed can never be degraded.
+            if body.repair:
+                dlg_box = next(
+                    (b for b in boxes if b.get("role") == "dialogue"), None
+                )
+                if dlg_box and src_path.is_file():
+                    from residual_repair import scan_and_repair
+
+                    cur, repaired = scan_and_repair(src_path, cur, dlg_box)
+                    if repaired:
+                        dyn_report.append({"residual_repaired": len(repaired)})
+                        print(
+                            f"[dehardsub] residual repair: {len(repaired)} frame(s)",
+                            flush=True,
+                        )
+
+            rel = cur.resolve().relative_to(work_dir.resolve()).as_posix()
+            from urllib.parse import quote as _quote
+
+            url = f"/api/try/dehardsub/asset?work_dir={_quote(body.work_dir)}&rel={_quote(rel)}"
+            report = {
+                k: rep.get(k)
+                for k in ("action", "box_roles", "box_source", "pass_stats")
+            }
+            if dyn_report:
+                report["dynamic"] = dyn_report
+            with _DEHARDSUB_LOCK:
+                _DEHARDSUB_TASKS[task_id].update(
+                    {
+                        "status": "done",
+                        "result_rel": rel,
+                        "result_url": url,
+                        "report": report,
+                    }
+                )
+        except Exception as e:  # noqa: BLE001
+            with _DEHARDSUB_LOCK:
+                _DEHARDSUB_TASKS[task_id].update(
+                    {"status": "error", "error": str(e)[:2000]}
+                )
+
+    background.add_task(_run)
+    return {"ok": True, "task_id": task_id}
+
+
+@app.get("/api/try/dehardsub/status/{task_id}")
+def dehardsub_status(task_id: str) -> dict:
+    with _DEHARDSUB_LOCK:
+        task = _DEHARDSUB_TASKS.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="task not found")
+        return dict(task)
+
+
+@app.get("/api/try/dehardsub/asset")
+def dehardsub_asset(work_dir: str, rel: str):
+    from fastapi.responses import FileResponse
+
+    base = _dehardsub_resolve_work_dir(work_dir)
+    target = (base / rel).resolve()
+    if base not in target.parents:
+        raise HTTPException(status_code=400, detail="invalid rel")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="file not found")
+    return FileResponse(target, media_type="video/mp4", filename=target.name)

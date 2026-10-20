@@ -47,15 +47,38 @@ def _ffmpeg_bin(explicit: str | None = None) -> str:
 
 
 def build_mask(roi: np.ndarray) -> np.ndarray | None:
+    """Text-ink mask, background-agnostic.
+
+    Two complementary detectors (OR'd) so it generalises beyond vivid/saturated
+    subtitles. The old vivid-only gate did ``return None`` when the vivid-bright
+    fraction was <20%, which silently skipped white / non-vivid subtitles and
+    produced a *false pass* (source_text_frames=0). Now:
+      A) vivid flat-colour background distance (original path, kept for parity);
+      B) whole-ROI median background distance — detects white or coloured glyphs
+         on any reasonably flat background.
+    """
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     s = hsv[..., 1].astype(np.int16)
     v = hsv[..., 2].astype(np.int16)
     bgm = (s > 60) & (v > 200)
-    if float(bgm.mean()) < 0.20:
-        return None  # no dominant flat color → not our ROI, skip
-    bg = np.median(roi[bgm].reshape(-1, 3), axis=0).astype(np.float32)
-    d = np.linalg.norm(roi.astype(np.float32) - bg.reshape(1, 1, 3), axis=2)
-    return d > 40
+    roi_f = roi.astype(np.float32)
+
+    mask: np.ndarray | None = None
+    if float(bgm.mean()) >= 0.20:
+        bg = np.median(roi[bgm].reshape(-1, 3), axis=0).astype(np.float32)
+        d = np.linalg.norm(roi_f - bg.reshape(1, 1, 3), axis=2)
+        mask = d > 40
+    bg2 = np.median(roi.reshape(-1, 3), axis=0).astype(np.float32)
+    d2 = np.linalg.norm(roi_f - bg2.reshape(1, 1, 3), axis=2)
+    m2 = d2 > 40
+    return m2 if mask is None else (mask | m2)
+
+
+def _edge_energy(roi: np.ndarray) -> float:
+    """High-frequency stroke energy (text = sharp edges). Background-normalised
+    when compared as a clean/src ratio, so inpaint texture doesn't inflate it."""
+    g = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    return float(cv2.Laplacian(g, cv2.CV_64F).var())
 
 
 def _stream(ff: str, path: str, cx: int, cy: int, cw: int, ch: int) -> subprocess.Popen:
@@ -88,6 +111,7 @@ def verify(
     pad: int = 25,
     residual_th: float = 0.03,
     notouch_th: float = 15.0,
+    residual_edge_frac: float = 0.4,
 ) -> dict:
     x, y, w, h = box["x"], box["y"], box["w"], box["h"]
     cx, cy, cw, ch = x, y - pad, w, h + 2 * pad
@@ -101,6 +125,8 @@ def verify(
     bad: list[int] = []
     notouch_worst = 0.0
     notouch_n = 0
+    worst_ratio = 0.0
+    edge_removal: list[float] = []
     try:
         while True:
             rs = ps.stdout.read(fs)
@@ -113,11 +139,18 @@ def verify(
             ms = build_mask(sroi)
             if ms is None:
                 continue
-            frac_s = float(ms.mean())
-            if frac_s > 0.005:
+            if float(ms.mean()) > 0.005:
                 text_frames.append(n)
-                mc = build_mask(croi)
-                if mc is not None and float(mc.mean()) > residual_th:
+                # Residual = clean still carries a large share of the source's
+                # text-edge energy. The clean/src edge ratio is background-
+                # normalised, so inpaint texture (which inflates an absolute mask
+                # fraction) does not cause false residuals.
+                e_s = _edge_energy(sroi)
+                e_c = _edge_energy(croi)
+                ratio = e_c / max(e_s, 1e-6)
+                worst_ratio = max(worst_ratio, ratio)
+                edge_removal.append(1.0 - ratio)
+                if ratio > residual_edge_frac:
                     bad.append(n)
             else:
                 d = float(np.abs(sroi.astype(int) - croi.astype(int)).mean())
@@ -136,6 +169,9 @@ def verify(
         "no_text_frame_count": notouch_n,
         "no_text_max_absdiff": round(notouch_worst, 3),
         "notouch_threshold": notouch_th,
+        "residual_edge_frac_threshold": residual_edge_frac,
+        "worst_edge_ratio": round(worst_ratio, 3),
+        "mean_edge_removal": round(float(np.mean(edge_removal)), 3) if edge_removal else None,
         "passed": len(bad) == 0 and notouch_worst <= notouch_th,
     }
     return report
@@ -149,6 +185,12 @@ def main() -> int:
     ap.add_argument("--pad", type=int, default=25)
     ap.add_argument("--residual-th", type=float, default=0.03)
     ap.add_argument("--notouch-th", type=float, default=15.0)
+    ap.add_argument(
+        "--residual-edge-frac",
+        type=float,
+        default=0.4,
+        help="residual if clean/src text-edge-energy ratio exceeds this",
+    )
     ap.add_argument("--ffmpeg")
     ap.add_argument("--out", help="write JSON report to this path")
     args = ap.parse_args()
@@ -160,6 +202,7 @@ def main() -> int:
         pad=args.pad,
         residual_th=args.residual_th,
         notouch_th=args.notouch_th,
+        residual_edge_frac=args.residual_edge_frac,
     )
     print(json.dumps(rep, ensure_ascii=False, indent=2))
     if args.out:

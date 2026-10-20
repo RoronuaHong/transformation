@@ -4810,3 +4810,160 @@ html[data-theme="light"] .hub-select { color-scheme: light; }
   }
   .hub-chat-hint { display: none; }
 }
+
+/* ---- Dehardsub human-confirm modal ---- */
+.dh-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.25rem;
+  background: rgba(2, 6, 23, 0.72);
+  backdrop-filter: blur(2px);
+}
+.dh-modal {
+  width: min(52rem, 100%);
+  max-height: 92vh;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  padding: 1.1rem 1.2rem 1rem;
+  border: 1px solid var(--line, #1e293b);
+  border-radius: 14px;
+  background: var(--surface, #0b1220);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+}
+.dh-modal-head h3 { margin: 0 0 0.3rem; font-size: 1.05rem; }
+.dh-modal-head p { margin: 0; font-size: 0.82rem; opacity: 0.78; line-height: 1.5; }
+.dh-modal-body { display: flex; flex-direction: column; gap: 0.7rem; }
+.dh-img-wrap {
+  position: relative;
+  width: 100%;
+  max-height: 56vh;
+  overflow: hidden;
+  border-radius: 10px;
+  background: #000;
+  touch-action: none;
+  user-select: none;
+}
+.dh-img-wrap img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.dh-box {
+  position: absolute;
+  border: 2px solid #22d3ee;
+  border-radius: 3px;
+  cursor: move;
+  box-sizing: border-box;
+}
+.dh-box.sel { box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.65) inset; }
+.dh-box-tag {
+  position: absolute;
+  top: -1.15rem;
+  left: -2px;
+  padding: 0 0.3rem;
+  font-size: 0.62rem;
+  line-height: 1.05rem;
+  color: #04121b;
+  border-radius: 3px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.dh-box-handle {
+  position: absolute;
+  right: -6px;
+  bottom: -6px;
+  width: 12px;
+  height: 12px;
+  background: #fff;
+  border: 2px solid #22d3ee;
+  border-radius: 50%;
+  cursor: nwse-resize;
+}
+.dh-box-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  max-height: 30vh;
+  overflow: auto;
+}
+.dh-box-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0.45rem;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  font-size: 0.78rem;
+}
+.dh-box-list li.sel { border-color: rgba(255, 255, 255, 0.25); background: rgba(255, 255, 255, 0.05); }
+.dh-role {
+  padding: 0.12rem 0.5rem;
+  font-size: 0.72rem;
+  color: inherit;
+  background: transparent;
+  border: 1px solid #22d3ee;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.dh-coords { opacity: 0.6; font-variant-numeric: tabular-nums; }
+.dh-del {
+  margin-left: auto;
+  width: 1.5rem;
+  height: 1.5rem;
+  font-size: 1rem;
+  line-height: 1;
+  color: #fca5a5;
+  background: transparent;
+  border: 1px solid rgba(252, 165, 165, 0.4);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.dh-del:hover { background: rgba(252, 165, 165, 0.15); }
+.dh-error { margin: 0; font-size: 0.8rem; color: #fca5a5; }
+.dh-modal-foot { display: flex; align-items: center; gap: 0.5rem; }
+.dh-spacer { flex: 1; }
+.dh-modal-foot button {
+  padding: 0.45rem 0.9rem;
+  font-size: 0.85rem;
+  border-radius: 9px;
+  cursor: pointer;
+  border: 1px solid var(--line, #1e293b);
+  background: transparent;
+  color: inherit;
+}
+.dh-modal-foot button:disabled { opacity: 0.5; cursor: not-allowed; }
+.dh-ok {
+  color: #04121b !important;
+  background: linear-gradient(180deg, #38bdf8, #0ea5e9) !important;
+  border-color: transparent !important;
+  font-weight: 600;
+}
+.dh-add:hover, .dh-cancel:hover { background: rgba(255, 255, 255, 0.06); }
+.dh-dynamic {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px dashed rgba(232, 121, 249, 0.45);
+  border-radius: 10px;
+  background: rgba(232, 121, 249, 0.06);
+}
+.dh-dynamic-title { margin: 0; font-size: 0.78rem; line-height: 1.5; opacity: 0.9; }
+.dh-dynamic-title b { color: #e879f9; }
+.dh-dyn-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.35rem 0.4rem;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.78rem;
+}
+.dh-dyn-item.sel { background: rgba(232, 121, 249, 0.14); }
+.dh-dyn-item input { margin-top: 0.15rem; accent-color: #e879f9; }
+.dh-dyn-info small { opacity: 0.6; }
