@@ -1070,6 +1070,21 @@ def build_dialogue_clean_plate(
         all_text = np.all(tm, axis=0)
         plate = np.where(all_text[..., None], med_plain, med_masked)
         plate = np.nan_to_num(plate, nan=0.0)
+        # Direct residual check on the built plate: the text region must read as
+        # background, i.e. match the non-text region. A large gap means the
+        # temporal median KEPT the caption (a persistent / mostly-present line) --
+        # compositing such a plate would re-stamp the very text STTN just removed
+        # (leaks e.g. a long line's tail). Reject -> caller falls back to STTN.
+        # Polarity-agnostic (light or dark text on a flat band): a clean plate
+        # makes text-region == non-text region.
+        _tp = tm.any(axis=0)
+        if _tp.any() and bool((~_tp).any()):
+            _pg = cv2.cvtColor(
+                np.clip(plate, 0, 255).astype(np.uint8), cv2.COLOR_BGR2GRAY
+            ).astype(np.float32)
+            _gap = abs(float(_pg[_tp].mean()) - float(_pg[~_tp].mean()))
+            if _gap > 25.0:
+                return None
         # 背景稳定性：相邻采样帧在【非文字】像素上的平均 L1（越低越静态）。
         diffs: list[float] = []
         valid = ~tm
@@ -1228,9 +1243,24 @@ def encode_composite_plate(
         out = frame.astype(np.float32)
         for b, plate, a in alphas:
             bx, by, bw, bh = b["x"], b["y"], b["w"], b["h"]
+            # Weight the plate down wherever IT carries high-frequency content
+            # (text residue the temporal median failed to drop, e.g. a persistent
+            # caption on a semi-transparent bar). There we keep the incoming frame
+            # (the clean STTN result) instead of stamping the plate's text back.
+            # A genuinely clean plate is smooth -> composited at full weight, so
+            # the plate still fills the gaps STTN left.
+            _pu = np.clip(plate, 0, 255).astype(np.uint8)
+            _pg = cv2.cvtColor(_pu, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            _gx = cv2.Sobel(_pg, cv2.CV_32F, 1, 0)
+            _gy = cv2.Sobel(_pg, cv2.CV_32F, 0, 1)
+            _grad = np.sqrt(_gx * _gx + _gy * _gy)
+            _smooth = np.clip(1.0 - (_grad - 20.0) / 30.0, 0.0, 1.0)
+            _smooth = cv2.GaussianBlur(_smooth, (0, 0), 2.0)
+            aeff = a[..., 0].copy()
+            aeff[by : by + bh, bx : bx + bw] *= _smooth
             comp = out.copy()
             comp[by : by + bh, bx : bx + bw] = plate
-            out = out * (1.0 - a) + comp * a
+            out = out * (1.0 - aeff[..., None]) + comp * aeff[..., None]
         return np.clip(out, 0, 255).astype(np.uint8)
 
     stats = _encode_rawvideo_pipe(
@@ -1957,6 +1987,23 @@ def run_multipass_cleanup(
                     rb = (route_info or {}).get("box")
                     if isinstance(rb, dict):
                         box_i = {k: int(rb[k]) for k in ("x", "y", "w", "h")}
+                    # classify keeps the LOCATE width by design (median-X would
+                    # clip glyphs on other frames) -- but the locate itself sizes
+                    # the box from sampled lines and can under-cover a wider line,
+                    # leaking its tail (e.g. a long line's bottom-right "和白糖").
+                    # classify also tightens Y onto the plate, which can clip glyph
+                    # tops/bottoms. Pad BOTH axes; the per-frame glyph detector only
+                    # removes real glyphs inside the box, so extra room is safe.
+                    _px = max(6, int(round(box_i["w"] * 0.15)))
+                    _py = max(12, int(round(box_i["h"] * 0.30)))
+                    _nx = max(0, int(box_i["x"]) - _px)
+                    _ny = max(0, int(box_i["y"]) - _py)
+                    box_i = {
+                        "x": _nx,
+                        "y": _ny,
+                        "w": min(int(width) - _nx, int(box_i["w"]) + 2 * _px),
+                        "h": min(int(height) - _ny, int(box_i["h"]) + 2 * _py),
+                    }
                 # title / watermark 走整框 static fill（box_inpaint / edge_patch）：
                 # 两者都是【静态】覆盖层（每一帧都在），STTN 时序修复没有干净参考帧
                 # 会幻视涂抹（实测 title 卡片头像被涂白、up_watermark 框过大连带头像

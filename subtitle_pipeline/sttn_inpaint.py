@@ -497,6 +497,7 @@ def classify_dialogue_route(
     flat_hits = 0
     glyph_flat_hits = 0
     bg_flat_hits = 0
+    bright_fracs: list[float] = []
     checked = 0
     found_boxes: list[dict[str, int]] = []
     band_medians: list[float] = []
@@ -520,7 +521,12 @@ def classify_dialogue_route(
                 roi_gray = cv2.cvtColor(
                     fr[ry0:ry1, rx0:rx1], cv2.COLOR_BGR2GRAY
                 )
-                band_medians.append(float(np.median(roi_gray)))
+                _fm = float(np.median(roi_gray))
+                band_medians.append(_fm)
+                # Fraction of the band brighter than a dark plate (footage bleeding
+                # through a translucent bar, vs. thin white strokes). Aggregated
+                # below with band_med to flag semi-transparent bars.
+                bright_fracs.append(float((roi_gray > 130).mean()))
                 # 平色背景检测（spatial_fill 路由）：字幕压在纯平色底上时，
                 # STTN 时序取材会产生鬼影（同句字幕持续 ~3s，邻帧全有字），
                 # 逐帧空间填充才是对的。判据：高饱和亮色占 ROI>25%（有主导
@@ -585,7 +591,15 @@ def classify_dialogue_route(
             }
 
     band_med = float(np.median(band_medians)) if band_medians else 255.0
-    if black_hits >= need and band_med <= 120:
+    bright_frac = float(np.mean(bright_fracs)) if bright_fracs else 0.0
+    # A semi-transparent bar = dark translucent bar (median <=120) with footage
+    # bleeding through (a large bright share, well beyond thin white strokes). It
+    # is neither an opaque black plate (glyph_black) nor a pure flat bar
+    # (flat/TBE): its strokes sit over moving footage -> route to tiles (STTN).
+    semi_transparent = band_med <= 120 and bright_frac > 0.25
+    if semi_transparent:
+        route = "tiles"
+    elif black_hits >= need and band_med <= 120:
         route = "glyph_black"
     elif bg_flat_hits >= need:
         # 亮色平底上的烧录字幕：逐帧空间填充（STTN 时序取材会鬼影）。
@@ -678,7 +692,14 @@ def _glyph_black_kill_masks_torch(
     dark_f = F.avg_pool2d(
         dark.unsqueeze(1), kernel_size=(41, 17), stride=1, padding=(20, 8)
     ).squeeze(1)
-    bright = roi > 110.0
+    # Local-contrast strokes: pixels brighter than their LOCAL plate background,
+    # as a SUPERSET of the global bright threshold (never loses current
+    # detection). Catches dimmer strokes on a non-uniform opaque plate where a
+    # single global level would miss them.
+    local_bg = F.avg_pool2d(
+        roi.unsqueeze(1), kernel_size=(21, 21), stride=1, padding=(10, 10)
+    ).squeeze(1)
+    bright = (roi > 110.0) | (roi > (local_bg + 45.0))
     aa = (roi > 45.0) & (roi <= 110.0)
     ink = bright & (dark_f > 0.40)
     fringe = aa & (dark_f > 0.55)
@@ -784,7 +805,11 @@ def encode_glyph_black_fill(
                 roi = arr[i, y0:y1, x0:x1]
                 gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY).astype(np.float32)
                 dark_f = cv2.blur((gray < 55.0).astype(np.float32), (41, 17))
-                bright = gray > 140.0
+                # Local-contrast strokes (superset of the global bright level):
+                # brighter than the local plate background catches dimmer strokes
+                # on a non-uniform opaque plate; never loses the global detection.
+                local_bg = cv2.blur(gray, (21, 21))
+                bright = (gray > 140.0) | (gray > (local_bg + 45.0))
                 aa = (gray > 55.0) & (gray <= 140.0)
                 kill = (bright & (dark_f > 0.45)) | (aa & (dark_f > 0.60))
                 if bool(kill.any()):
