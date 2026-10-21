@@ -1056,6 +1056,13 @@ def build_dialogue_clean_plate(
             return None
         st = np.stack(stack)
         tm = np.stack(tmasks)
+        # Polarity guard: the "white text" mask (bright + low-sat) only catches
+        # LIGHT strokes. If it blankets the band it is really masking the
+        # BACKGROUND (e.g. dark text on a white plate) -> the median plate would
+        # keep the dark text and overwrite STTN's clean result. Reject so the
+        # caller falls back to STTN, which detects glyphs of either polarity.
+        if float(tm.mean()) > 0.5:
+            return None
         med_plain = np.median(st, axis=0)
         vals = np.where(tm[..., None], np.nan, st)
         with np.errstate(all="ignore"):

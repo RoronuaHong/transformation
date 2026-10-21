@@ -1819,6 +1819,107 @@ def _complete_clip(model: Any, frames_rgb: list[Any], hole_u8: Any, device: Any)
     return out
 
 
+def _sttn_temporal_propagate(
+    tile_frames: list[Any],
+    tile_holes: list[Any],
+    state: dict,
+) -> list[Any]:
+    """Temporal-consistency pass that kills STTN's per-frame flicker WITHOUT
+    blurring and WITHOUT the ghost of naive flow-propagation.
+
+    STTN re-hallucinates the hole region every short clip, so a *static* subtitle
+    line shimmers frame-to-frame (the "flicker" defect). Cures and why they fail:
+
+      * temporal low-pass / EMA  -> blurs the band (the "blurry" regression);
+      * propagate a full repair  -> sharp, but the warped anchor stops matching a
+        moving background, leaving a faint rectangular *ghost*.
+
+    Hybrid that avoids both: split into LOW-frequency (LF: colour/structure) and
+    HIGH-frequency (HF: texture/detail). For a static subtitle line we propagate
+    only the **LF from a single anchor** forward along optical flow (stable -> no
+    colour flicker; a smooth LF forgives small flow error -> no ghost), while the
+    **HF is taken from the current STTN frame** (matches the live scene -> stays
+    sharp). Nothing is temporally averaged, so no blur.
+
+      * first frame of a static line -> STTN repair seeds the anchor;
+      * following unchanged-mask frames -> warp(anchor LF) + current HF;
+      * when the subtitle text changes (mask differs) -> fall back to STTN and
+        re-anchor.
+
+    A periodic re-anchor (``REFRESH`` frames) bounds optical-flow drift.
+
+    Toggle via ``VITUAL_STTN_TSMOOTH``: ``off``/``0`` disables; ``on`` (default)
+    enables.
+    """
+    import cv2
+    import numpy as np
+
+    flag = (os.environ.get("VITUAL_STTN_TSMOOTH") or "on").strip().lower()
+    if flag in ("0", "off", "false") or not tile_frames:
+        return tile_frames
+
+    prev_repair = state.get("prev_repair")  # previous full tile output
+    prev_gray = state.get("prev_gray")
+    prev_mask = state.get("prev_mask")
+    static_count = state.get("static_count", 0)
+    # Change-detection via hole-mask IoU. 0.92 was too high: the bar is large so
+    # a text swap keeps IoU ~0.96-0.99 (undetected) while glyph AA/compression
+    # noise parks ~27% of frames in [0.85,0.97] and toggles the decision every
+    # frame (flicker cluster at swaps). 0.80 stops the toggling; genuine cuts
+    # still drop to ~0.3-0.6 and re-anchor. (A content-diff OR-term was tried and
+    # rejected: per-tile optical-flow error inflates the diff on static frames,
+    # causing spurious re-anchors.) Tuned end-to-end on a real clip.
+    IOU_THR = 0.80
+    REFRESH = 40     # re-anchor every N static frames (flow drift bound)
+    ksz, sig = 5, 2.0
+    out: list[Any] = []
+    for i, fr in enumerate(tile_frames):
+        cur = np.asarray(fr, dtype=np.float32)
+        cur_gray = cv2.cvtColor(np.asarray(fr, dtype=np.uint8), cv2.COLOR_RGB2GRAY)
+        hole = (np.asarray(tile_holes[i]) > 0)
+        if prev_repair is None or not hole.any():
+            nxt = cur.copy()
+        else:
+            if prev_mask is not None and prev_mask.any():
+                inter = float(np.logical_and(hole, prev_mask).sum())
+                union = float(np.logical_or(hole, prev_mask).sum())
+                iou = inter / union if union > 0 else 0.0
+            else:
+                iou = 0.0
+            flow = cv2.calcOpticalFlowFarneback(
+                prev_gray, cur_gray, None, 0.5, 3, 15, 3, 5, 1.2, 0
+            )
+            h, ww = flow.shape[:2]
+            gx, gy = np.meshgrid(
+                np.arange(ww, dtype=np.float32), np.arange(h, dtype=np.float32)
+            )
+            mx = (gx + flow[..., 0]).astype(np.float32)
+            my = (gy + flow[..., 1]).astype(np.float32)
+            if iou > IOU_THR and static_count < REFRESH:
+                # static line: consistent LF from the flow-warped anchor +
+                # sharp HF from the current STTN frame. No averaging -> no blur;
+                # current HF -> no ghost.
+                anchor_lf = cv2.GaussianBlur(prev_repair, (ksz, ksz), sig)
+                warp_lf = cv2.remap(anchor_lf, mx, my, cv2.INTER_LINEAR)
+                cur_hf = cur - cv2.GaussianBlur(cur, (ksz, ksz), sig)
+                nxt = cur.copy()
+                nxt[hole] = (warp_lf + cur_hf)[hole]
+                static_count += 1
+            else:
+                # subtitle changed (or refresh) -> STTN's own repair is the anchor
+                nxt = cur.copy()
+                static_count = 0
+        out.append(np.clip(nxt, 0, 255).astype(np.uint8))
+        prev_repair = nxt.astype(np.float32)
+        prev_gray = cur_gray
+        prev_mask = hole
+    state["prev_repair"] = prev_repair
+    state["prev_gray"] = prev_gray
+    state["prev_mask"] = prev_mask
+    state["static_count"] = static_count
+    return out
+
+
 def _tile_x_ramps(tiles: list[dict[str, int]], overlap: int = 64) -> list[Any]:
     import numpy as np
 
@@ -2370,6 +2471,9 @@ def encode_sttn(
         cap.release()
         raise RuntimeError("STTN produced no tiles for regions")
 
+    # Per (region, tile) carry state for the cross-chunk temporal-consistency pass.
+    cons_states = [[{} for _ in r["tiles"]] for r in regions]
+
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
         torch.cuda.empty_cache()
@@ -2431,7 +2535,7 @@ def encode_sttn(
         n = len(bgr_frames)
         write_n = n if last else min(n, step)
         regions_data: list[Any] = []
-        for r in regions:
+        for ri, r in enumerate(regions):
             tiles = r["tiles"]
             box = r["box"]
             kind = str(r.get("kind") or "hardsub")
@@ -2442,7 +2546,7 @@ def encode_sttn(
                 glyph_per_frame = [glyph_mask_hybrid(fr, box) for fr in bgr_frames]
             tile_preds: list[Any] = []
             tile_holes: list[list[Any]] = []
-            for tile in tiles:
+            for ti, tile in enumerate(tiles):
                 rgbs: list[Any] = []
                 holes: list[Any] = []
                 any_hole = False
@@ -2462,7 +2566,11 @@ def encode_sttn(
                     holes.append(hole)
                 tile_holes.append(holes)
                 if any_hole:
-                    tile_preds.append(_complete_clip(model, rgbs, holes, device))
+                    preds = _complete_clip(model, rgbs, holes, device)
+                    # 时序一致性：静态字幕行只传播一帧锐利锚点（沿光流粘贴），
+                    # 画面零抖动且不引入任何时间低通 → 字幕带保持锐利不糊。
+                    preds = _sttn_temporal_propagate(preds, holes, cons_states[ri][ti])
+                    tile_preds.append(preds)
                 else:
                     tile_preds.append(None)
             regions_data.append(
