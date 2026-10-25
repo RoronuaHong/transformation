@@ -36,7 +36,7 @@ CAPTION_SCAN_HIT = 0.28
 DENSE_COVERAGE_FULL = float(os.environ.get("VITUAL_CAPTION_FULL_COVERAGE", "0.75") or 0.75)
 HARDSUB_VLM_MODEL = os.environ.get("VITUAL_DEHARDSUB_VLM", "gemma4:e2b")
 DEHARDSUB_MODES = ("auto", "vlm", "band", "delogo", "fill", "crop")
-DEHARDSUB_ENGINES = ("sttn", "opencv", "lama", "propainter", "diffusion")
+DEHARDSUB_ENGINES = ("sttn", "opencv", "lama", "propainter", "diffusion", "ocr_telea")
 POSTPROC_MODES = ("fast", "balanced", "quality")
 DEFAULT_DEHARDSUB_ENGINE = (
     str(os.environ.get("VITUAL_DEHARDSUB_ENGINE", "sttn") or "sttn").strip().lower()

@@ -1784,6 +1784,38 @@ def run_multipass_cleanup(
             **locate_meta,
         }
 
+    if engine_s == "ocr_telea" and dehardsub:
+        # OCR 细字形洞 + TELEA 逐帧去字幕（B站白字硬字幕首选路线，避免 STTN tiles 平灰块）。
+        # 自带逐帧 OCR，无需 box；watermark=None 走角部常驻 logo 自动探测。
+        try:
+            from dehardsub_ocr_telea import run as _ocr_telea_run, DEFAULT_BAND as _DEF_BAND
+        except ImportError:
+            _ocr_telea_run = None  # type: ignore[assignment]
+        if _ocr_telea_run is not None:
+            try:
+                ocr_stats = _ocr_telea_run(
+                    src, dest,
+                    band=box if box else _DEF_BAND,
+                    watermark=None,
+                )
+                return {
+                    "action": "ocr_telea_cleanup",
+                    "engine": "ocr_telea",
+                    "passes": [{"pass": 1, "encode": ocr_stats}],
+                    "pass_count": 1,
+                    "regions": regions,
+                    "mosaic_regions": mosaic_regions,
+                    "demosaic": demosaic,
+                    "dehardsub": dehardsub,
+                    "src_size": f"{width}x{height}",
+                    **locate_meta,
+                    "encode": ocr_stats,
+                }
+            except Exception as exc:  # noqa: BLE001
+                print(f"[cleanup] ocr_telea failed ({exc}); falling back to sttn")
+        # 降级：继续走下方 STTN 分支
+        engine_s = "sttn"
+
     if engine_s == "propainter" and dehardsub and box is not None:
         try:
             from propainter_inpaint import PropainterUnavailable, inpaint_video
