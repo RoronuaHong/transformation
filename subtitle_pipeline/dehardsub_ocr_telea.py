@@ -115,17 +115,49 @@ def band_white_mask(gray, band):
     return m, (x0, y0)
 
 
-def build_watermark_mask(frames, ocr, wm_box, pre_scan=DEFAULT_PRE_SCAN):
-    """预扫前 pre_scan 帧，取水印字形并集做成固定遮罩（水印是静态 logo，逐帧 OCR 会漏检）。"""
-    if wm_box is None:
-        wm_box = _auto_detect_region(frames, ocr, pre_scan, prefer="corner")
-    if wm_box is None:
-        return np.zeros((frames[0].shape[0], frames[0].shape[1]), np.uint8)
-    H, W = frames[0].shape[:2]
+# ----------------------------- 流式 IO（长片不爆内存）-----------------------------
+def _iter_frames(path, max_frames=None):
+    """惰性逐帧读取。绝不把整段视频读进内存——长片安全（原实现 3253 帧≈9GB）。"""
+    cap = cv2.VideoCapture(str(path))
+    n = 0
+    try:
+        while True:
+            ok, f = cap.read()
+            if not ok:
+                break
+            yield f
+            n += 1
+            if max_frames and n >= max_frames:
+                break
+    finally:
+        cap.release()
+
+
+def _probe(path):
+    """返回 (fps, W, H, frame_count)。"""
+    cap = cv2.VideoCapture(str(path))
+    if not cap.isOpened():
+        raise RuntimeError(f"cannot open {path}")
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30
+    W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    cap.release()
+    return fps, W, H, n
+
+
+def build_watermark_mask(frames_iter, ocr, wm_box, pre_scan=DEFAULT_PRE_SCAN, *, size):
+    """预扫前 pre_scan 帧，取水印字形并集做成固定遮罩（水印是静态 logo，逐帧 OCR 会漏检）。
+
+    ``frames_iter`` 为帧迭代器（流式）；``size``=(H, W) 必须给出。
+    注意：不接受 wm_box=None 自动探测（会消耗迭代器），自动探测请在调用前用独立迭代器完成。
+    """
+    import itertools
+    H, W = size
     mask = np.zeros((H, W), np.uint8)
-    for k in range(min(pre_scan, len(frames))):
-        gray = cv2.cvtColor(frames[k], cv2.COLOR_BGR2GRAY).astype(np.float32)
-        res, _ = ocr(frames[k], use_det=True, use_cls=False, use_rec=True)
+    for f in itertools.islice(frames_iter, pre_scan):
+        gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        res, _ = ocr(f, use_det=True, use_cls=False, use_rec=True)
         if not res:
             continue
         for item in res:
@@ -142,13 +174,14 @@ def build_watermark_mask(frames, ocr, wm_box, pre_scan=DEFAULT_PRE_SCAN):
     return cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=1)
 
 
-def _auto_detect_region(frames, ocr, pre_scan, prefer="corner"):
-    """兜底：跨预扫帧找最常出现、位置稳定的文本块（水印=角部常驻；字幕带=下部常现）。返回 box 或 None。"""
-    H, W = frames[0].shape[:2]
+def _auto_detect_region(frames_iter, ocr, pre_scan, prefer="corner", *, size):
+    """兜底：跨预扫帧找最常出现、位置稳定的文本块（水印=角部常驻）。返回 box 或 None。"""
+    import itertools
     from collections import defaultdict
+    H, W = size
     buckets = defaultdict(int)
-    for k in range(min(pre_scan, len(frames))):
-        res, _ = ocr(frames[k], use_det=True, use_cls=False, use_rec=True)
+    for f in itertools.islice(frames_iter, pre_scan):
+        res, _ = ocr(f, use_det=True, use_cls=False, use_rec=True)
         if not res:
             continue
         for item in res:
@@ -156,10 +189,8 @@ def _auto_detect_region(frames, ocr, pre_scan, prefer="corner"):
             x0, y0 = pts[:, 0].min(), pts[:, 1].min()
             x1, y1 = pts[:, 0].max(), pts[:, 1].max()
             cx, cy = int((x0 + x1) / 2) // 24, int((y0 + y1) / 2) // 24
-            if prefer == "corner" and not (cx > W // 24 * 0.6 or cy > H // 24 * 0.6):
-                # 偏好右下/左下角
-                if cx < W // 24 * 0.6 and cy < H // 24 * 0.6:
-                    continue
+            if prefer == "corner" and cx < W // 24 * 0.6 and cy < H // 24 * 0.6:
+                continue
             buckets[(cx, cy)] += 1
     if not buckets:
         return None
@@ -244,60 +275,35 @@ def feather_blend(frame, inpainted, mask, feather_px=5, feather_sigma=1.5):
 
 
 # ----------------------------- 主处理 -----------------------------
-def run(source, out, *,
-        band=DEFAULT_BAND, watermark=DEFAULT_WATERMARK,
-        caption_stems=DEFAULT_CAPTION_STEMS, score_thr=DEFAULT_SCORE_THR,
-        inpaint_radius=DEFAULT_INPAINT_RADIUS, pre_scan=DEFAULT_PRE_SCAN,
-        feather_px=5, feather_sigma=1.5, temporal_smoothing=True, min_support=2,
-        max_frames=None):
-    """对 source 跑 OCR 细字形洞 + TELEA 去字幕，写出 out（mp4, crf18, yuv420p）。"""
-    source, out = Path(source), Path(out)
-    cap = cv2.VideoCapture(str(source))
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30
-    frames = []
-    while True:
-        ok, f = cap.read()
-        if not ok:
-            break
-        frames.append(f)
-        if max_frames and len(frames) >= max_frames:
-            break
-    cap.release()
-    if not frames:
-        raise RuntimeError(f"no frames read from {source}")
-    H, W = frames[0].shape[:2]
-    ocr = _get_ocr()
-
-    wm_fixed = build_watermark_mask(frames, ocr, watermark, pre_scan)
-    if int(wm_fixed.max()) == 0:
-        print("[ocr_telea] warning: no watermark mask built (watermark=None and auto-detect found nothing)",
-              file=sys.stderr)
-
-    ff = _ffmpeg()
-
-    # Pass A：逐帧 OCR 收集目标框（与渲染解耦，便于做时序平滑）
-    boxes_per_frame = []
-    for k, f in enumerate(frames):
-        boxes_per_frame.append(collect_target_boxes(f, ocr, band, caption_stems, score_thr))
+def _collect_all(path, ocr, band, caption_stems, score_thr, max_frames=None, label="ocr"):
+    """流式：逐帧 OCR 收集目标框（只存框，不存帧）。"""
+    boxes = []
+    for k, f in enumerate(_iter_frames(path, max_frames)):
+        boxes.append(collect_target_boxes(f, ocr, band, caption_stems, score_thr))
         if (k + 1) % 200 == 0:
-            print(f"  [ocr_telea] ocr {k+1}/{len(frames)}", flush=True)
-    if temporal_smoothing:
-        boxes_per_frame = temporal_smooth(boxes_per_frame, min_support)
+            print(f"  [ocr_telea] {label} {k+1}", flush=True)
+    return boxes
 
-    # Pass B：建遮罩 → TELEA → 羽化融合
-    tmp = out.with_suffix(".avi")
-    vw = cv2.VideoWriter(str(tmp), cv2.VideoWriter_fourcc(*"MJPG"), fps, (W, H))
+
+def _render_pass(src_path, vw, boxes, wm_mask, band, inpaint_radius,
+                 feather_px, feather_sigma, max_frames=None, label="render",
+                 use_brightness=True):
+    """流式：逐帧建遮罩 → TELEA → 羽化融合，写入 vw。返回本遍遮罩的框数。
+
+    ``use_brightness``：亮度兜底只在第 1 遍（原片）开。迭代遍里画面已被填充过，
+    再按亮度抓会误抓带内非文字的亮像素并抹掉（实测会误删场景文字），必须关。
+    """
     removed = 0
-    for k, f in enumerate(frames):
+    for k, f in enumerate(_iter_frames(src_path, max_frames)):
         gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY).astype(np.float32)
-        mask = wm_fixed.copy()
+        mask = wm_mask.copy()
         # 亮度兜底：底部对白带白字
-        if band is not None:
+        if band is not None and use_brightness:
             bm, (bx, by) = band_white_mask(gray, band)
             if int(bm.max()) > 0:
                 mask[by:by + bm.shape[0], bx:bx + bm.shape[1]] = np.maximum(
                     mask[by:by + bm.shape[0], bx:bx + bm.shape[1]], bm)
-        for b in boxes_per_frame[k]:
+        for b in (boxes[k] if k < len(boxes) else []):
             r = thin_mask(gray, b)
             if r:
                 s, (mx, my) = r
@@ -311,13 +317,85 @@ def run(source, out, *,
             out_f = f
         vw.write(out_f)
         if (k + 1) % 200 == 0:
-            print(f"  [ocr_telea] render {k+1}/{len(frames)}", flush=True)
+            print(f"  [ocr_telea] {label} {k+1}", flush=True)
+    return removed
+
+
+def run(source, out, *,
+        band=DEFAULT_BAND, watermark=DEFAULT_WATERMARK,
+        caption_stems=DEFAULT_CAPTION_STEMS, score_thr=DEFAULT_SCORE_THR,
+        inpaint_radius=DEFAULT_INPAINT_RADIUS, pre_scan=DEFAULT_PRE_SCAN,
+        feather_px=5, feather_sigma=1.5, temporal_smoothing=True, min_support=2,
+        passes=1, max_frames=None):
+    """对 source 跑 OCR 细字形洞 + TELEA 去字幕，写出 out（mp4, crf18, yuv420p）。
+
+    - 全程流式：逐帧读取、不把整段视频读进内存（长片安全）。
+    - 多遍迭代 `passes`：第 2 遍起在上一遍产物上重新 OCR，只补仍残留的目标文字；
+      检测不到残留则提前停止（不白跑）。**实测默认关闭**：迭代遍会多遮大量框
+      （60 帧样本 57→116），遮罩+羽化外扩波及带外场景文字，误删 damaged 0→2。
+      故默认 passes=1；确有明显残留时才 `--passes 2` 并人工复核。
+    - watermark=None 时用独立迭代器做角部常驻 logo 自动探测兜底。
+    """
+    source, out = Path(source), Path(out)
+    fps, W, H, total = _probe(source)
+    if not W or not H:
+        raise RuntimeError(f"cannot probe frame size from {source}")
+    ocr = _get_ocr()
+
+    wm_box = watermark
+    if wm_box is None:
+        wm_box = _auto_detect_region(_iter_frames(source), ocr, pre_scan,
+                                     prefer="corner", size=(H, W))
+    if wm_box is None:
+        print("[ocr_telea] warning: watermark auto-detect found nothing; skip watermark",
+              file=sys.stderr)
+        wm_fixed = np.zeros((H, W), np.uint8)
+    else:
+        wm_fixed = build_watermark_mask(_iter_frames(source), ocr, wm_box, pre_scan,
+                                        size=(H, W))
+
+    ff = _ffmpeg()
+    tmps = []
+
+    # Pass 1：OCR 收集 → 时序平滑 → 渲染
+    boxes = _collect_all(source, ocr, band, caption_stems, score_thr, max_frames, label="ocr p1")
+    if temporal_smoothing:
+        boxes = temporal_smooth(boxes, min_support)
+    tmp1 = out.with_name(f"{out.stem}_p1.avi")
+    vw = cv2.VideoWriter(str(tmp1), cv2.VideoWriter_fourcc(*"MJPG"), fps, (W, H))
+    removed = _render_pass(source, vw, boxes, wm_fixed, band, inpaint_radius,
+                           feather_px, feather_sigma, max_frames, label="render p1")
     vw.release()
-    subprocess.run([ff, "-y", "-i", str(tmp), "-an", "-c:v", "libx264", "-crf", "18",
+    cur = tmp1
+    tmps.append(cur)
+
+    # Pass 2..N：多遍迭代补残留（水印已在第1遍去除，后续遍不再套水印遮罩）
+    for p in range(2, max(1, int(passes)) + 1):
+        # 迭代遍只补"确信的残留"：抬高置信阈值，避免把填充纹理误当文字再抹一遍
+        score_p = min(0.95, score_thr + 0.25)
+        boxes_p = _collect_all(cur, ocr, band, caption_stems, score_p, max_frames,
+                               label=f"ocr p{p}")
+        if temporal_smoothing:
+            boxes_p = temporal_smooth(boxes_p, min_support)
+        if sum(len(b) for b in boxes_p) == 0:
+            print(f"[ocr_telea] pass {p}: no residual text detected, stop", flush=True)
+            break
+        tmp_p = out.with_name(f"{out.stem}_p{p}.avi")
+        vw = cv2.VideoWriter(str(tmp_p), cv2.VideoWriter_fourcc(*"MJPG"), fps, (W, H))
+        removed += _render_pass(cur, vw, boxes_p, np.zeros((H, W), np.uint8), band,
+                                inpaint_radius, feather_px, feather_sigma,
+                                max_frames, label=f"render p{p}", use_brightness=False)
+        vw.release()
+        cur = tmp_p
+        tmps.append(cur)
+
+    subprocess.run([ff, "-y", "-i", str(cur), "-an", "-c:v", "libx264", "-crf", "18",
                    "-pix_fmt", "yuv420p", str(out)], check=True,
                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    tmp.unlink()
-    stats = {"engine": "ocr_telea", "frames": len(frames), "text_boxes_masked": removed,
+    for t in tmps:
+        Path(t).unlink(missing_ok=True)
+    stats = {"engine": "ocr_telea", "frames": len(boxes),
+             "text_boxes_masked": removed, "passes_used": len(tmps),
              "watermark_mask_pixels": int(wm_fixed.sum() // 255), "out": str(out)}
     print(f"[ocr_telea] done: {stats}", flush=True)
     return stats
@@ -386,29 +464,32 @@ def qc_dehardsub(source, out, *,
 
 # ----------------------------- 对比视频 -----------------------------
 def make_compare(source, out, compare, fps=30):
+    """左右对比视频（流式：逐帧读取拼接，不把两个视频都读进内存）。"""
     source, out, compare = Path(source), Path(out), Path(compare)
-    cap = cv2.VideoCapture(str(source)); s = []
-    while True:
-        ok, f = cap.read()
-        if not ok:
-            break
-        s.append(f)
-    cap.release()
-    cap = cv2.VideoCapture(str(out)); d = []
-    while True:
-        ok, f = cap.read()
-        if not ok:
-            break
-        d.append(f)
-    cap.release()
-    n = min(len(s), len(d))
-    gap = np.full((s[0].shape[0], 8, 3), 60, np.uint8)
     ff = _ffmpeg()
     tmp = compare.with_suffix(".avi")
-    vw = cv2.VideoWriter(str(tmp), cv2.VideoWriter_fourcc(*"MJPG"), fps, (s[0].shape[1] * 2 + 8, s[0].shape[0]))
-    for k in range(n):
-        vw.write(np.hstack([s[k], gap, d[k]]))
-    vw.release()
+    cap_s = cv2.VideoCapture(str(source))
+    cap_o = cv2.VideoCapture(str(out))
+    vw = None
+    n = 0
+    try:
+        while True:
+            ok1, fs = cap_s.read()
+            ok2, fo = cap_o.read()
+            if not ok1 or not ok2:
+                break
+            if vw is None:
+                gap = np.full((fs.shape[0], 8, 3), 60, np.uint8)
+                vw = cv2.VideoWriter(str(tmp), cv2.VideoWriter_fourcc(*"MJPG"), fps,
+                                     (fs.shape[1] * 2 + 8, fs.shape[0]))
+            vw.write(np.hstack([fs, gap, fo]))
+            n += 1
+            if n % 200 == 0:
+                print(f"  [ocr_telea] compare {n}", flush=True)
+    finally:
+        cap_s.release(); cap_o.release()
+        if vw is not None:
+            vw.release()
     subprocess.run([ff, "-y", "-i", str(tmp), "-an", "-c:v", "libx264", "-crf", "20",
                    "-pix_fmt", "yuv420p", str(compare)], check=True,
                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -444,6 +525,8 @@ def main(argv=None):
     ap.add_argument("--feather-sigma", type=float, default=1.5, help="边缘羽化高斯 sigma")
     ap.add_argument("--no-temporal-smooth", action="store_true", help="关闭时序平滑（抑制 OCR 抖动）")
     ap.add_argument("--min-support", type=int, default=2, help="时序平滑：邻帧支持数下限")
+    ap.add_argument("--passes", type=int, default=1,
+                    help="多遍迭代遍数；默认1（实测2会误删场景文字，仅在确有明显残留时开）")
     args = ap.parse_args(argv)
 
     band = _parse_box(args.band) or DEFAULT_BAND
@@ -454,7 +537,7 @@ def main(argv=None):
         pre_scan=args.pre_scan, max_frames=args.max_frames,
         feather_px=args.feather_px, feather_sigma=args.feather_sigma,
         temporal_smoothing=not args.no_temporal_smooth,
-        min_support=args.min_support)
+        min_support=args.min_support, passes=args.passes)
 
     if args.qc:
         qc_dehardsub(args.source, args.out, band=band, watermark=watermark)
