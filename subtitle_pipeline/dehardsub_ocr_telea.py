@@ -231,6 +231,8 @@ def run(source, out, *,
         else:
             out_f = f
         vw.write(out_f)
+        if (k + 1) % 200 == 0:
+            print(f"  [ocr_telea] {k+1}/{len(frames)}", flush=True)
     vw.release()
     subprocess.run([ff, "-y", "-i", str(tmp), "-an", "-c:v", "libx264", "-crf", "18",
                    "-pix_fmt", "yuv420p", str(out)], check=True,
@@ -293,6 +295,8 @@ def qc_dehardsub(source, out, *,
                         if d > dmg_thr:
                             damaged.append((fi, txt[:8], round(d, 1)))
         fi += 1
+        if fi % 400 == 0:
+            print(f"  [ocr_telea] qc scanned {fi}", flush=True)
     cap_s.release(); cap_o.release()
     result = {"missed": missed, "damaged": damaged,
               "missed_count": len(missed), "damaged_count": len(damaged)}
