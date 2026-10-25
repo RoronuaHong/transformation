@@ -18,6 +18,14 @@
 为避免误删：除固定位置目标外，仅当文本以 `*` 开头或命中 `caption_stems` 才去除
 （菜单、墙上价格等场景文字因此完好）。
 
+对齐 `DEHARDSUB.md`「完美还原六要点」：
+    - 第2条 边缘羽化 3–5px：文字本体权重恒为 1（保证去除彻底、不留鬼影），
+      仅在外扩环带内按高斯权重与原始背景融合 → 消硬接缝，同时不削弱去除效果。
+    - 第3条 时序平滑消闪烁：逐帧 OCR 收集目标框 → 抑制孤立单帧检测（邻帧无支持则丢弃），
+      避免遮罩跳变导致闪烁。刻意不向邻帧扩散，防止在无字幕帧里白白抹掉背景纹理。
+    - 第1条 无损导出：同分辨率 + crf18 高码率重编码（文档认可的视觉无损区间）；
+      因水印每帧都在、无干净段，故不适用流拷贝路径。
+
 入口：
     run(source, out, **opts)              处理并写出 out
     qc_dehardsub(source, out, **opts)     残差(漏删)+误删 验收，返回 {missed, damaged}
@@ -161,11 +169,86 @@ def _auto_detect_region(frames, ocr, pre_scan, prefer="corner"):
     return {"x": cx * 24 - 40, "y": cy * 24 - 30, "w": 120, "h": 60}
 
 
+# ----------------------------- 时序平滑 + 边缘羽化 -----------------------------
+def _iou(a, b):
+    ax1, ay1 = a["x"] + a["w"], a["y"] + a["h"]
+    bx1, by1 = b["x"] + b["w"], b["y"] + b["h"]
+    ix = min(ax1, bx1) - max(a["x"], b["x"])
+    iy = min(ay1, by1) - max(a["y"], b["y"])
+    if ix <= 0 or iy <= 0:
+        return 0.0
+    inter = ix * iy
+    union = a["w"] * a["h"] + b["w"] * b["h"] - inter
+    return inter / union if union > 0 else 0.0
+
+
+def collect_target_boxes(frame, ocr, band, caption_stems, score_thr):
+    """单帧 OCR，取出该帧目标字幕框（对白带命中 / `*` 前缀 / 旁白关键词）。"""
+    out = []
+    res, _ = ocr(frame, use_det=True, use_cls=False, use_rec=True)
+    if not res:
+        return out
+    for item in res:
+        pts = np.asarray(item[0], dtype=np.float32)
+        x0, y0 = pts[:, 0].min(), pts[:, 1].min()
+        x1, y1 = pts[:, 0].max(), pts[:, 1].max()
+        b = {"x": int(x0), "y": int(y0), "w": int(x1 - x0), "h": int(y1 - y0)}
+        if b["w"] * b["h"] < DEFAULT_MIN_AREA or b["w"] < 12 or b["h"] < 8:
+            continue
+        txt = str(item[1]).strip()
+        if float(item[2] if len(item) > 2 else 0) < score_thr:
+            continue
+        if (band is not None and _in_box(b, band)) or \
+                txt.startswith("*") or any(s in txt for s in caption_stems):
+            out.append(b)
+    return out
+
+
+def temporal_smooth(boxes_per_frame, min_support=2):
+    """抑制孤立单帧检测（OCR 抖动）→ 缓解逐帧遮罩跳变导致的闪烁。
+
+    只在邻帧(±1)存在近似框时才保留。刻意**不向邻帧扩散**：真实字幕持续多帧，
+    扩散反而会在无字幕帧里白白填背景、把纹理抹掉。
+    """
+    n = len(boxes_per_frame)
+    kept = []
+    for k in range(n):
+        lst = []
+        for b in boxes_per_frame[k]:
+            support = 1
+            for j in (k - 1, k + 1):
+                if 0 <= j < n and any(_iou(b, ob) >= 0.3 for ob in boxes_per_frame[j]):
+                    support += 1
+                    break
+            if support >= min_support:
+                lst.append(b)
+        kept.append(lst)
+    return kept
+
+
+def feather_blend(frame, inpainted, mask, feather_px=5, feather_sigma=1.5):
+    """边缘羽化（最佳实践：3–5px 软边）。
+
+    文字本体权重恒为 1（保证彻底去除、不留鬼影），仅在外扩环带内按高斯权重
+    与原始背景融合 → 消除填充硬接缝，同时不削弱去除效果。
+    """
+    k = 3 if feather_px <= 4 else 5
+    ring = cv2.dilate(mask, np.ones((k, k), np.uint8), iterations=1)
+    w = cv2.GaussianBlur(ring.astype(np.float32) / 255.0, (0, 0), feather_sigma)
+    w = np.maximum(w, mask.astype(np.float32) / 255.0)  # 文字本体必须全替换
+    w3 = w[..., None]
+    return np.clip(
+        inpainted.astype(np.float32) * w3 + frame.astype(np.float32) * (1 - w3),
+        0, 255,
+    ).astype(np.uint8)
+
+
 # ----------------------------- 主处理 -----------------------------
 def run(source, out, *,
         band=DEFAULT_BAND, watermark=DEFAULT_WATERMARK,
         caption_stems=DEFAULT_CAPTION_STEMS, score_thr=DEFAULT_SCORE_THR,
         inpaint_radius=DEFAULT_INPAINT_RADIUS, pre_scan=DEFAULT_PRE_SCAN,
+        feather_px=5, feather_sigma=1.5, temporal_smoothing=True, min_support=2,
         max_frames=None):
     """对 source 跑 OCR 细字形洞 + TELEA 去字幕，写出 out（mp4, crf18, yuv420p）。"""
     source, out = Path(source), Path(out)
@@ -191,6 +274,17 @@ def run(source, out, *,
               file=sys.stderr)
 
     ff = _ffmpeg()
+
+    # Pass A：逐帧 OCR 收集目标框（与渲染解耦，便于做时序平滑）
+    boxes_per_frame = []
+    for k, f in enumerate(frames):
+        boxes_per_frame.append(collect_target_boxes(f, ocr, band, caption_stems, score_thr))
+        if (k + 1) % 200 == 0:
+            print(f"  [ocr_telea] ocr {k+1}/{len(frames)}", flush=True)
+    if temporal_smoothing:
+        boxes_per_frame = temporal_smooth(boxes_per_frame, min_support)
+
+    # Pass B：建遮罩 → TELEA → 羽化融合
     tmp = out.with_suffix(".avi")
     vw = cv2.VideoWriter(str(tmp), cv2.VideoWriter_fourcc(*"MJPG"), fps, (W, H))
     removed = 0
@@ -203,36 +297,21 @@ def run(source, out, *,
             if int(bm.max()) > 0:
                 mask[by:by + bm.shape[0], bx:bx + bm.shape[1]] = np.maximum(
                     mask[by:by + bm.shape[0], bx:bx + bm.shape[1]], bm)
-        # OCR：对白带 + 浮动旁白
-        res, _ = ocr(f, use_det=True, use_cls=False, use_rec=True)
-        if res:
-            for item in res:
-                pts = np.asarray(item[0], dtype=np.float32)
-                x0, y0 = pts[:, 0].min(), pts[:, 1].min()
-                x1, y1 = pts[:, 0].max(), pts[:, 1].max()
-                b = {"x": int(x0), "y": int(y0), "w": int(x1 - x0), "h": int(y1 - y0)}
-                if b["w"] * b["h"] < DEFAULT_MIN_AREA or b["w"] < 12 or b["h"] < 8:
-                    continue
-                txt = str(item[1]).strip()
-                if float(item[2] if len(item) > 2 else 0) < score_thr:
-                    continue
-                is_target = (band is not None and _in_box(b, band)) or \
-                            txt.startswith("*") or any(s in txt for s in caption_stems)
-                if not is_target:
-                    continue
-                r = thin_mask(gray, b)
-                if r:
-                    s, (mx, my) = r
-                    mask[my:my + s.shape[0], mx:mx + s.shape[1]] = np.maximum(
-                        mask[my:my + s.shape[0], mx:mx + s.shape[1]], s)
-                    removed += 1
+        for b in boxes_per_frame[k]:
+            r = thin_mask(gray, b)
+            if r:
+                s, (mx, my) = r
+                mask[my:my + s.shape[0], mx:mx + s.shape[1]] = np.maximum(
+                    mask[my:my + s.shape[0], mx:mx + s.shape[1]], s)
+                removed += 1
         if int(mask.max()) > 0:
             out_f = cv2.inpaint(f, mask, inpaint_radius, cv2.INPAINT_TELEA)
+            out_f = feather_blend(f, out_f, mask, feather_px, feather_sigma)
         else:
             out_f = f
         vw.write(out_f)
         if (k + 1) % 200 == 0:
-            print(f"  [ocr_telea] {k+1}/{len(frames)}", flush=True)
+            print(f"  [ocr_telea] render {k+1}/{len(frames)}", flush=True)
     vw.release()
     subprocess.run([ff, "-y", "-i", str(tmp), "-an", "-c:v", "libx264", "-crf", "18",
                    "-pix_fmt", "yuv420p", str(out)], check=True,
@@ -361,6 +440,10 @@ def main(argv=None):
     ap.add_argument("--inpaint-radius", type=int, default=DEFAULT_INPAINT_RADIUS)
     ap.add_argument("--max-frames", type=int, default=None, help="仅处理前 N 帧（冒烟测试）")
     ap.add_argument("--pre-scan", type=int, default=DEFAULT_PRE_SCAN)
+    ap.add_argument("--feather-px", type=int, default=5, help="边缘羽化宽度（最佳实践 3-5px）")
+    ap.add_argument("--feather-sigma", type=float, default=1.5, help="边缘羽化高斯 sigma")
+    ap.add_argument("--no-temporal-smooth", action="store_true", help="关闭时序平滑（抑制 OCR 抖动）")
+    ap.add_argument("--min-support", type=int, default=2, help="时序平滑：邻帧支持数下限")
     args = ap.parse_args(argv)
 
     band = _parse_box(args.band) or DEFAULT_BAND
@@ -368,7 +451,10 @@ def main(argv=None):
 
     run(args.source, args.out, band=band, watermark=watermark,
         score_thr=args.score_thr, inpaint_radius=args.inpaint_radius,
-        pre_scan=args.pre_scan, max_frames=args.max_frames)
+        pre_scan=args.pre_scan, max_frames=args.max_frames,
+        feather_px=args.feather_px, feather_sigma=args.feather_sigma,
+        temporal_smoothing=not args.no_temporal_smooth,
+        min_support=args.min_support)
 
     if args.qc:
         qc_dehardsub(args.source, args.out, band=band, watermark=watermark)
