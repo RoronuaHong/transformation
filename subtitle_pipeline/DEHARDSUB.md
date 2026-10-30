@@ -28,6 +28,8 @@ B站硬字幕的**首选默认路线**：`dehardsub_ocr_telea.py`（OCR 细字�
 ## 引擎接入
 `run_multipass_cleanup(engine="ocr_telea")` 直接走本路线（自带入 OCR，无需外部 box；
 `watermark=None` 时自动探测角部常驻 logo）。注册于 `media_ops.DEHARDSUB_ENGINES`。
+
+一条命令端到端（去字→QC→对比）：`python dehardsub_run.py --source <视频>`。B站 路径自动选 `ocr_telea`；`--band x,y,w,h` 可绕过 VLM 直接指定字幕带；`--engine propainter` 走 GPU 时序修复（见要点 6）。
 - **全局默认仍是 `sttn`**：`ocr_telea` 经管线运行时使用 locate 出的 box，对 B站 内容安全；
   但盲目翻全局默认会影响非 B站 内容（忽略 box、写死 BV 字幕带坐标会漏删带外浮动字幕）。
   因此 `media_ops._default_dehardsub_engine_for` **仅对路径含 bilibili/BV 的 B站 任务默认 ocr_telea**，

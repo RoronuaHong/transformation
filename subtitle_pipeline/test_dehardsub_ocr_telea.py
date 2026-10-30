@@ -124,3 +124,34 @@ def test_propainter_engine_wired_and_graceful():
 
     with pytest.raises(PropainterUnavailable):
         inpaint_video("nonexistent.mp4", "out.mp4", {"x": 0, "y": 0, "w": 10, "h": 10})
+
+
+def test_run_script_end_to_end(tmp_path):
+    # 端到端实跑脚本：去字 → QC →（可选）对比，验证胶水逻辑正确。
+    try:
+        from dehardsub_run import main as run_script
+    except Exception as e:  # pragma: no cover
+        pytest.skip(f"dehardsub_run unavailable: {e}")
+
+    src = tmp_path / "src.mp4"
+    out = tmp_path / "out_dehardsub.mp4"
+    vw = cv2.VideoWriter(str(src), cv2.VideoWriter_fourcc(*"MJPG"), 25, (640, 360))
+    for _ in range(12):
+        f = np.full((360, 640, 3), 20, np.uint8)
+        cv2.putText(f, "CAPTION", (60, 150), cv2.FONT_HERSHEY_SIMPLEX, 1.2,
+                    (255, 255, 255), 3)
+        vw.write(f)
+    vw.release()
+
+    res = run_script([
+        "--source", str(src), "--out", str(out),
+        "--engine", "ocr_telea", "--band", "40,80,560,160", "--no-compare",
+    ])
+    assert out.exists(), "脚本未产出视频"
+    assert res["action"] == "ocr_telea_cleanup", res
+    # 脚本内已做 QC；这里复验一把确保 0/0
+    from dehardsub_ocr_telea import qc_dehardsub
+    qc = qc_dehardsub(str(src), str(out),
+                      band={"x": 40, "y": 80, "w": 560, "h": 160}, watermark=None)
+    assert qc["missed_count"] == 0, qc["missed"]
+    assert qc["damaged_count"] == 0, qc["damaged"]
