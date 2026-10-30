@@ -41,6 +41,19 @@ POSTPROC_MODES = ("fast", "balanced", "quality")
 DEFAULT_DEHARDSUB_ENGINE = (
     str(os.environ.get("VITUAL_DEHARDSUB_ENGINE", "sttn") or "sttn").strip().lower()
 )
+
+
+def _default_dehardsub_engine_for(src) -> str:
+    """来源判定默认去字幕引擎。
+
+    B站 任务（路径含 bilibili / BV号 / b23）默认走 ``ocr_telea``（白字硬字幕首选路线，
+    避免 STTN tiles 平灰块）；其余沿用全局默认（默认 sttn）。作用域限定在 B站，
+    不影响其它内容的全局默认。
+    """
+    s = str(src).lower().replace("\\", "/")
+    if "bilibili" in s or "bv1" in s or "b23" in s:
+        return "ocr_telea"
+    return DEFAULT_DEHARDSUB_ENGINE
 DEFAULT_CLEAN_PASSES = max(1, int(os.environ.get("VITUAL_CLEAN_PASSES", "2") or 2))
 # 去马赛克引擎：
 #   lama（优先通用）= LaMa ONNX 单帧填洞（身体/屏幕/文字块/任意马赛克）
@@ -2466,7 +2479,7 @@ def strip_hardsubs(
         mode_s = "auto"
     model = (vlm_model or HARDSUB_VLM_MODEL).strip() or HARDSUB_VLM_MODEL
     max_passes = DEFAULT_CLEAN_PASSES if passes is None else max(1, min(6, int(passes)))
-    engine_s = (engine or DEFAULT_DEHARDSUB_ENGINE).strip().lower()
+    engine_s = (engine or _default_dehardsub_engine_for(src)).strip().lower()
     if engine_s not in DEHARDSUB_ENGINES:
         engine_s = "sttn"
     demosaic_engine_s = (demosaic_engine or DEFAULT_DEMOSAIC_ENGINE).strip().lower()
