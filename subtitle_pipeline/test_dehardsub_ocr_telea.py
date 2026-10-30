@@ -70,3 +70,32 @@ def test_no_false_positive_on_clean_video(tmp_path):
     r = qc_dehardsub(str(src), str(out), band=band, watermark=None)
     assert r["missed_count"] == 0
     assert r["damaged_count"] == 0
+
+
+def test_pipeline_engine_routes_to_ocr_telea(tmp_path):
+    # 最后一公里：验证 ocr_telea 已真正接入管线 run_multipass_cleanup，
+    # 经引擎路由用自带 OCR 产出去字视频（漏删=0、误删=0）。
+    try:
+        from visual_cleanup import run_multipass_cleanup  # noqa: F401
+    except Exception as e:  # pragma: no cover
+        pytest.skip(f"visual_cleanup unavailable: {e}")
+
+    src = tmp_path / "src.mp4"
+    out = tmp_path / "out.mp4"
+    _make_video(src)
+
+    band = {"x": 40, "y": 80, "w": 560, "h": 160}
+    res = run_multipass_cleanup(
+        src, out,
+        engine="ocr_telea",
+        boxes_override=[{**band, "role": "dialogue"}],
+        demosaic=False,
+        locate_mode="band",
+    )
+    assert res["action"] == "ocr_telea_cleanup", res
+    assert res["engine"] == "ocr_telea"
+    assert out.exists(), "ocr_telea 引擎未产出视频"
+
+    r = qc_dehardsub(str(src), str(out), band=band, watermark=None)
+    assert r["missed_count"] == 0, r["missed"]
+    assert r["damaged_count"] == 0, r["damaged"]
