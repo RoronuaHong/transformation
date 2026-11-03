@@ -1094,6 +1094,7 @@ def _lama_box_mask(
     mode: str,
     *,
     thr: float = 14.0,
+    pre_detected: list[dict[str, int]] | None = None,
 ) -> Any:
     """glyph = OCR 笔画；residual = 残影；auto = 有字用 glyph，否则 residual。"""
     from _inpaint_shared import glyph_mask_hybrid
@@ -1101,7 +1102,7 @@ def _lama_box_mask(
     mode_s = (mode or "glyph").strip().lower()
     if mode_s == "residual":
         return residual_ghost_mask(bgr, box, thr=thr)
-    glyph = glyph_mask_hybrid(bgr, box)
+    glyph = glyph_mask_hybrid(bgr, box, pre_detected=pre_detected)
     if mode_s == "glyph":
         return glyph
     if int(glyph.max()) > 0:
@@ -1132,6 +1133,7 @@ def encode_lama_boxes(
     import cv2
     import numpy as np
 
+    from glyph_detect import detect_text_boxes
     from inpaint_lama import lama_inpaint
 
     src = Path(src)
@@ -1172,9 +1174,15 @@ def encode_lama_boxes(
                 restored, _bg = restore_mosaic_crop(roi, mask, None, radius=7, use_neural=False)
                 out = out.copy()
                 out[y : y + h, x : x + w] = restored
+        # 整帧只做一次 OCR，所有字幕 box 复用同一份检测结果
+        # （原实现每 box 各跑一次全帧 RapidOCR，O(帧×框)→O(帧)）。
+        try:
+            frame_boxes = detect_text_boxes(out, score_thr=0.5)
+        except Exception:
+            frame_boxes = None
         hit = False
         for box in boxes_n:
-            mask = _lama_box_mask(out, box, mode_s)
+            mask = _lama_box_mask(out, box, mode_s, pre_detected=frame_boxes)
             if int(mask.max()) == 0:
                 continue
             if dilate > 0:

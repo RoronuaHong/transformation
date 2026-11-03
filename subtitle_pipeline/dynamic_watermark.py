@@ -343,7 +343,14 @@ def strip_moving_watermark(
             ok, fr = cap.read()
             if not ok:
                 break
-            box = trajectory[i] if i < len(trajectory) else None
+            if i < len(trajectory):
+                box = trajectory[i]
+            elif trajectory:
+                # cv2 CAP_PROP_FRAME_COUNT 常偏低（实际帧数 > 轨迹长度），
+                # 直接置 None 会让视频尾部水印残留，故沿用末帧框继续修复。
+                box = trajectory[-1]
+            else:
+                box = None
             if box:
                 x0 = max(0, int(box["x"]) - pad)
                 y0 = max(0, int(box["y"]) - pad)

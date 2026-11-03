@@ -1448,7 +1448,12 @@ def glyph_hole_for_tile(glyph_union: Any, tile: dict[str, int]) -> Any:
     return pad
 
 
-def glyph_mask_hybrid(bgr: Any, box: dict[str, int]) -> Any:
+def glyph_mask_hybrid(
+    bgr: Any,
+    box: dict[str, int],
+    *,
+    pre_detected: list[dict[str, int]] | None = None,
+) -> Any:
     """通用字形 mask（VSR 同款两级定位）：
 
     1) OCR 行 bbox 限定「哪里有字」（rapidocr，通用：不依赖底色/描边假设，
@@ -1465,12 +1470,25 @@ def glyph_mask_hybrid(bgr: Any, box: dict[str, int]) -> Any:
         from glyph_detect import GlyphDetectUnavailable, detect_text_boxes
     except ImportError:
         return glyph_hole_adaptive(bgr, box)
-    try:
-        boxes = detect_text_boxes(bgr, score_thr=0.5, limit_box=box)
-    except GlyphDetectUnavailable:
-        return glyph_hole_adaptive(bgr, box)
-    except Exception:  # noqa: BLE001 — 单帧 OCR 失败不中断
-        return glyph_hole_adaptive(bgr, box)
+    if pre_detected is not None:
+        # 复用调用方已做的整帧 OCR：仅保留与 box 相交的行，并裁剪到交集
+        # （与 detect_text_boxes 的 limit_box 行为一致）。
+        boxes: list[dict[str, int]] = []
+        for b in pre_detected:
+            ix0 = max(b["x"], box["x"])
+            iy0 = max(b["y"], box["y"])
+            ix1 = min(b["x"] + b["w"], box["x"] + box["w"])
+            iy1 = min(b["y"] + b["h"], box["y"] + box["h"])
+            if ix1 <= ix0 or iy1 <= iy0:
+                continue
+            boxes.append({"x": ix0, "y": iy0, "w": ix1 - ix0, "h": iy1 - iy0})
+    else:
+        try:
+            boxes = detect_text_boxes(bgr, score_thr=0.5, limit_box=box)
+        except GlyphDetectUnavailable:
+            return glyph_hole_adaptive(bgr, box)
+        except Exception:  # noqa: BLE001 — 单帧 OCR 失败不中断
+            return glyph_hole_adaptive(bgr, box)
     if not boxes:
         # 框内确无文本行：不挖洞（宁可漏字也不误毁画面）
         return np.zeros(bgr.shape[:2], dtype=np.uint8)
