@@ -1,13 +1,13 @@
 """去马赛克后端。
 
 引擎分工（由 visual_cleanup / media_ops 选择）：
-  - demosaic_engine=sttn（默认，通用）：整段视频把马赛克框当 STTN 洞，
-    适合身体/屏幕/文字/任意像素块，不限人脸。权重：models/sttn.pth
+  - demosaic_engine=lama（默认，通用）：整段视频把马赛克框当 LaMa 洞，
+    适合身体/屏幕/文字/任意像素块，不限人脸。权重：models/lama_fp32.onnx
   - demosaic_engine=codeformer（仅人脸）：本模块 CodeFormer-ONNX。
     非人脸马赛克不要用——会往脸上「脑补」。缺 onnx 时退 OpenCV。
   - demosaic_engine=opencv：中值/inpaint 兜底，整块密集马赛克很弱。
 
-本文件只实现 codeformer + OpenCV 兜底；通用路径在 _inpaint_shared.encode_sttn。
+本文件只实现 codeformer + OpenCV 兜底；通用路径在 visual_cleanup（LaMa）。
 
 依赖（人脸路径）：
     - models/codeformer.onnx  （当前仓库默认未附带；缺失 → OpenCV）

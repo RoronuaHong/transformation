@@ -2500,7 +2500,26 @@ def strip_hardsubs(
             "progress_file": progress_path.name,
         }
     )
-    if not report.get("detected") and not force and mode_s not in ("auto",):
+
+    # 弱检测漏判保护：detect_hardsubs 只均匀采 5 点，连排/局部字幕易漏判。
+    # 5 点未命中时改用稠密全片扫描（scan_caption_timeline）复核是否真有字幕；
+    # 显式 boxes_override / force 也应强制去字。避免「有字幕却被判定为无 → 漏去字」。
+    _dense_holder = [None]
+
+    def _ensure_dense():
+        if _dense_holder[0] is None:
+            _dense_holder[0] = scan_caption_timeline(
+                src, band_ratio=max(0.12, float(ratio))
+            )
+        return _dense_holder[0]
+
+    _has_captions = bool(report.get("detected")) or bool(boxes_override) or bool(force)
+    if not _has_captions:
+        _d = _ensure_dense()
+        if int(_d.get("hits_n", 0) or 0) >= 2 and float(_d.get("hit_frac", 0.0) or 0.0) >= 0.01:
+            _has_captions = True
+
+    if not _has_captions and mode_s not in ("auto",):
         # auto still runs mosaic scan even if hardsub heuristic misses
         report["action"] = "skip"
         report["elapsed_sec"] = round(time.perf_counter() - started, 3)
@@ -2512,7 +2531,7 @@ def strip_hardsubs(
         return src, report
 
     # auto: always attempt multipass when forced OR hardsubs detected OR demosaic on
-    if mode_s == "auto" and not report.get("detected") and not force and not demosaic:
+    if mode_s == "auto" and not _has_captions and not demosaic:
         report["action"] = "skip"
         report["elapsed_sec"] = round(time.perf_counter() - started, 3)
         _write_meta(meta_path, report)
@@ -2571,7 +2590,7 @@ def strip_hardsubs(
     ]
     # detect_hardsubs 只采 5 个点 → 那是“有没有字幕”的存在性信号，不是时间轴。
     # 真正决定“字幕在哪几秒”要用稠密扫描，否则 5 分钟连排字幕只处理 14 秒。
-    scan = scan_caption_timeline(src, band_ratio=max(0.12, float(ratio)))
+    scan = _ensure_dense()
     report["timeline"] = {
         "frames": scan.get("frames"),
         "hits": scan.get("hits_n"),
@@ -2664,7 +2683,7 @@ def strip_hardsubs(
                 ratio=ratio,
                 max_passes=max_passes,
                 demosaic=bool(demosaic),
-                dehardsub=bool(report.get("detected") or force or mode_s != "auto"),
+                dehardsub=bool(_has_captions) or (mode_s != "auto"),
                 engine=engine_s,
                 demosaic_engine=demosaic_engine_s,
                 polish_residual_floor=float(polish_residual_floor),
