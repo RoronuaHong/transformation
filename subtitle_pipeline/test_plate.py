@@ -22,7 +22,7 @@ def _have_clip() -> bool:
 def _make_synthetic_mp4(path: Path, *, n: int = 30, fw: int = 64, fh: int = 64) -> tuple[dict, int, int, int]:
     """A static colored bar with a per-frame moving white caption (gets medianed out)."""
     from fetch_media import find_ffmpeg
-    from sttn_inpaint import _finalize_writing_mp4
+    from _inpaint_shared import _finalize_writing_mp4
 
     bx, by, bw, bh = 0, 40, fw, 24
     ffmpeg = find_ffmpeg()

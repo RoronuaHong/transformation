@@ -94,7 +94,7 @@ def test_normalize_media_opts_postproc_modes() -> None:
     fast = normalize_media_opts({"postproc_mode": "fast"})
     assert fast["postproc_mode"] == "fast"
     assert fast["dehardsub_mode"] == "fill"
-    assert fast["dehardsub_engine"] == "opencv"
+    assert fast["dehardsub_engine"] == "ocr_telea"
     assert fast["dehardsub_passes"] == 1
     assert fast["deblur_demosaic"] is False
     assert fast["dehardsub_polish_residual_floor"] == 1.0
@@ -793,9 +793,9 @@ def test_detect_and_strip_hardsubs(tmp_path: Path) -> None:
     assert located is not None
     assert located["box"]["y"] > src_wh[1] * 0.65
     cleaned, meta = strip_hardsubs(
-        tmp_path, video=src, force=False, ratio=0.14, mode="band", engine="opencv"
+        tmp_path, video=src, force=False, ratio=0.14, mode="band", engine="ocr_telea"
     )
-    assert str(meta["action"]).startswith(("delogo_", "inpaint_", "multipass"))
+    assert str(meta["action"]).startswith(("delogo_", "inpaint_", "multipass", "hybrid"))
     assert cleaned.name == "clean.mp4"
     assert cleaned.is_file()
     out_wh = probe_video_wh(cleaned)
@@ -803,7 +803,7 @@ def test_detect_and_strip_hardsubs(tmp_path: Path) -> None:
     assert out_wh == src_wh
     assert meta.get("out_size") == f"{src_wh[0]}x{src_wh[1]}"
     _skipped, meta2 = strip_hardsubs(
-        tmp_path, video=cleaned, force=False, ratio=0.14, mode="band", engine="opencv"
+        tmp_path, video=cleaned, force=False, ratio=0.14, mode="band", engine="ocr_telea"
     )
     assert meta2["action"] == "skip" or str(meta2["action"]).startswith(
         ("delogo_", "inpaint_", "multipass")
@@ -824,7 +824,7 @@ def test_hardsub_fill_keeps_frame(tmp_path: Path) -> None:
     cleaned, meta = strip_hardsubs(
         tmp_path, video=src, force=True, mode="band", ratio=0.14, engine="opencv"
     )
-    assert str(meta["action"]).startswith(("delogo_", "inpaint_", "multipass"))
+    assert str(meta["action"]).startswith(("delogo_", "inpaint_", "multipass", "hybrid"))
     assert probe_video_wh(cleaned) == src_wh
     assert meta["box"]["w"] < src_wh[0]
 
@@ -860,7 +860,7 @@ def test_hardsub_fulltime_captions_use_full_delogo(tmp_path: Path, monkeypatch) 
         video=src,
         force=True,
         mode="fill",
-        engine="opencv",
+        engine="ocr_telea",
     )
     assert cleaned.is_file()
     # 合成片段底部条全程都在 → 稠密扫描判定“几乎全程有字幕”，分段没有意义 → 全程 delogo
@@ -937,7 +937,7 @@ def test_hardsub_fast_fill_uses_segment_windows(tmp_path: Path, monkeypatch) -> 
         video=src,
         force=True,
         mode="fill",
-        engine="opencv",
+        engine="ocr_telea",
     )
     assert cleaned.is_file()
     assert meta["action"] == "delogo_segments"
@@ -957,13 +957,13 @@ def test_run_postproc_dehardsub(tmp_path: Path) -> None:
     out = run_postproc(
         tmp_path,
         frozenset({"dehardsub"}),
-        media_opts={"dehardsub_mode": "band", "dehardsub_engine": "opencv"},
+        media_opts={"dehardsub_mode": "band", "dehardsub_engine": "ocr_telea"},
     )
     assert "dehardsub" in out
     meta_path = media / "dehardsub" / "dehardsub_meta.json"
     assert meta_path.is_file()
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    assert str(meta["action"]).startswith(("delogo_", "inpaint_", "multipass"))
+    assert str(meta["action"]).startswith(("delogo_", "inpaint_", "multipass", "hybrid"))
     assert float(meta.get("elapsed_sec") or 0.0) >= 0.0
     assert probe_video_wh(out["dehardsub"]) == src_wh
     status = json.loads((media / "media_status.json").read_text(encoding="utf-8"))
@@ -1027,9 +1027,9 @@ def test_multipass_cleanup_hardsub_and_mosaic(tmp_path: Path) -> None:
         demosaic=True,
         dehardsub=True,
         residual_ok=0.05,
-        engine="opencv",
+        engine="ocr_telea",
     )
-    assert meta["action"] == "multipass_cleanup"
+    assert meta["action"] == "hybrid_cleanup"
     assert meta["pass_count"] >= 1
     assert dest.is_file()
     assert probe_video_wh(dest) == probe_video_wh(src)
@@ -1041,9 +1041,9 @@ def test_multipass_cleanup_hardsub_and_mosaic(tmp_path: Path) -> None:
         mode="auto",
         passes=2,
         demosaic=True,
-        engine="opencv",
+        engine="ocr_telea",
     )
-    assert report["action"] == "multipass_cleanup"
+    assert report["action"] == "hybrid_cleanup"
     assert cleaned.is_file()
     assert int(report.get("pass_count") or 0) >= 1
 

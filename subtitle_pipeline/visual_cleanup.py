@@ -1014,7 +1014,7 @@ def _encode_rawvideo_pipe(
             pass
         raise RuntimeError(f"{tag} encode failed ({proc.returncode}): {err}")
     if writing.resolve() != dest_video.resolve():
-        from sttn_inpaint import _finalize_writing_mp4
+        from _inpaint_shared import _finalize_writing_mp4
 
         _finalize_writing_mp4(writing, dest_video)
     return {"frames": frames_done}
@@ -1096,7 +1096,7 @@ def _lama_box_mask(
     thr: float = 14.0,
 ) -> Any:
     """glyph = OCR 笔画；residual = 残影；auto = 有字用 glyph，否则 residual。"""
-    from sttn_inpaint import glyph_mask_hybrid
+    from _inpaint_shared import glyph_mask_hybrid
 
     mode_s = (mode or "glyph").strip().lower()
     if mode_s == "residual":
@@ -1456,7 +1456,7 @@ def run_multipass_cleanup(
     any_glyph_black = False
     if dehardsub and hardsub_boxes:
         try:
-            from sttn_inpaint import classify_dialogue_route
+            from _inpaint_shared import classify_dialogue_route
 
             roles0 = list(locate_meta.get("box_roles") or [])
             for i, hb in enumerate(hardsub_boxes):
@@ -1598,33 +1598,6 @@ def run_multipass_cleanup(
     # 默认主路径 = 下方 hybrid 逐框路由（字形洞 + 中值板 clean plate + 纹理对话走 OCR+TELEA）。
     # STTN 与 ProPainter 已彻底移除，去字幕只保留 ocr_telea/LaMa 这一条路线。
 
-    if engine_s == "diffusion" and dehardsub and box is not None:
-        try:
-            from diffusion_inpaint import DiffusionUnavailable, inpaint_video
-        except ImportError:
-            DiffusionUnavailable = None  # type: ignore[assignment]
-        if DiffusionUnavailable is not None:
-            try:
-                diff_stats = inpaint_video(src, dest, box, width=width, height=height)
-                return {
-                    "action": "diffusion_cleanup",
-                    "engine": "diffusion",
-                    "passes": [{"pass": 1, "encode": diff_stats}],
-                    "pass_count": 1,
-                    "regions": regions,
-                    "mosaic_regions": mosaic_regions,
-                    "demosaic": demosaic,
-                    "dehardsub": dehardsub,
-                    "src_size": f"{width}x{height}",
-                    **locate_meta,
-                    "encode": diff_stats,
-                }
-            except DiffusionUnavailable as exc:
-                print(f"[cleanup] diffusion unavailable ({exc}); falling back to hybrid route")
-            except Exception as exc:  # noqa: BLE001
-                print(f"[cleanup] diffusion failed ({exc}); falling back to hybrid route")
-
-
     if engine_s == "lama" and dehardsub and box is not None:
         try:
             from inpaint_lama import LamaUnavailable
@@ -1749,7 +1722,7 @@ def run_multipass_cleanup(
                         route_info = dialogue_routes[i]
                     else:
                         try:
-                            from sttn_inpaint import classify_dialogue_route
+                            from _inpaint_shared import classify_dialogue_route
 
                             route_info = classify_dialogue_route(current, box_i)
                         except Exception as exc:  # noqa: BLE001
@@ -1820,7 +1793,7 @@ def run_multipass_cleanup(
                 if role in ("title", "watermark"):
                     import cv2
                     import numpy as np
-                    from sttn_inpaint import _open_ffmpeg_writer
+                    from _inpaint_shared import _open_ffmpeg_writer
 
                     cap_fill = cv2.VideoCapture(str(current))
                     if not cap_fill.isOpened():
@@ -1870,7 +1843,7 @@ def run_multipass_cleanup(
                     current = out_i
                     continue
                 if role == "dialogue" and route_kind == "glyph_black":
-                    from sttn_inpaint import encode_glyph_black_fill
+                    from _inpaint_shared import encode_glyph_black_fill
 
                     if progress_path is not None:
                         try:
@@ -1925,7 +1898,7 @@ def run_multipass_cleanup(
                     current = out_i
                     continue
                 if role == "dialogue" and route_kind == "spatial_fill":
-                    from sttn_inpaint import encode_dialogue_spatial_fill
+                    from _inpaint_shared import encode_dialogue_spatial_fill
 
                     if progress_path is not None:
                         try:

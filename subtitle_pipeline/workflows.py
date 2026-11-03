@@ -401,7 +401,7 @@ def workflow_products(work_dir: Path, workflow: str) -> list[dict[str, Any]]:
 
 
 def _read_sttn_progress(work_dir: Path) -> "dict | None":
-    """Read the live STTN frame-progress sidecar written by sttn_inpaint."""
+    """Read the live STTN frame-progress sidecar written by _inpaint_shared."""
     try:
         import json
 

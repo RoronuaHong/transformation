@@ -7,7 +7,7 @@
     非人脸马赛克不要用——会往脸上「脑补」。缺 onnx 时退 OpenCV。
   - demosaic_engine=opencv：中值/inpaint 兜底，整块密集马赛克很弱。
 
-本文件只实现 codeformer + OpenCV 兜底；通用路径在 sttn_inpaint.encode_sttn。
+本文件只实现 codeformer + OpenCV 兜底；通用路径在 _inpaint_shared.encode_sttn。
 
 依赖（人脸路径）：
     - models/codeformer.onnx  （当前仓库默认未附带；缺失 → OpenCV）

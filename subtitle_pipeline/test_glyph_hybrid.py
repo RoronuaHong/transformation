@@ -24,7 +24,7 @@ def test_glyph_mask_hybrid_uses_ocr_bbox() -> None:
     """有文字帧：hybrid mask 应该只覆盖 OCR bbox 附近的笔画，非整个框。"""
     import cv2
 
-    from sttn_inpaint import glyph_mask_hybrid
+    from _inpaint_shared import glyph_mask_hybrid
 
     # 黑底白字
     f = np.full((120, 320, 3), 30, dtype=np.uint8)

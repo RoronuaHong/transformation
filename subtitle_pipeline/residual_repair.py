@@ -116,7 +116,7 @@ def repair_residual_frames(
     Falls back to a low-threshold mask on the output if the source has no ink
     there (e.g. the box drifted onto background).
     """
-    from sttn_inpaint import _open_ffmpeg_writer
+    from _inpaint_shared import _open_ffmpeg_writer
     from visual_cleanup import _enforce_frame_count
 
     src = Path(src)

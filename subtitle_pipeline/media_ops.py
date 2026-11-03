@@ -36,7 +36,7 @@ CAPTION_SCAN_HIT = 0.28
 DENSE_COVERAGE_FULL = float(os.environ.get("VITUAL_CAPTION_FULL_COVERAGE", "0.75") or 0.75)
 HARDSUB_VLM_MODEL = os.environ.get("VITUAL_DEHARDSUB_VLM", "gemma4:e2b")
 DEHARDSUB_MODES = ("auto", "vlm", "band", "delogo", "fill", "crop")
-DEHARDSUB_ENGINES = ("opencv", "lama", "diffusion", "ocr_telea")
+DEHARDSUB_ENGINES = ("lama", "ocr_telea")
 POSTPROC_MODES = ("fast", "balanced", "quality")
 DEFAULT_DEHARDSUB_ENGINE = (
     str(os.environ.get("VITUAL_DEHARDSUB_ENGINE", "ocr_telea") or "ocr_telea").strip().lower()
@@ -138,7 +138,7 @@ def _mode_default(src: dict[str, Any], mode: str, key: str, default: Any) -> Any
             "dehardsub_mode": "fill",
             "dehardsub_passes": 1,
             "dehardsub_demosaic": False,
-            "dehardsub_engine": "opencv",
+            "dehardsub_engine": "ocr_telea",
             "deblur_demosaic": False,
                 "dehardsub_polish_residual_floor": 1.0,
                 "dehardsub_dialogue_short_route": "flat",
@@ -2460,8 +2460,8 @@ def strip_hardsubs(
       - auto (default): 逐框路由（字形洞 + 中值板 clean plate + OCR+TELEA），不依赖 STTN
       - vlm / band: 同上路由；定位经 VLM 或亮带
       - delogo / fill / crop: legacy 单遍路径
-    ``engine``: ``ocr_telea``（默认首选）或 ``opencv``/``lama``/``diffusion``。
-    STTN 与 ProPainter 已移除，只保留 ocr_telea/LaMa 路线。
+    ``engine``: ``ocr_telea``（默认首选）或 ``lama``。
+    STTN/ProPainter/opencv/diffusion 已移除，只保留 ocr_telea/LaMa 路线。
     """
     from note_frames import existing_source_video
 

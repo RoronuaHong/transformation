@@ -328,7 +328,7 @@ def strip_moving_watermark(
     pad: int = 4,
 ) -> Path:
     """Inpaint each frame at the watermark's box for that frame, then frame-align."""
-    from sttn_inpaint import _open_ffmpeg_writer
+    from _inpaint_shared import _open_ffmpeg_writer
     from visual_cleanup import _enforce_frame_count
 
     out = Path(out)

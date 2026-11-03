@@ -34,7 +34,7 @@ def _frame_dark_sub() -> np.ndarray:
 
 def test_band_is_flat_both_polarity() -> None:
     """旧 var 判定被字形 AA 边缘拉爆（510>400）的回归锁。"""
-    from sttn_inpaint import band_is_flat
+    from _inpaint_shared import band_is_flat
 
     f = _frame_white_sub()
     assert band_is_flat(f, {"x": 35, "y": 186, "w": 248, "h": 53}) is True
@@ -56,7 +56,7 @@ def test_glyph_mask_hybrid_stroke_level() -> None:
     """hybrid mask：OCR bbox 限定 + 笔画细化，洞不覆盖整框（防大洞伪影回归）。"""
     import cv2
 
-    from sttn_inpaint import glyph_mask_hybrid
+    from _inpaint_shared import glyph_mask_hybrid
 
     f = _frame_dark_sub()
     box = {"x": 40, "y": 160, "w": 240, "h": 60}
