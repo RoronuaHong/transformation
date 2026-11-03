@@ -48,7 +48,7 @@ import numpy as np
 from glyph_detect import _get_ocr
 
 # ---- 默认目标区域（按 BV1oFJ16BEMT 验证值；其它视频用 --band/--watermark 或自动探测覆盖）----
-DEFAULT_BAND = {"x": 270, "y": 598, "w": 712, "h": 100}
+DEFAULT_BAND = {"x": 131, "y": 597, "w": 853, "h": 122}  # BV1oFJ16BEMT 全片实测对白框并集+外扩(2026-11-02)
 DEFAULT_WATERMARK = {"x": 985, "y": 638, "w": 290, "h": 72}
 DEFAULT_CAPTION_STEMS = ("无微不至", "感慨")
 DEFAULT_SCORE_THR = 0.25
@@ -95,18 +95,23 @@ def thin_mask(gray, b, pad=6):
 
 
 def band_white_mask(gray, band):
-    """底部对白带内白字字形（不依赖 OCR，兜住漏检）。仅限字幕行中心区 + 文本尺寸，保守补充。"""
+    """底部对白带内白字字形（不依赖 OCR，兜住漏检）。仅限字幕行中心区 + 文本尺寸，保守补充。
+
+    关键: 先 OPEN(3x3,2) 断开白字与白米饭/白盘间的细薄桥接, 再对连通域加面积/宽度上限,
+    只保留文本尺寸的白色块——避免把整片白色食物连成大块一起遮掉(否则 TELEA 填出大色块)。
+    """
     x0, y0, w, h = band["x"], band["y"], band["w"], band["h"]
     crop = gray[y0:y0 + h, x0:x0 + w]
     white = (crop > 200).astype(np.uint8)
-    white = cv2.morphologyEx(white, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8), iterations=1)
+    white = cv2.morphologyEx(white, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=2)
     white = cv2.morphologyEx(white, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8), iterations=2)
     num, labels, stats, cent = cv2.connectedComponentsWithStats(white, 8)
     m = np.zeros_like(white)
     for i in range(1, num):
         a = stats[i]; bw, bh, area = a[2], a[3], a[4]
         cy = cent[i][1] + y0
-        if area < 25 or bh < 14 or bh > 72 or bw < 10:
+        # 只保留文本尺寸: 太小/太大(=白色食物大块)/过高/过宽 都丢
+        if area < 25 or area > 4000 or bh < 12 or bh > 80 or bw < 8 or bw > 900:
             continue
         if not (band["y"] + 17 <= cy <= band["y"] + band["h"] - 17):
             continue
@@ -287,11 +292,13 @@ def _collect_all(path, ocr, band, caption_stems, score_thr, max_frames=None, lab
 
 def _render_pass(src_path, vw, boxes, wm_mask, band, inpaint_radius,
                  feather_px, feather_sigma, max_frames=None, label="render",
-                 use_brightness=True):
-    """流式：逐帧建遮罩 → TELEA → 羽化融合，写入 vw。返回本遍遮罩的框数。
+                 use_brightness=True, inpaint_method="telea"):
+    """流式：逐帧建遮罩 → 修补 → 羽化融合，写入 vw。返回本遍遮罩的框数。
 
     ``use_brightness``：亮度兜底只在第 1 遍（原片）开。迭代遍里画面已被填充过，
     再按亮度抓会误抓带内非文字的亮像素并抹掉（实测会误删场景文字），必须关。
+    ``inpaint_method``：'telea'(默认, 扩散填充, 快但繁忙纹理会晕成糊斑) /
+    'lama'(神经内容识别填充, 纹理背景/食物最自然, 适合做饭·实拍视频, 需 torch+inpaint_lama)。
     """
     removed = 0
     for k, f in enumerate(_iter_frames(src_path, max_frames)):
@@ -304,6 +311,15 @@ def _render_pass(src_path, vw, boxes, wm_mask, band, inpaint_radius,
                 mask[by:by + bm.shape[0], bx:bx + bm.shape[1]] = np.maximum(
                     mask[by:by + bm.shape[0], bx:bx + bm.shape[1]], bm)
         for b in (boxes[k] if k < len(boxes) else []):
+            if inpaint_method == "lama":
+                # 整框填充(PS内容识别式): 白字+黑描边一起盖住, 让填充源=真实背景。
+                # 细字形洞在描边字上的邻居是描边本身 → LaMa 会把笔画填成黑色(实测鬼影)。
+                mh, mw = mask.shape
+                x0 = max(0, b["x"] - 4); y0 = max(0, b["y"] - 4)
+                x1 = min(mw, b["x"] + b["w"] + 4); y1 = min(mh, b["y"] + b["h"] + 4)
+                mask[y0:y1, x0:x1] = 255
+                removed += 1
+                continue
             r = thin_mask(gray, b)
             if r:
                 s, (mx, my) = r
@@ -311,8 +327,21 @@ def _render_pass(src_path, vw, boxes, wm_mask, band, inpaint_radius,
                     mask[my:my + s.shape[0], mx:mx + s.shape[1]], s)
                 removed += 1
         if int(mask.max()) > 0:
-            out_f = cv2.inpaint(f, mask, inpaint_radius, cv2.INPAINT_TELEA)
-            out_f = feather_blend(f, out_f, mask, feather_px, feather_sigma)
+            if inpaint_method == "lama":
+                # 亮度兜底的白色连通域仍带描边, 整体再膨胀 3 轮盖住描边;
+                # OCR 框已是整矩形, 多膨胀只是外扩 3px 无害。
+                mask = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=3)
+                try:
+                    from inpaint_lama import lama_inpaint
+                    out_f = lama_inpaint(f, mask)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[ocr_telea] lama unavailable ({exc}); fallback telea",
+                          file=sys.stderr)
+                    out_f = cv2.inpaint(f, mask, inpaint_radius, cv2.INPAINT_TELEA)
+                    out_f = feather_blend(f, out_f, mask, feather_px, feather_sigma)
+            else:
+                out_f = cv2.inpaint(f, mask, inpaint_radius, cv2.INPAINT_TELEA)
+                out_f = feather_blend(f, out_f, mask, feather_px, feather_sigma)
         else:
             out_f = f
         vw.write(out_f)
@@ -326,8 +355,8 @@ def run(source, out, *,
         caption_stems=DEFAULT_CAPTION_STEMS, score_thr=DEFAULT_SCORE_THR,
         inpaint_radius=DEFAULT_INPAINT_RADIUS, pre_scan=DEFAULT_PRE_SCAN,
         feather_px=5, feather_sigma=1.5, temporal_smoothing=True, min_support=2,
-        passes=1, max_frames=None):
-    """对 source 跑 OCR 细字形洞 + TELEA 去字幕，写出 out（mp4, crf18, yuv420p）。
+        passes=1, max_frames=None, use_brightness=True, inpaint_method="lama"):
+    """对 source 跑 OCR 细字形洞 + 逐帧修补去字幕，写出 out（mp4, crf18, yuv420p）。
 
     - 全程流式：逐帧读取、不把整段视频读进内存（长片安全）。
     - 多遍迭代 `passes`：第 2 遍起在上一遍产物上重新 OCR，只补仍残留的目标文字；
@@ -364,7 +393,8 @@ def run(source, out, *,
     tmp1 = out.with_name(f"{out.stem}_p1.avi")
     vw = cv2.VideoWriter(str(tmp1), cv2.VideoWriter_fourcc(*"MJPG"), fps, (W, H))
     removed = _render_pass(source, vw, boxes, wm_fixed, band, inpaint_radius,
-                           feather_px, feather_sigma, max_frames, label="render p1")
+                           feather_px, feather_sigma, max_frames, label="render p1",
+                           use_brightness=use_brightness, inpaint_method=inpaint_method)
     vw.release()
     cur = tmp1
     tmps.append(cur)
@@ -384,7 +414,8 @@ def run(source, out, *,
         vw = cv2.VideoWriter(str(tmp_p), cv2.VideoWriter_fourcc(*"MJPG"), fps, (W, H))
         removed += _render_pass(cur, vw, boxes_p, np.zeros((H, W), np.uint8), band,
                                 inpaint_radius, feather_px, feather_sigma,
-                                max_frames, label=f"render p{p}", use_brightness=False)
+                                max_frames, label=f"render p{p}", use_brightness=False,
+                                inpaint_method=inpaint_method)
         vw.release()
         cur = tmp_p
         tmps.append(cur)

@@ -21,7 +21,7 @@ def crawl_topic(
     stats: dict = {"id": topic.id, "platforms": {}, "raw": 0, "errors": []}
     pool: list[Candidate] = []
     for plat in topic.platforms:
-        if plat in ("douyin", "kuaishou"):
+        if plat == "kuaishou":
             stats["errors"].append({"platform": plat, "error": "deferred"})
             continue
         try:

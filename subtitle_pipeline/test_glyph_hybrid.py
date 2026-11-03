@@ -44,7 +44,7 @@ def test_glyph_mask_hybrid_uses_ocr_bbox() -> None:
 
 
 def test_lama_engine_fallback_without_weights(tmp_path, monkeypatch) -> None:
-    """缺 lama.onnx 时 engine=lama 应降级 STTN 且不崩。"""
+    """缺 lama.onnx 时 engine=lama 应降级到 hybrid 路线（STTN 已移除）且不崩。"""
     from pathlib import Path
 
     import inpaint_lama as il
@@ -64,7 +64,7 @@ def test_lama_engine_fallback_without_weights(tmp_path, monkeypatch) -> None:
         engine="lama", demosaic=False, dehardsub=True,
     )
     assert out.is_file()
-    assert res.get("action") in ("sttn_cleanup", "hybrid_cleanup"), res.get("action")
+    assert res.get("action") in ("hybrid_cleanup", "multipass_cleanup"), res.get("action")
 
 
 def test_lama_inpaint_missing_weights_raises(monkeypatch) -> None:

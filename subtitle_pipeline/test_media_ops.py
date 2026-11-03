@@ -108,7 +108,7 @@ def test_normalize_media_opts_postproc_modes() -> None:
     quality = normalize_media_opts({"postproc_mode": "quality"})
     assert quality["postproc_mode"] == "quality"
     assert quality["dehardsub_mode"] == "auto"
-    assert quality["dehardsub_engine"] == "sttn"
+    assert quality["dehardsub_engine"] == "ocr_telea"
     assert quality["dehardsub_passes"] == 1
     assert quality["deblur_demosaic"] is True
     assert quality["dehardsub_polish_residual_floor"] == 1.0
@@ -188,7 +188,7 @@ def test_run_postproc_fast_deblur_uses_ffmpeg_path(tmp_path: Path, monkeypatch) 
 
 
 def test_normalize_media_opts_demosaic_engine() -> None:
-    """锁定 demosaic_engine 透传：真实管线必须能选中 codeformer/sttn。
+    """锁定 demosaic_engine 透传：真实管线必须能选中 codeformer/opencv。
 
     回归：此参数曾只在 run_multipass_cleanup 上存在，media_ops 从未透传，
     导致 CodeFormer 神经去马赛克在真实调用链中永远不可达。
@@ -209,10 +209,10 @@ def test_normalize_media_opts_demosaic_engine() -> None:
         == "opencv"
     )
     assert (
-        normalize_media_opts({"dehardsub_demosaic_engine": "sttn"})[
+        normalize_media_opts({"dehardsub_demosaic_engine": "codeformer"})[
             "dehardsub_demosaic_engine"
         ]
-        == "sttn"
+        == "codeformer"
     )
     assert (
         normalize_media_opts({"dehardsub_demosaic_engine": "LAMA"})[
@@ -1090,7 +1090,7 @@ def test_hybrid_cleanup_skips_polish_when_residual_low(tmp_path: Path, monkeypat
         max_passes=2,
         demosaic=False,
         dehardsub=True,
-        engine="sttn",
+        engine="ocr_telea",
         polish_residual_floor=0.02,
     )
     assert meta["action"] == "hybrid_cleanup"
@@ -1101,121 +1101,3 @@ def test_hybrid_cleanup_skips_polish_when_residual_low(tmp_path: Path, monkeypat
     assert lama_calls == []
 
 
-def test_hybrid_cleanup_uses_active_windows_for_dialogue(tmp_path: Path, monkeypatch) -> None:
-    import shutil
-
-    import media_ops as mo
-    import visual_cleanup as vc
-
-    media = tmp_path / "media"
-    media.mkdir()
-    src = media / "source.mp4"
-    _tiny_mp4(src, seconds=0.6, color="purple")
-    dest = media / "dehardsub" / "clean.mp4"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-
-    monkeypatch.setattr(
-        mo,
-        "resolve_hardsub_boxes",
-        lambda *_args, **_kwargs: [
-            {
-                "box": {"x": 24, "y": 160, "w": 220, "h": 48, "width": 320, "height": 240},
-                "source": "band",
-                "role": "dialogue",
-            }
-        ],
-    )
-    windows_seen: list[tuple[float, float]] = []
-    progress_path = media / "dehardsub" / "dehardsub_progress.json"
-
-    routes_seen: list[str] = []
-
-    def fake_segmented(
-        src_p,
-        out_p,
-        box,
-        *,
-        active_windows,
-        mosaic_boxes=None,
-        dialogue_short_route="auto",
-        progress_path=None,
-    ):
-        windows_seen.extend(active_windows)
-        routes_seen.append(dialogue_short_route)
-        out_p.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src_p, out_p)
-        if progress_path is not None:
-            progress_path.write_text('{"status":"done","completed_windows":2}', encoding="utf-8")
-        return {"engine": "sttn_segments", "frames": 3, "bytes": out_p.stat().st_size}
-
-    monkeypatch.setattr(vc, "_encode_sttn_active_windows", fake_segmented)
-    meta = vc.run_multipass_cleanup(
-        src,
-        dest,
-        work_dir=tmp_path,
-        locate_mode="band",
-        max_passes=1,
-        demosaic=False,
-        dehardsub=True,
-        engine="sttn",
-        active_windows=[(0.5, 1.2), (2.0, 3.1)],
-        dialogue_short_route="flat",
-        progress_path=progress_path,
-    )
-    assert meta["action"] == "hybrid_cleanup"
-    assert dest.is_file()
-    assert meta["encode"]["passes"][0]["engine"] == "sttn_segments"
-    assert windows_seen == [(0.5, 1.2), (2.0, 3.1)]
-    assert routes_seen == ["flat"]
-    assert json.loads(progress_path.read_text(encoding="utf-8"))["status"] == "done"
-
-
-def test_encode_sttn_active_windows_imports_sttn_impl(tmp_path: Path, monkeypatch) -> None:
-    import shutil
-
-    import media_ops as mo
-    import sttn_inpaint as si
-    import visual_cleanup as vc
-
-    media = tmp_path / "media"
-    media.mkdir()
-    src = media / "source.mp4"
-    _tiny_mp4(src, seconds=1.0, color="teal")
-    out = media / "clean.mp4"
-    progress = media / "progress.json"
-    calls: list[tuple[Path, Path]] = []
-
-    monkeypatch.setattr(mo, "find_ffmpeg", lambda: "ffmpeg")
-    monkeypatch.setattr(mo, "probe_duration_sec", lambda _p: 1.0)
-
-    def fake_range(_ffmpeg, src_p, dest_p, *, start, end, vf=None, crf=23, audio_k=128):
-        dest_p.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src_p, dest_p)
-
-    def fake_concat(paths, dest_p):
-        dest_p.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(paths[0], dest_p)
-        return dest_p
-
-    def fake_encode(src_p, dest_p, box, *, mosaic_boxes=None):
-        calls.append((Path(src_p), Path(dest_p)))
-        dest_p.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src_p, dest_p)
-        return {"engine": "sttn", "mode": "temporal_flat", "frames": 3, "bytes": dest_p.stat().st_size}
-
-    monkeypatch.setattr(mo, "_x264_out_range", fake_range)
-    monkeypatch.setattr(mo, "_concat_demuxer", fake_concat)
-    monkeypatch.setattr(si, "encode_sttn", fake_encode)
-    stats = vc._encode_sttn_active_windows(
-        src,
-        out,
-        {"x": 10, "y": 10, "w": 100, "h": 30},
-        active_windows=[(0.1, 0.6)],
-        dialogue_short_route="flat",
-        progress_path=progress,
-    )
-    assert stats is not None
-    assert stats["engine"] == "sttn_segments"
-    assert len(calls) == 1
-    assert out.is_file()
-    assert json.loads(progress.read_text(encoding="utf-8"))["status"] == "done"

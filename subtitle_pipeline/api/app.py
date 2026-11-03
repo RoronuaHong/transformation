@@ -141,6 +141,15 @@ class DiscoverBody(BaseModel):
     mock: bool = False
 
 
+class CrawlerCrawlBody(BaseModel):
+    keyword: str = Field(..., min_length=1, description="搜索关键词 / 创作者 sec_user_id")
+    platforms: str = Field(
+        default="bilibili,douyin",
+        description="逗号分隔：bilibili,douyin（抖音需 DOUYIN_API_BASE 才出数据）",
+    )
+    quota: int = Field(default=10, ge=1, le=50, description="每平台抓取条数上限")
+
+
 class BatchBody(BaseModel):
     fast: bool = True
     limit: int = 1
@@ -172,6 +181,33 @@ def _job_discover(settings: Settings, body: DiscoverBody | None = None) -> dict:
         "discover",
         lambda: discover_main(argv),
     )
+
+
+def _job_crawler(settings: Settings, argv: list[str]) -> dict:
+    from discover.run_discover import main as discover_main
+
+    return run_locked(store(), settings, "crawler", lambda: discover_main(argv))
+
+
+def _set_discover_schedule(enabled: bool) -> bool:
+    """Runtime pause/resume of the daily_discover cron job (optional scheduling)."""
+    if _scheduler is None:
+        return False
+    job = _scheduler.get_job("daily_discover")
+    if job is None:
+        return False
+    if enabled:
+        _scheduler.resume_job("daily_discover")
+    else:
+        _scheduler.pause_job("daily_discover")
+    return True
+
+
+def _discover_enabled() -> bool:
+    if _scheduler is None:
+        return False
+    job = _scheduler.get_job("daily_discover")
+    return job is not None and job.next_run_time is not None
 
 
 def _job_batch(settings: Settings, *, fast: bool, limit: int = 1, requeue: bool = True) -> dict:
@@ -310,6 +346,53 @@ def admin_game_claim(
 def admin_links(limit: int = 100) -> dict:
     sync_links_from_queue(store(), source="sync")
     return {"items": store().list_links(limit=limit)}
+
+
+@app.get("/admin/links", dependencies=[Depends(require_admin)])
+def admin_links(limit: int = 100) -> dict:
+    sync_links_from_queue(store(), source="sync")
+    return {"items": store().list_links(limit=limit)}
+
+
+@app.post("/admin/crawler/crawl", dependencies=[Depends(require_admin)])
+def admin_crawler_crawl(
+    body: CrawlerCrawlBody, background: BackgroundTasks, settings: Settings = Depends(get_settings)
+) -> dict:
+    """Adhoc raw-material crawl: keyword + platforms → discover queue → source_links."""
+    argv = [
+        "--query", body.keyword,
+        "--platforms", body.platforms,
+        "--no-enrich",
+        "--quota", str(body.quota),
+    ]
+    background.add_task(_job_crawler, settings, argv)
+    return {"accepted": True, "action": "crawler", "keyword": body.keyword, "platforms": body.platforms}
+
+
+@app.get("/admin/crawler/links", dependencies=[Depends(require_admin)])
+def admin_crawler_links(limit: int = 100, platform: str | None = None) -> dict:
+    sync_links_from_queue(store(), source="sync")
+    return {"items": store().list_links(limit=limit, platform=platform)}
+
+
+@app.get("/admin/crawler/schedule", dependencies=[Depends(require_admin)])
+def admin_crawler_schedule(settings: Settings = Depends(get_settings)) -> dict:
+    jobs = []
+    if _scheduler is not None:
+        for j in _scheduler.get_jobs():
+            jobs.append({"id": j.id, "next_run": str(j.next_run_time)})
+    return {
+        "schedule_enabled": settings.schedule_enabled,
+        "cron": settings.schedule_discover,
+        "discover_running": _discover_enabled(),
+        "jobs": jobs,
+    }
+
+
+@app.post("/admin/crawler/schedule", dependencies=[Depends(require_admin)])
+def admin_crawler_schedule_set(enabled: bool = True) -> dict:
+    ok = _set_discover_schedule(enabled)
+    return {"ok": ok, "discover_running": _discover_enabled()}
 
 
 @app.get("/admin/logs", dependencies=[Depends(require_admin)])
@@ -1092,7 +1175,7 @@ class DehardsubDetectBody(BaseModel):
 class DehardsubConfirmBody(BaseModel):
     work_dir: str = Field(..., description="work dir relative to downloads/batch")
     boxes: list[dict[str, Any]]
-    engine: str = "sttn"
+    engine: str = "ocr_telea"
     dynamic: list[dict[str, Any]] = Field(
         default_factory=list,
         description="opt-in moving-watermark items (each with trajectory/fps/width/height)",

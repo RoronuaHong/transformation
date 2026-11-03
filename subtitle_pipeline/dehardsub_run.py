@@ -7,9 +7,6 @@
   # 指定字幕带（绕过 VLM），用 OCR 细字形洞 + TELEA
   python dehardsub_run.py --source in.mp4 --band 270,598,712,100
 
-  # GPU 机器上改用 ProPainter 时序修复（解决运动主体涂抹）
-  python dehardsub_run.py --source in.mp4 --engine propainter
-
 输出：<src_stem>_dehardsub.mp4（去字幕成品）、同名 + _compare.mp4（左右对比）。
 """
 from __future__ import annotations
@@ -40,11 +37,13 @@ def main(argv=None):
     ap.add_argument("--source", required=True, help="源视频路径")
     ap.add_argument("--out", default=None, help="成品路径（默认 <src>_dehardsub.mp4）")
     ap.add_argument("--engine", default=None,
-                    help="去字引擎：auto/ocr_telea/propainter/sttn/... 默认 auto（B站→ocr_telea）")
+                    help="去字引擎：auto/ocr_telea/... 默认 auto（B站→ocr_telea）；sttn/propainter 已移除")
     ap.add_argument("--band", default=None,
                     help="字幕带坐标 x,y,w,h；给定则绕过 VLM 直接用它")
     ap.add_argument("--locate-mode", default="band", help="无 --band 时的定位模式（默认 band）")
     ap.add_argument("--no-compare", action="store_true", help="不生成对比视频")
+    ap.add_argument("--no-brightness", action="store_true",
+                    help="关掉亮度白字兜底(仅用 OCR 细字形洞)；底部有白色场景(米饭/盘子)的视频用，避免误遮成大块糊斑")
     args = ap.parse_args(argv)
 
     src = Path(args.source)
@@ -62,6 +61,7 @@ def main(argv=None):
         locate_mode=args.locate_mode,
         boxes_override=boxes_override,
         demosaic=False,
+        ocr_use_brightness=not args.no_brightness,
     )
     print(f"[dehardsub_run] pipeline action={res.get('action')} engine={res.get('engine')}", flush=True)
 

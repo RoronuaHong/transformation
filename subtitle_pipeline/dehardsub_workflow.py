@@ -29,7 +29,7 @@ def _cmd_detect(work: Path) -> None:
     print("then: python dehardsub_workflow.py confirm <work_dir>")
 
 
-def _cmd_confirm(work: Path, *, engine: str = "sttn") -> int:
+def _cmd_confirm(work: Path, *, engine: str = "auto") -> int:
     rj = job_dehardsub_dir(work) / "dehardsub_regions.json"
     if not rj.is_file():
         print("no dehardsub_regions.json — run detect first", file=sys.stderr)
@@ -60,7 +60,7 @@ def main() -> None:
         _cmd_detect(work)
         return
     if cmd in ("confirm", "run", "r", "process", "p"):
-        engine = sys.argv[3] if len(sys.argv) > 3 else "sttn"
+        engine = sys.argv[3] if len(sys.argv) > 3 else "auto"
         raise SystemExit(_cmd_confirm(work, engine=engine))
     print(__doc__)
 

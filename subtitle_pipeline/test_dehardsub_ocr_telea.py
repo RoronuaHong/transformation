@@ -112,18 +112,7 @@ def test_bilibili_source_defaults_to_ocr_telea():
         "downloads/batch/bilibili_BV1oFJ16BEMT/media/source.mp4") == "ocr_telea"
     assert _default_dehardsub_engine_for("some_bv1abc_clip.mp4") == "ocr_telea"
     assert _default_dehardsub_engine_for(
-        "downloads/batch/youtube_abc/media/source.mp4") == "sttn"
-
-
-def test_propainter_engine_wired_and_graceful():
-    # 引擎已接入；无 GPU 环境应优雅抛 PropainterUnavailable（由管线捕获降级到 sttn）。
-    try:
-        from propainter_inpaint import PropainterUnavailable, inpaint_video
-    except Exception as e:  # pragma: no cover
-        pytest.skip(f"propainter_inpaint unavailable: {e}")
-
-    with pytest.raises(PropainterUnavailable):
-        inpaint_video("nonexistent.mp4", "out.mp4", {"x": 0, "y": 0, "w": 10, "h": 10})
+        "downloads/batch/youtube_abc/media/source.mp4") == "ocr_telea"
 
 
 def test_run_script_end_to_end(tmp_path):

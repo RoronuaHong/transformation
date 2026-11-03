@@ -37,6 +37,11 @@ class MemoryStore(MongoStore):
                 "original_url": original,
                 "canonical_url": doc.get("canonical_url") or original,
                 "title": doc.get("title"),
+                "author": doc.get("author"),
+                "author_id": doc.get("author_id"),
+                "published_at": doc.get("published_at"),
+                "thumb_url": doc.get("thumb_url"),
+                "views": doc.get("views"),
                 "topic_id": doc.get("topic_id"),
                 "status": doc.get("status"),
                 "source": doc.get("source") or "pipeline",
@@ -45,8 +50,10 @@ class MemoryStore(MongoStore):
         )
         self._links[key] = prev
 
-    def list_links(self, *, limit: int = 100) -> list[dict]:
+    def list_links(self, *, limit: int = 100, platform: str | None = None) -> list[dict]:
         rows = list(self._links.values())
+        if platform:
+            rows = [r for r in rows if r.get("platform") == platform]
         rows.sort(key=lambda d: d.get("updated_at") or 0, reverse=True)
         return rows[:limit]
 

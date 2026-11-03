@@ -733,7 +733,7 @@ def _process_media_only(
             vlm_model=str(opts.get("dehardsub_vlm_model") or ""),
             passes=int(opts.get("dehardsub_passes") or 2),
             demosaic=bool(opts.get("dehardsub_demosaic", True)),
-            engine=str(opts.get("dehardsub_engine") or "sttn"),
+            engine=str(opts.get("dehardsub_engine") or "ocr_telea"),
         )
     if "frames" in enabled or "clips" in enabled:
         summary = _attach_job_media(

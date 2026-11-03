@@ -23,4 +23,8 @@ def get_adapter(platform: str) -> Adapter:
         from .bilibili import BilibiliAdapter
 
         return BilibiliAdapter()
+    if plat == "douyin":
+        from .douyin import DouyinAdapter
+
+        return DouyinAdapter()
     raise ValueError(f"unsupported platform (deferred or unknown): {platform}")

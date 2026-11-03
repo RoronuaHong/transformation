@@ -77,13 +77,16 @@ def lama_inpaint(frame_bgr: np.ndarray, mask_u8: np.ndarray) -> np.ndarray:
     H, W = frame_bgr.shape[:2]
     img = cv2.resize(frame_bgr, (LAMA_SIZE, LAMA_SIZE), interpolation=cv2.INTER_AREA)
     m = cv2.resize(mask_u8, (LAMA_SIZE, LAMA_SIZE), interpolation=cv2.INTER_NEAREST)
+    # 2026-11-02 探针矩阵定案: 该导出要求 image=0-1(RGB), mask=0/1(1=洞), 但【输出是 0-255】。
+    # 旧封装输入正确、却把输出当 0-1 截断再×255 → 洞内变饱和黑白垃圾(用户所见"字幕变黑")。
+    # 中间误改过 image=0-255 喂入——模型在真实内容上会产生白色网点垃圾填充, 同样错误。
     img_blob = (
         (img.astype(np.float32) / 255.0)[..., ::-1].transpose(2, 0, 1)[None]
-    )  # BGR->RGB, [1,3,512,512]
-    mask_blob = (m.astype(np.float32) / 255.0)[None, None]  # [1,1,512,512]
-    out = _run_sess(sess, img_blob, mask_blob)[0]  # [3,512,512]
-    out = np.clip(out, 0.0, 1.0)
-    out = (out.transpose(1, 2, 0)[..., ::-1] * 255.0).astype(np.uint8)  # RGB->BGR
+    )  # BGR->RGB, [1,3,512,512], 0-1
+    mask_blob = (m.astype(np.float32) / 255.0)[None, None]  # [1,1,512,512], 0/1, 1=待修复
+    out = _run_sess(sess, img_blob, mask_blob)[0]  # [3,512,512], 0-255
+    out = np.clip(out, 0.0, 255.0)
+    out = out.transpose(1, 2, 0)[..., ::-1].astype(np.uint8)  # RGB->BGR
     if out.shape[:2] != (H, W):
         out = cv2.resize(out, (W, H), interpolation=cv2.INTER_LANCZOS4)
     # 只在 mask 区域采用（软边缘羽化，避免接缝）

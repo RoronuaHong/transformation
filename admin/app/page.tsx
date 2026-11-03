@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { adminFetch, getToken, setToken } from "@/lib/api";
 
-type Tab = "status" | "links" | "logs" | "alerts" | "run";
+type Tab = "status" | "links" | "logs" | "alerts" | "run" | "crawler";
 
 export default function AdminHome() {
   const [token, setTok] = useState("");
@@ -13,6 +13,16 @@ export default function AdminHome() {
   const [err, setErr] = useState("");
   const [data, setData] = useState<unknown>(null);
   const [url, setUrl] = useState("");
+
+  // 爬虫页状态
+  const [crawlerKeyword, setCrawlerKeyword] = useState("");
+  const [crawlerPlats, setCrawlerPlats] = useState<{ bilibili: boolean; douyin: boolean }>({
+    bilibili: true,
+    douyin: true,
+  });
+  const [crawlerQuota, setCrawlerQuota] = useState(10);
+  const [crawlerLinks, setCrawlerLinks] = useState<Record<string, unknown>[]>([]);
+  const [crawlerSchedule, setCrawlerSchedule] = useState<unknown>(null);
 
   useEffect(() => {
     if (getToken()) setAuthed(true);
@@ -37,6 +47,18 @@ export default function AdminHome() {
     }
   }, []);
 
+  const loadCrawler = useCallback(async () => {
+    setErr("");
+    try {
+      const links = await adminFetch("/admin/crawler/links?limit=100");
+      setCrawlerLinks((links as { items: Record<string, unknown>[] }).items || []);
+      const sch = await adminFetch("/admin/crawler/schedule");
+      setCrawlerSchedule(sch);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
   async function login(e: React.FormEvent) {
     e.preventDefault();
     setToken(token);
@@ -53,6 +75,41 @@ export default function AdminHome() {
       });
       setMsg(JSON.stringify(json));
       await load(tab === "run" ? "status" : tab);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function crawlNow() {
+    setErr("");
+    setMsg("");
+    const plats = Object.entries(crawlerPlats)
+      .filter(([, v]) => v)
+      .map(([k]) => k)
+      .join(",");
+    if (!crawlerKeyword.trim() || !plats) {
+      setErr("请填写关键词并至少选择一个平台");
+      return;
+    }
+    try {
+      const json = await adminFetch("/admin/crawler/crawl", {
+        method: "POST",
+        body: JSON.stringify({ keyword: crawlerKeyword.trim(), platforms: plats, quota: crawlerQuota }),
+      });
+      setMsg(JSON.stringify(json));
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+      return;
+    }
+    // 后台抓取，稍后自动刷新结果
+    setTimeout(() => void loadCrawler(), 5000);
+  }
+
+  async function toggleSchedule(on: boolean) {
+    setErr("");
+    try {
+      const j = await adminFetch(`/admin/crawler/schedule?enabled=${on}`, { method: "POST" });
+      setCrawlerSchedule(j);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     }
@@ -92,16 +149,17 @@ export default function AdminHome() {
         API 文档：<a href="http://127.0.0.1:8901/admin/docs">:8901/admin/docs</a>
       </p>
       <nav className="tabs">
-        {(["status", "links", "logs", "alerts", "run"] as Tab[]).map((t) => (
+        {(["status", "links", "logs", "alerts", "run", "crawler"] as Tab[]).map((t) => (
           <button
             key={t}
             className={tab === t ? "on" : ""}
             onClick={() => {
               setTab(t);
-              if (t !== "run") void load(t);
+              if (t === "crawler") void loadCrawler();
+              else if (t !== "run") void load(t);
             }}
           >
-            {t === "status" ? "状态" : t === "links" ? "原始链接" : t === "logs" ? "日志" : t === "alerts" ? "告警" : "触发任务"}
+            {t === "status" ? "状态" : t === "links" ? "原始链接" : t === "logs" ? "日志" : t === "alerts" ? "告警" : t === "crawler" ? "爬虫" : "触发任务"}
           </button>
         ))}
       </nav>
@@ -223,6 +281,96 @@ export default function AdminHome() {
               <button type="submit">inbox</button>
             </div>
           </form>
+        </div>
+      ) : null}
+
+      {tab === "crawler" ? (
+        <div className="card">
+          <p className="muted">
+            原素材爬取：按关键词从 B站 / 抖音 抓取视频链接，落 source_links（可进后续加工流水线）。
+            抖音反爬强，需配置 <code>DOUYIN_API_BASE</code> 指向开源解析服务（如
+            Evil0ctal/Douyin_TikTok_Download_API）才有数据。
+          </p>
+          <div className="row">
+            <input
+              value={crawlerKeyword}
+              onChange={(e) => setCrawlerKeyword(e.target.value)}
+              placeholder="关键词，或抖音 sec_user_id"
+            />
+            <label>
+              <input
+                type="checkbox"
+                checked={crawlerPlats.bilibili}
+                onChange={(e) => setCrawlerPlats((p) => ({ ...p, bilibili: e.target.checked }))}
+              />
+              B站
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={crawlerPlats.douyin}
+                onChange={(e) => setCrawlerPlats((p) => ({ ...p, douyin: e.target.checked }))}
+              />
+              抖音
+            </label>
+            <input
+              type="number"
+              value={crawlerQuota}
+              min={1}
+              max={50}
+              onChange={(e) => setCrawlerQuota(Number(e.target.value) || 10)}
+              style={{ width: 70 }}
+            />
+            <button type="button" onClick={() => void crawlNow()}>立即抓取</button>
+            <button type="button" onClick={() => void loadCrawler()}>刷新结果</button>
+          </div>
+
+          {crawlerSchedule && typeof crawlerSchedule === "object" ? (
+            <div className="row" style={{ marginTop: 12 }}>
+              <span className="muted">
+                定时发现：cron {String((crawlerSchedule as { cron?: string }).cron)} ·
+                {String((crawlerSchedule as { discover_running?: boolean }).discover_running) === "true"
+                  ? " 已启用"
+                  : " 已暂停"}
+              </span>
+              {String((crawlerSchedule as { discover_running?: boolean }).discover_running) === "true" ? (
+                <button type="button" onClick={() => void toggleSchedule(false)}>暂停定时</button>
+              ) : (
+                <button type="button" onClick={() => void toggleSchedule(true)}>启用定时</button>
+              )}
+            </div>
+          ) : null}
+
+          <table style={{ marginTop: 16 }}>
+            <thead>
+              <tr>
+                <th>标题</th>
+                <th>平台</th>
+                <th>作者</th>
+                <th>链接</th>
+                <th>状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              {crawlerLinks.map((row) => (
+                <tr key={String(row.video_id)}>
+                  <td>{String(row.title || "").slice(0, 60)}</td>
+                  <td>{String(row.platform)}</td>
+                  <td>{String(row.author || "")}</td>
+                  <td>
+                    <a
+                      href={String(row.canonical_url || row.original_url || "")}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      {String(row.video_id)}
+                    </a>
+                  </td>
+                  <td>{String(row.status || "")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       ) : null}
     </div>

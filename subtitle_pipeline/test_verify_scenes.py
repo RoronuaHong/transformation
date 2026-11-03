@@ -105,7 +105,7 @@ def test_sttn_e2e_sub_removed_size_stable(tmp_path) -> None:
     _make_sample(src, "sub")
     out = tmp_path / "o.mp4"
     res = run_multipass_cleanup(src, out, work_dir=tmp_path / "w",
-                                locate_mode="band", engine="sttn",
+                                locate_mode="band", engine="ocr_telea",
                                 demosaic=False, dehardsub=True)
     assert out.is_file()
 
@@ -138,7 +138,7 @@ def test_sttn_e2e_sub_removed_size_stable(tmp_path) -> None:
 
 
 def test_demosaic_combined_and_lama_fallback(tmp_path, monkeypatch) -> None:
-    """合一路（demosaic_engine=sttn）与 lama 缺权重降级两分支回归锁。"""
+    """合一路（demosaic_engine=lama）与 lama 缺权重降级两分支回归锁。"""
     from pathlib import Path
 
     import inpaint_lama as il
@@ -148,11 +148,11 @@ def test_demosaic_combined_and_lama_fallback(tmp_path, monkeypatch) -> None:
     _make_sample(src, "both")
     out1 = tmp_path / "o1.mp4"
     r1 = run_multipass_cleanup(src, out1, work_dir=tmp_path / "w1",
-                               locate_mode="band", engine="sttn",
+                               locate_mode="band", engine="ocr_telea",
                                demosaic=True, dehardsub=True,
-                               demosaic_engine="sttn")
+                               demosaic_engine="lama")
     assert out1.is_file()
-    assert r1.get("mosaic_engine") == "sttn"
+    assert r1.get("mosaic_engine") == "lama"
     assert len(r1.get("mosaic_regions") or []) >= 1
 
     monkeypatch.setattr(il, "LAMA_WEIGHTS", Path("/nonexistent/lama.onnx"))
@@ -162,4 +162,4 @@ def test_demosaic_combined_and_lama_fallback(tmp_path, monkeypatch) -> None:
                                locate_mode="band", engine="lama",
                                demosaic=False, dehardsub=True)
     assert out2.is_file()
-    assert r2.get("action") in ("sttn_cleanup", "hybrid_cleanup"), "缺 lama.onnx 应降级 STTN"
+    assert r2.get("action") in ("hybrid_cleanup", "multipass_cleanup"), "缺 lama.onnx 应降级 hybrid 路线"

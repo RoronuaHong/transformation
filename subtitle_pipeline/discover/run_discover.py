@@ -25,12 +25,13 @@ from discover.topics_loader import load_topics
 def _parse_platforms(s: str | None) -> list[str]:
     if not s:
         return ["youtube", "bilibili"]
+    allowed = ("youtube", "bilibili", "douyin")
     out: list[str] = []
     for part in s.split(","):
         p = part.strip().lower()
-        if p in ("youtube", "bilibili"):
+        if p in allowed:
             out.append(p)
-        elif p in ("douyin", "kuaishou"):
+        elif p == "kuaishou":
             print(f"[warn] platform deferred, skip: {p}", file=sys.stderr)
     return out or ["youtube", "bilibili"]
 

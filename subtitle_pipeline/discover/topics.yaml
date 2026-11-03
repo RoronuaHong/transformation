@@ -6,7 +6,7 @@
 
 topics:
   - id: home_tips
-    daily: false
+    daily: true
     locales_title:
       zh: 居家小技巧
       en: Home Tips
@@ -20,6 +20,7 @@ topics:
     min_views:
       youtube: 0
       bilibili: 0
+      douyin: 0
     sources:
       - search
     keywords:
@@ -34,10 +35,17 @@ topics:
         - 收纳教程
         - 厨房清洁
         - 卫生间收纳
+      douyin:
+        - 居家收纳
+        - 收纳教程
+        - 厨房清洁
+        - 卫生间好物
     platforms:
       - youtube
       - bilibili
+      - douyin
     exclude_authors: []
     seed_channels:
       youtube: []
       bilibili: []
+      douyin: []

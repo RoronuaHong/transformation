@@ -36,19 +36,20 @@ CAPTION_SCAN_HIT = 0.28
 DENSE_COVERAGE_FULL = float(os.environ.get("VITUAL_CAPTION_FULL_COVERAGE", "0.75") or 0.75)
 HARDSUB_VLM_MODEL = os.environ.get("VITUAL_DEHARDSUB_VLM", "gemma4:e2b")
 DEHARDSUB_MODES = ("auto", "vlm", "band", "delogo", "fill", "crop")
-DEHARDSUB_ENGINES = ("sttn", "opencv", "lama", "propainter", "diffusion", "ocr_telea")
+DEHARDSUB_ENGINES = ("opencv", "lama", "diffusion", "ocr_telea")
 POSTPROC_MODES = ("fast", "balanced", "quality")
 DEFAULT_DEHARDSUB_ENGINE = (
-    str(os.environ.get("VITUAL_DEHARDSUB_ENGINE", "sttn") or "sttn").strip().lower()
+    str(os.environ.get("VITUAL_DEHARDSUB_ENGINE", "ocr_telea") or "ocr_telea").strip().lower()
 )
 
 
 def _default_dehardsub_engine_for(src) -> str:
     """来源判定默认去字幕引擎。
 
-    B站 任务（路径含 bilibili / BV号 / b23）默认走 ``ocr_telea``（白字硬字幕首选路线，
-    避免 STTN tiles 平灰块）；其余沿用全局默认（默认 sttn）。作用域限定在 B站，
-    不影响其它内容的全局默认。
+    B站 任务（路径含 bilibili / BV号 / b23）走 ``ocr_telea``（白字硬字幕首选路线，
+    避免 STTN tiles 平灰块）。其余内容沿用全局默认（现已是 ``ocr_telea``，
+    2026-10-22 起定为默认首选：OCR 细字形洞 + TELEA 逐帧填充，优于 STTN 平灰块）。
+    STTN 已彻底移除（不再有任何引擎/回退路径）。
     """
     s = str(src).lower().replace("\\", "/")
     if "bilibili" in s or "bv1" in s or "b23" in s:
@@ -57,10 +58,9 @@ def _default_dehardsub_engine_for(src) -> str:
 DEFAULT_CLEAN_PASSES = max(1, int(os.environ.get("VITUAL_CLEAN_PASSES", "2") or 2))
 # 去马赛克引擎：
 #   lama（优先通用）= LaMa ONNX 单帧填洞（身体/屏幕/文字块/任意马赛克）
-#   sttn（默认回退）= 马赛克区当 STTN 时序洞（有权重即可）
 #   codeformer = 仅人脸 ROI
 #   opencv = 中值/inpaint 兜底
-DEMOSAIC_ENGINES = ("opencv", "codeformer", "sttn", "lama")
+DEMOSAIC_ENGINES = ("opencv", "codeformer", "lama")
 DEFAULT_DEMOSAIC_ENGINE = (
     str(os.environ.get("VITUAL_DEMOSAIC_ENGINE", "lama") or "lama").strip().lower()
 )
@@ -148,7 +148,7 @@ def _mode_default(src: dict[str, Any], mode: str, key: str, default: Any) -> Any
             "dehardsub_mode": "band",
             "dehardsub_passes": 1,
             "dehardsub_demosaic": False,
-            "dehardsub_engine": "sttn",
+            "dehardsub_engine": "ocr_telea",
             "deblur_demosaic": False,
                 "dehardsub_polish_residual_floor": 0.02,
                 "dehardsub_dialogue_short_route": "flat",
@@ -158,7 +158,7 @@ def _mode_default(src: dict[str, Any], mode: str, key: str, default: Any) -> Any
             "dehardsub_mode": "auto",
             "dehardsub_passes": 1,
             "dehardsub_demosaic": True,
-            "dehardsub_engine": "sttn",
+            "dehardsub_engine": "ocr_telea",
             "deblur_demosaic": True,
             # Skip eager LaMa residual polish (CPU/GPU full-pass hours); edgefill covers watermark.
             "dehardsub_polish_residual_floor": 1.0,
@@ -236,7 +236,7 @@ def normalize_media_opts(raw: dict | None = None) -> dict[str, Any]:
         or DEFAULT_DEHARDSUB_ENGINE
     ).strip().lower()
     if dehardsub_engine not in DEHARDSUB_ENGINES:
-        dehardsub_engine = "sttn"
+        dehardsub_engine = "ocr_telea"
     dialogue_short_route = str(
         _mode_default(src, postproc_mode, "dehardsub_dialogue_short_route", "auto") or "auto"
     ).strip().lower()
@@ -2457,10 +2457,11 @@ def strip_hardsubs(
     """Remove burned-in captions (+ optional mosaic) — keep full frame.
 
     ``mode``:
-      - auto (default): STTN inpaint of the located caption box (no glyph mask)
-      - vlm / band: same STTN path; locate via VLM or bright-band
-      - delogo / fill / crop: legacy single-pass paths
-    ``engine``: ``sttn`` (default) or ``opencv`` (legacy glyph fill, tests only).
+      - auto (default): 逐框路由（字形洞 + 中值板 clean plate + OCR+TELEA），不依赖 STTN
+      - vlm / band: 同上路由；定位经 VLM 或亮带
+      - delogo / fill / crop: legacy 单遍路径
+    ``engine``: ``ocr_telea``（默认首选）或 ``opencv``/``lama``/``diffusion``。
+    STTN 与 ProPainter 已移除，只保留 ocr_telea/LaMa 路线。
     """
     from note_frames import existing_source_video
 
@@ -2481,7 +2482,7 @@ def strip_hardsubs(
     max_passes = DEFAULT_CLEAN_PASSES if passes is None else max(1, min(6, int(passes)))
     engine_s = (engine or _default_dehardsub_engine_for(src)).strip().lower()
     if engine_s not in DEHARDSUB_ENGINES:
-        engine_s = "sttn"
+        engine_s = "ocr_telea"
     demosaic_engine_s = (demosaic_engine or DEFAULT_DEMOSAIC_ENGINE).strip().lower()
     if demosaic_engine_s not in DEMOSAIC_ENGINES:
         demosaic_engine_s = "lama"
@@ -4220,7 +4221,7 @@ def demosaic_video(
         max_passes=max_passes,
         demosaic=True,
         dehardsub=False,
-        engine="sttn",
+        engine="ocr_telea",
         demosaic_engine=engine,
     )
     meta_path = dest.with_name("demosaic_meta.json")

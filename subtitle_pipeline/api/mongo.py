@@ -59,6 +59,11 @@ class MongoStore:
                     "canonical_url": canonical,
                     "url": canonical,
                     "title": doc.get("title"),
+                    "author": doc.get("author"),
+                    "author_id": doc.get("author_id"),
+                    "published_at": doc.get("published_at"),
+                    "thumb_url": doc.get("thumb_url"),
+                    "views": doc.get("views"),
                     "topic_id": doc.get("topic_id"),
                     "status": doc.get("status"),
                     "source": doc.get("source") or "pipeline",
@@ -69,8 +74,11 @@ class MongoStore:
             upsert=True,
         )
 
-    def list_links(self, *, limit: int = 100) -> list[dict[str, Any]]:
-        return [_oid(d) for d in self.links.find().sort("updated_at", DESCENDING).limit(limit)]
+    def list_links(self, *, limit: int = 100, platform: str | None = None) -> list[dict[str, Any]]:
+        q: dict[str, Any] = {}
+        if platform:
+            q["platform"] = platform
+        return [_oid(d) for d in self.links.find(q).sort("updated_at", DESCENDING).limit(limit)]
 
     def write_log(
         self,

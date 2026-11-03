@@ -526,190 +526,6 @@ def _window_coverage(windows: list[tuple[float, float]]) -> float:
     return sum(max(0.0, float(end) - float(start)) for start, end in windows)
 
 
-def _encode_sttn_active_windows(
-    src: Path,
-    dest: Path,
-    box: dict[str, int],
-    *,
-    active_windows: list[tuple[float, float]],
-    mosaic_boxes: list[dict[str, int]] | None = None,
-    dialogue_short_route: str = "auto",
-    progress_path: Path | None = None,
-) -> dict[str, Any] | None:
-    """Run STTN only on active subtitle windows, then concat with keep segments."""
-    from sttn_inpaint import encode_sttn as _encode_sttn_impl
-
-    mops = _media()
-    src = Path(src)
-    dest = Path(dest)
-    duration = float(mops.probe_duration_sec(src) or 0.0)
-    if duration <= 0.1 or not active_windows or mosaic_boxes:
-        return None
-    windows = [
-        (max(0.0, float(start)), min(duration, float(end)))
-        for start, end in active_windows
-        if float(end) - float(start) > 0.05
-    ]
-    # P0.6: snap window edges to keyframes so clean (non-subtitle) segments can be
-    # stream-copied pixel-losslessly; fall back to crf16 when keyframes/format unavailable.
-    use_copy = False
-    ffmpeg = mops.find_ffmpeg()
-    keyframes = mops._keyframe_times(ffmpeg, src)
-    if keyframes and mops._video_pix_fmt(ffmpeg, src) == "yuv420p":
-        kf = sorted(keyframes)
-        def _down(t: float) -> float:
-            return max([x for x in kf if x <= t] + [0.0])
-        def _up(t: float) -> float:
-            return min([x for x in kf if x >= t] + [duration])
-        snapped = [(max(0.0, _down(s)), min(duration, _up(e))) for s, e in windows]
-        merged: list[tuple[float, float]] = []
-        for s, e in snapped:
-            if merged and s <= merged[-1][1] + 0.05:
-                merged[-1] = (merged[-1][0], max(merged[-1][1], e))
-            else:
-                merged.append((s, e))
-        windows = merged
-        use_copy = True
-    covered = _window_coverage(windows)
-    if not windows or covered >= duration * 0.85:
-        return None
-    seg_dir = dest.parent / "_sttn_segments"
-    seg_dir.mkdir(parents=True, exist_ok=True)
-    for old in seg_dir.glob("*.mp4"):
-        old.unlink(missing_ok=True)
-    pieces: list[Path] = []
-    seg_stats: list[dict[str, Any]] = []
-    cursor = 0.0
-    idx = 0
-    if progress_path is not None:
-        mops._write_meta(
-            progress_path,
-            {
-                "kind": "dehardsub_active_windows",
-                "status": "running",
-                "window_count": len(windows),
-                "window_coverage_sec": round(covered, 3),
-                "window_total_sec": round(duration, 3),
-                "completed_windows": 0,
-                "current_window": None,
-                "segments": [],
-            },
-        )
-    for start, end in windows:
-        if start > cursor + 0.05:
-            keep = seg_dir / f"{idx:03d}_keep.mp4"
-            if use_copy:
-                mops._x264_out_range(ffmpeg, src, keep, start=cursor, end=start, vf=None, crf=16, copy_video=True)
-            else:
-                mops._x264_out_range(ffmpeg, src, keep, start=cursor, end=start, vf=None, crf=16)
-            pieces.append(keep)
-            idx += 1
-        hot_src = seg_dir / f"{idx:03d}_hot_src.mp4"
-        hot_out = seg_dir / f"{idx:03d}_hot_clean.mp4"
-        mops._x264_out_range(ffmpeg, src, hot_src, start=start, end=end, vf=None, crf=18)
-        # Prefer classify-forced route already in env; short-route is a speed hint
-        # only when FORCE is still auto (do not override tiles→flat).
-        env_force = (os.environ.get("VITUAL_STTN_FORCE") or "auto").strip().lower()
-        route = (dialogue_short_route or "auto").strip().lower()
-        forced_route = None
-        if env_force in ("auto", "") and route in ("flat", "tiles") and (end - start) <= 4.0:
-            forced_route = route
-        print(
-            f"[cleanup] active-window {len(seg_stats)+1}/{len(windows)} "
-            f"start={start:.3f} end={end:.3f} dur={end-start:.3f} "
-            f"route={forced_route or env_force or 'auto'}",
-            flush=True,
-        )
-        seg_started = time.perf_counter()
-        if progress_path is not None:
-            mops._write_meta(
-                progress_path,
-                {
-                    "kind": "dehardsub_active_windows",
-                    "status": "running",
-                    "window_count": len(windows),
-                    "window_coverage_sec": round(covered, 3),
-                    "window_total_sec": round(duration, 3),
-                    "completed_windows": len(seg_stats),
-                    "current_window": {
-                        "index": len(seg_stats) + 1,
-                        "start": round(start, 3),
-                        "end": round(end, 3),
-                        "duration": round(end - start, 3),
-                        "route": forced_route or env_force or "auto",
-                    },
-                    "segments": seg_stats,
-                },
-            )
-        env_prev = os.environ.get("VITUAL_STTN_FORCE")
-        if forced_route is not None:
-            os.environ["VITUAL_STTN_FORCE"] = forced_route
-        try:
-            stats = _encode_sttn_impl(hot_src, hot_out, box, mosaic_boxes=None)
-        finally:
-            if forced_route is not None:
-                if env_prev is None:
-                    os.environ.pop("VITUAL_STTN_FORCE", None)
-                else:
-                    os.environ["VITUAL_STTN_FORCE"] = env_prev
-        stats = dict(stats)
-        stats["start"] = round(start, 3)
-        stats["end"] = round(end, 3)
-        stats["elapsed_sec"] = round(time.perf_counter() - seg_started, 3)
-        if forced_route is not None:
-            stats["forced_route"] = forced_route
-        seg_stats.append(stats)
-        if progress_path is not None:
-            mops._write_meta(
-                progress_path,
-                {
-                    "kind": "dehardsub_active_windows",
-                    "status": "running",
-                    "window_count": len(windows),
-                    "window_coverage_sec": round(covered, 3),
-                    "window_total_sec": round(duration, 3),
-                    "completed_windows": len(seg_stats),
-                    "current_window": None,
-                    "segments": seg_stats,
-                },
-            )
-        pieces.append(hot_out)
-        idx += 1
-        cursor = end
-    if cursor < duration - 0.05:
-        tail = seg_dir / f"{idx:03d}_keep.mp4"
-        if use_copy:
-            mops._x264_out_range(ffmpeg, src, tail, start=cursor, end=duration, vf=None, crf=16, copy_video=True)
-        else:
-            mops._x264_out_range(ffmpeg, src, tail, start=cursor, end=duration, vf=None, crf=16)
-        pieces.append(tail)
-    mops._concat_demuxer(pieces, dest)
-    if progress_path is not None:
-        mops._write_meta(
-            progress_path,
-            {
-                "kind": "dehardsub_active_windows",
-                "status": "done",
-                "window_count": len(windows),
-                "window_coverage_sec": round(covered, 3),
-                "window_total_sec": round(duration, 3),
-                "completed_windows": len(seg_stats),
-                "current_window": None,
-                "segments": seg_stats,
-            },
-        )
-    return {
-        "engine": "sttn_segments",
-        "segments": seg_stats,
-        "window_count": len(windows),
-        "copy_clean": use_copy,
-        "window_coverage_sec": round(covered, 3),
-        "window_total_sec": round(duration, 3),
-        "frames": int(sum(int(s.get("frames") or 0) for s in seg_stats)),
-        "device": seg_stats[0].get("device") if seg_stats else "cpu",
-        "bytes": dest.stat().st_size if dest.is_file() else 0,
-    }
-
 
 def _collect_mosaic_regions(video: Path, *, samples: int = 5) -> list[dict[str, Any]]:
     import cv2
@@ -1547,7 +1363,7 @@ def run_multipass_cleanup(
     residual_ok: float = DEFAULT_RESIDUAL_OK,
     demosaic: bool = True,
     dehardsub: bool = True,
-    engine: str = "sttn",
+    engine: str = "ocr_telea",
     demosaic_engine: str = "opencv",
     mosaic_boxes: list[dict[str, int]] | None = None,
     polish_residual_floor: float = DEFAULT_RESIDUAL_OK,
@@ -1555,8 +1371,9 @@ def run_multipass_cleanup(
     dialogue_short_route: str = "auto",
     progress_path: Path | None = None,
     boxes_override: list[dict] | None = None,
+    ocr_use_brightness: bool = True,
 ) -> dict[str, Any]:
-    """Locate caption box → STTN (default) or OpenCV fill; optional mosaic pass."""
+    """Locate caption box → 逐框路由（字形洞 + 中值板 clean plate + 纹理对话走 OCR+TELEA）；optional mosaic pass."""
     src = Path(src)
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1568,7 +1385,7 @@ def run_multipass_cleanup(
     model = (vlm_model or mops.HARDSUB_VLM_MODEL).strip() or mops.HARDSUB_VLM_MODEL
     regions: list[dict[str, Any]] = []
 
-    engine_s = (engine or "sttn").strip().lower()
+    engine_s = (engine or "ocr_telea").strip().lower()
     locate_meta: dict[str, Any] = {}
     box: dict[str, Any] | None = None
     hardsub_boxes: list[dict[str, int]] = []
@@ -1598,14 +1415,8 @@ def run_multipass_cleanup(
         located = located_list[0]
         for loc in located_list:
             b = loc["box"]
-            # Always pad/clamp dialogue boxes — STTN used to skip refine and kept
-            # fat locate bands that forced tiles / smear.
-            if engine_s == "sttn" and (loc.get("role") or "dialogue") == "dialogue":
-                b = mops.clamp_hardsub_box(
-                    b, width, height, zone="bottom", max_h_ratio=0.14, max_h_px=160
-                )
-            else:
-                b = mops.refine_hardsub_box_glyphs(src, width, height, b)
+            # 对话框始终用字形精修（STTN 已移除，不再走 clamp 旧分支）。
+            b = mops.refine_hardsub_box_glyphs(src, width, height, b)
             hardsub_boxes.append({k: int(b[k]) for k in ("x", "y", "w", "h")})
             regions.append(
                 {
@@ -1784,65 +1595,8 @@ def run_multipass_cleanup(
             **locate_meta,
         }
 
-    if engine_s == "ocr_telea" and dehardsub:
-        # OCR 细字形洞 + TELEA 逐帧去字幕（B站白字硬字幕首选路线，避免 STTN tiles 平灰块）。
-        # 自带逐帧 OCR，无需 box；watermark=None 走角部常驻 logo 自动探测。
-        try:
-            from dehardsub_ocr_telea import run as _ocr_telea_run, DEFAULT_BAND as _DEF_BAND
-        except ImportError:
-            _ocr_telea_run = None  # type: ignore[assignment]
-        if _ocr_telea_run is not None:
-            try:
-                ocr_stats = _ocr_telea_run(
-                    src, dest,
-                    band=box if box else _DEF_BAND,
-                    watermark=None,
-                )
-                return {
-                    "action": "ocr_telea_cleanup",
-                    "engine": "ocr_telea",
-                    "passes": [{"pass": 1, "encode": ocr_stats}],
-                    "pass_count": 1,
-                    "regions": regions,
-                    "mosaic_regions": mosaic_regions,
-                    "demosaic": demosaic,
-                    "dehardsub": dehardsub,
-                    "src_size": f"{width}x{height}",
-                    **locate_meta,
-                    "encode": ocr_stats,
-                }
-            except Exception as exc:  # noqa: BLE001
-                print(f"[cleanup] ocr_telea failed ({exc}); falling back to sttn")
-        # 降级：继续走下方 STTN 分支
-        engine_s = "sttn"
-
-    if engine_s == "propainter" and dehardsub and box is not None:
-        try:
-            from propainter_inpaint import PropainterUnavailable, inpaint_video
-        except ImportError:
-            PropainterUnavailable = None  # type: ignore[assignment]
-        if PropainterUnavailable is not None:
-            try:
-                prop_stats = inpaint_video(src, dest, box, width=width, height=height)
-                return {
-                    "action": "propainter_cleanup",
-                    "engine": "propainter",
-                    "passes": [{"pass": 1, "encode": prop_stats}],
-                    "pass_count": 1,
-                    "regions": regions,
-                    "mosaic_regions": mosaic_regions,
-                    "demosaic": demosaic,
-                    "dehardsub": dehardsub,
-                    "src_size": f"{width}x{height}",
-                    **locate_meta,
-                    "encode": prop_stats,
-                }
-            except PropainterUnavailable as exc:
-                print(f"[cleanup] propainter unavailable ({exc}); falling back to sttn")
-            except Exception as exc:  # noqa: BLE001
-                print(f"[cleanup] propainter failed ({exc}); falling back to sttn")
-        # 降级：继续走下方 STTN 分支
-        engine_s = "sttn"
+    # 默认主路径 = 下方 hybrid 逐框路由（字形洞 + 中值板 clean plate + 纹理对话走 OCR+TELEA）。
+    # STTN 与 ProPainter 已彻底移除，去字幕只保留 ocr_telea/LaMa 这一条路线。
 
     if engine_s == "diffusion" and dehardsub and box is not None:
         try:
@@ -1866,11 +1620,10 @@ def run_multipass_cleanup(
                     "encode": diff_stats,
                 }
             except DiffusionUnavailable as exc:
-                print(f"[cleanup] diffusion unavailable ({exc}); falling back to sttn")
+                print(f"[cleanup] diffusion unavailable ({exc}); falling back to hybrid route")
             except Exception as exc:  # noqa: BLE001
-                print(f"[cleanup] diffusion failed ({exc}); falling back to sttn")
-        # 降级：继续走下方 STTN 分支
-        engine_s = "sttn"
+                print(f"[cleanup] diffusion failed ({exc}); falling back to hybrid route")
+
 
     if engine_s == "lama" and dehardsub and box is not None:
         try:
@@ -1883,9 +1636,9 @@ def run_multipass_cleanup(
                 lama_stats = encode_lama(src, dest, box, mosaic_regions)
                 lama_ran = True
             except LamaUnavailable as exc:
-                print(f"[cleanup] lama unavailable ({exc}); falling back to sttn")
+                print(f"[cleanup] lama unavailable ({exc}); falling back to hybrid route")
             except Exception as exc:  # noqa: BLE001
-                print(f"[cleanup] lama failed ({exc}); falling back to sttn")
+                print(f"[cleanup] lama failed ({exc}); falling back to hybrid route")
         if lama_ran:
             return {
                 "action": "lama_cleanup",
@@ -1901,23 +1654,17 @@ def run_multipass_cleanup(
                 **locate_meta,
                 "encode": lama_stats,
             }
-        # 降级：继续走下方 STTN 分支（engine_s 保持 sttn 语义）
-        engine_s = "sttn"
+        # 降级：继续走下方 hybrid 逐框路由（已解门控）
 
-    if engine_s == "sttn" and dehardsub and box is not None:
-        from sttn_inpaint import encode_sttn
-
+    if engine_s == "ocr_telea" and dehardsub and box is not None:
+        # 默认主路径 = 逐框路由（字形洞 + 中值板 clean plate + 纹理对话走 OCR+TELEA）。
+        # STTN 已彻底移除，不再有独立的 STTN 时序分支。
         demosaic_engine_s = str(demosaic_engine).lower()
         sttn_in = src
         mosaic_tmp = None
         mosaic_boxes = None
 
-        if demosaic and mosaic_regions and demosaic_engine_s == "sttn":
-            # 马赛克与字幕一起作为 STTN 的洞（合一方案）。
-            mosaic_boxes = [
-                {k: int(m[k]) for k in ("x", "y", "w", "h")} for m in mosaic_regions
-            ]
-        elif demosaic and mosaic_regions and demosaic_engine_s == "lama":
+        if demosaic and mosaic_regions and demosaic_engine_s == "lama":
             # 通用马赛克：先 LaMa 逐帧填洞，再 STTN 去字幕（out_real5 同款）。
             mosaic_tmp = dest.with_name("_mosaic_pre.mp4")
             try:
@@ -2254,26 +2001,17 @@ def run_multipass_cleanup(
                     if (env_prev or "auto").strip().lower() == "auto":
                         _os.environ["VITUAL_STTN_FORCE"] = force_mode
                 try:
-                    used = (
-                        _encode_sttn_active_windows(
-                            current,
-                            out_i,
-                            box_run,
-                            active_windows=list(active_windows or []),
-                            mosaic_boxes=(mosaic_boxes if i == 0 else None),
-                            dialogue_short_route=dialogue_short_route,
-                            progress_path=progress_path,
-                        )
-                        if role == "dialogue"
-                        else None
+                    # 文字/纹理类对话（非 glyph_black / spatial_fill）走 OCR+TELEA 逐框去字；
+                    # 不再使用 STTN 时序补洞（避免平灰块/鬼影）。
+                    from dehardsub_ocr_telea import run as _ocr_telea_run
+
+                    used = _ocr_telea_run(
+                        current,
+                        out_i,
+                        band=box_run,
+                        watermark=None,
+                        use_brightness=ocr_use_brightness,
                     )
-                    if used is None:
-                        used = encode_sttn(
-                            current,
-                            out_i,
-                            box_run,
-                            mosaic_boxes=(mosaic_boxes if i == 0 else None),
-                        )
                     used = dict(used)
                     used["role"] = role
                     used["box"] = box_run
@@ -2306,8 +2044,8 @@ def run_multipass_cleanup(
             # 对话区干净底板（PS「堆栈模式-中间值」）：字幕白字是瞬态遮挡且位置
             # 逐帧变化，而半透明输入栏 + 持久 UI（爱心/表情/占位符/发送箭头）恒定
             # → 逐像素时序中值底板可同时【去字幕 + 1:1 保留持久 UI】，优于 STTN
-            # 时序填充（后者会把爱心涂毁并留下灰白 wash）。背景运动过大时自动
-            # 回退 STTN 结果（build_dialogue_clean_plate 返回 None）。
+            # 时序填充（后者会把爱心涂毁并留下灰白 wash）。背景运动过大时
+            # build_dialogue_clean_plate 返回 None，跳过中值板（STTN 已移除，不再回退）。
             if dlg_plate_boxes:
                 plates: list[tuple[dict[str, int], Any]] = []
                 for b in dlg_plate_boxes:
@@ -2336,7 +2074,7 @@ def run_multipass_cleanup(
             # 对话区【不】走 LaMa 残影精修：字幕条是半透明 UI 栏覆盖在运动画面上，
             # LaMa 没有干净空间上下文可分，会对残影 hallucinate 出亮色涂抹
             # （实测 run5：对话区 亮白 0.2%→3.7%、闪烁 1.46→1.82 全面变差）。
-            # 对话残影由 STTN 字形洞已能压到 亮白~0.2%，保持不动为最佳。
+            # 对话残影由字形洞（glyph_mask_hybrid）已能压到 亮白~0.2%，保持不动为最佳。
             polish_roles = {"title", "watermark", "up_watermark"}
             polish_boxes = [
                 expand_static_overlay_box(
@@ -2369,7 +2107,7 @@ def run_multipass_cleanup(
                 "engine": "hybrid",
                 "regions": len(boxes_run),
                 "passes": pass_stats,
-                "mode": "sttn+lama",
+                "mode": "cleanplate+lama",
                 "polish_probe": polish_probe,
                 "polish_residual_floor": float(polish_residual_floor),
                 "polish_applied": bool(polish is not None),
@@ -2402,7 +2140,7 @@ def run_multipass_cleanup(
         )
         return {
             "action": "hybrid_cleanup",
-            "engine": "sttn+lama",
+            "engine": "cleanplate+lama",
             "mosaic_engine": demosaic_engine_s,
             "mosaic_pre": mosaic_tmp is not None,
             "passes": [{"pass": 1, "encode": sttn_stats}],

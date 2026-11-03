@@ -137,7 +137,7 @@ def test_cleanup_uses_codeformer_engine_when_weights_present(tmp_path) -> None:
             out,
             work_dir=inst / "work",
             locate_mode="band",
-            engine="sttn",
+            engine="ocr_telea",
             demosaic=True,
             dehardsub=True,
             demosaic_engine="codeformer",

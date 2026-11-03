@@ -110,32 +110,32 @@ def test_demosaic_instance_pipeline() -> None:
     }
 
     base = dict(
-        locate_mode="band", engine="sttn", demosaic=True, dehardsub=True,
+        locate_mode="band", engine="ocr_telea", demosaic=True, dehardsub=True,
     )
     # 显式马赛克框（合成样片自动检测偏保守，真实场景也可手动标注）
     mb = dict(mosaic_boxes=[mosaic_box])
 
-    # A) 新顺序：OpenCV 兜底先修马赛克 → 再 STTN 去字幕
+    # A) 新顺序：OpenCV 兜底先修马赛克 → 再 ocr_telea 去字幕
     out_cv = INSTANCES / "out_opencv.mp4"
     run_multipass_cleanup(src, out_cv, work_dir=INSTANCES / "work_opencv",
                           demosaic_engine="opencv", **base, **mb)
     assert out_cv.is_file()
 
-    # B) 新顺序：CodeFormer 先修马赛克（无权重→自动降级 OpenCV）→ 再 STTN
+    # B) 新顺序：CodeFormer 先修马赛克（无权重→自动降级 OpenCV）→ 再 ocr_telea
     out_cf = INSTANCES / "out_codeformer.mp4"
     run_multipass_cleanup(src, out_cf, work_dir=INSTANCES / "work_codeformer",
                           demosaic_engine="codeformer", **base, **mb)
     assert out_cf.is_file()
 
-    # C) 旧合一路径对比：STTN 同时把字幕+马赛克当洞补（质量一般）
+    # C) 旧合一路径对比：lama 同时把字幕+马赛克当洞补（质量一般）
     out_sttn = INSTANCES / "out_sttn_combined.mp4"
     run_multipass_cleanup(src, out_sttn, work_dir=INSTANCES / "work_sttn",
-                          demosaic_engine="sttn", **base, **mb)
+                          demosaic_engine="lama", **base, **mb)
     assert out_sttn.is_file()
 
     orig = _mosaic_pixels(src)
     variants = {}
-    for name, out in (("opencv", out_cv), ("codeformer", out_cf), ("sttn_combined", out_sttn)):
+    for name, out in (("opencv", out_cv), ("codeformer", out_cf), ("lama_combined", out_sttn)):
         o = _mosaic_pixels(out)
         change = float(np.mean(np.abs(o - orig))) if o.shape == orig.shape else -1.0
         variants[name] = {
