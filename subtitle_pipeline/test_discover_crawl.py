@@ -459,3 +459,72 @@ def test_douyin_no_cookies_no_service_returns_empty(monkeypatch) -> None:
         sources=["search"],
     )
     assert DouyinAdapter().list_candidates(topic) == []
+
+
+# --------------------------------------------------------------------------- #
+# Telegram adapter (public-channel scrape)
+# --------------------------------------------------------------------------- #
+def test_get_adapter_telegram() -> None:
+    from discover.adapters.base import get_adapter
+
+    assert get_adapter("telegram").platform == "telegram"
+
+
+def test_parse_platforms_allows_telegram() -> None:
+    from discover.run_discover import _parse_platforms
+
+    out = _parse_platforms("youtube,bilibili,douyin,telegram")
+    assert set(out) == {"youtube", "bilibili", "douyin", "telegram"}
+
+
+_SAMPLE_TG_HTML = """
+<div class="tgme_widget_message ">
+<a class="tgme_widget_message_date" href="https://t.me/durov/101"><time datetime="2026-11-04T12:00:00+00:00">Nov 4</time></a>
+<div class="tgme_widget_message_bubble"><div class="tgme_widget_message_text js-message_text" data-ssr="1">萌宠合集 超可爱小猫</div></div>
+<span class="tgme_widget_message_views" data-view="12300">12.3K</span>
+</div>
+<div class="tgme_widget_message ">
+<a class="tgme_widget_message_date" href="https://t.me/durov/102"><time datetime="2026-11-03T09:30:00+00:00">Nov 3</time></a>
+<div class="tgme_widget_message_text js-message_text" data-ssr="1">普通新闻，不相关</div>
+<span class="tgme_widget_message_views" data-view="500">500</span>
+</div>
+"""
+
+
+def test_telegram_adapter_parses_and_filters(monkeypatch) -> None:
+    from discover.adapters.telegram import TelegramAdapter
+
+    monkeypatch.setattr(
+        "discover.adapters.telegram._fetch_channel_html", lambda channel: _SAMPLE_TG_HTML
+    )
+    topic = TopicConfig(
+        id="adhoc",
+        locales_title={"zh": "萌宠"},
+        fresh_hours=168,
+        daily_quota_per_platform=5,
+        min_views={"telegram": 0},
+        keywords={"default": ["萌宠"], "telegram": ["萌宠"]},
+        platforms=["telegram"],
+        seed_channels={"telegram": ["durov"]},
+        sources=["search"],
+    )
+    cands = TelegramAdapter().list_candidates(topic)
+    # only the post matching the keyword "萌宠" should survive
+    assert len(cands) == 1
+    c = cands[0]
+    assert c.platform == "telegram"
+    assert c.video_id == "durov/101"
+    assert c.url == "https://t.me/durov/101"
+    assert c.views == 12300
+    assert c.published_at is not None
+    assert "萌宠" in (c.title or "")
+
+
+def test_parse_telegram_channel_normalizes() -> None:
+    from discover.adapters.telegram import parse_telegram_channel
+
+    assert parse_telegram_channel("@Durov") == "Durov"
+    assert parse_telegram_channel("https://t.me/s/durov") == "durov"
+    assert parse_telegram_channel("t.me/durov") == "durov"
+    assert parse_telegram_channel("not a channel!!") is None
+

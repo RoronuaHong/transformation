@@ -25,7 +25,7 @@ from discover.topics_loader import load_topics
 def _parse_platforms(s: str | None) -> list[str]:
     if not s:
         return ["youtube", "bilibili"]
-    allowed = ("youtube", "bilibili", "douyin")
+    allowed = ("youtube", "bilibili", "douyin", "telegram")
     out: list[str] = []
     for part in s.split(","):
         p = part.strip().lower()
@@ -59,7 +59,7 @@ def _top_rows(ranked: list, n: int = 12) -> list[dict]:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
-        description="Daily discover (YouTube+Bilibili) → metadata queue (no audio)"
+        description="Daily discover (YouTube+Bilibili+Douyin+Telegram) → metadata queue (no audio)"
     )
     p.add_argument("--topics", type=Path, default=None, help="topics.yaml path")
     p.add_argument("--topic", action="append", dest="topic_ids", help="only these topic ids")
@@ -76,7 +76,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--platforms",
         default=None,
-        help="comma list for --query or to filter topic platforms: youtube,bilibili",
+        help="comma list for --query or to filter topic platforms: youtube,bilibili,douyin,telegram",
+    )
+    p.add_argument(
+        "--telegram-channels",
+        default=None,
+        help="comma list of Telegram channel handles for --query (telegram platform only)",
     )
     p.add_argument("--quota", type=int, default=5, help="adhoc daily_quota_per_platform")
     p.add_argument("--fresh-hours", type=float, default=168, help="adhoc fresh window")
@@ -100,6 +105,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.query:
         plats = _parse_platforms(args.platforms)
+        seed_channels = {}
+        if args.telegram_channels:
+            seed_channels["telegram"] = [
+                c.strip() for c in args.telegram_channels.split(",") if c.strip()
+            ]
         topics = [
             make_adhoc_topic(
                 args.query,
@@ -107,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
                 fresh_hours=args.fresh_hours,
                 quota=args.quota,
                 min_views=args.min_views,
+                seed_channels=seed_channels or None,
             )
         ]
     else:

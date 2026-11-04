@@ -16,10 +16,20 @@ export default function AdminHome() {
 
   // 爬虫页状态
   const [crawlerKeyword, setCrawlerKeyword] = useState("");
-  const [crawlerPlats, setCrawlerPlats] = useState<{ bilibili: boolean; douyin: boolean }>({
+  const [crawlerPlats, setCrawlerPlats] = useState<{
+    bilibili: boolean;
+    douyin: boolean;
+    youtube: boolean;
+    telegram: boolean;
+  }>({
     bilibili: true,
     douyin: true,
+    youtube: true,
+    telegram: false,
   });
+  const [crawlerTgChannels, setCrawlerTgChannels] = useState("");
+  const [cookieText, setCookieText] = useState("");
+  const [cookieMsg, setCookieMsg] = useState("");
   const [crawlerQuota, setCrawlerQuota] = useState(10);
   const [crawlerLinks, setCrawlerLinks] = useState<Record<string, unknown>[]>([]);
   const [crawlerSchedule, setCrawlerSchedule] = useState<unknown>(null);
@@ -94,7 +104,12 @@ export default function AdminHome() {
     try {
       const json = await adminFetch("/admin/crawler/crawl", {
         method: "POST",
-        body: JSON.stringify({ keyword: crawlerKeyword.trim(), platforms: plats, quota: crawlerQuota }),
+        body: JSON.stringify({
+          keyword: crawlerKeyword.trim(),
+          platforms: plats,
+          quota: crawlerQuota,
+          telegram_channels: crawlerPlats.telegram ? crawlerTgChannels.trim() : "",
+        }),
       });
       setMsg(JSON.stringify(json));
     } catch (e) {
@@ -110,6 +125,24 @@ export default function AdminHome() {
     try {
       const j = await adminFetch(`/admin/crawler/schedule?enabled=${on}`, { method: "POST" });
       setCrawlerSchedule(j);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function saveDouyinCookies() {
+    setCookieMsg("");
+    setErr("");
+    if (!cookieText.trim()) {
+      setCookieMsg("请粘贴 Netscape cookies.txt 内容");
+      return;
+    }
+    try {
+      const j = await adminFetch("/admin/crawler/douyin_cookies", {
+        method: "POST",
+        body: JSON.stringify({ cookies: cookieText }),
+      });
+      setCookieMsg(JSON.stringify(j));
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     }
@@ -287,10 +320,42 @@ export default function AdminHome() {
       {tab === "crawler" ? (
         <div className="card">
           <p className="muted">
-            原素材爬取：按关键词从 B站 / 抖音 抓取视频链接，落 source_links（可进后续加工流水线）。
-            抖音反爬强，需配置 <code>DOUYIN_API_BASE</code> 指向开源解析服务（如
-            Evil0ctal/Douyin_TikTok_Download_API）才有数据。
+            原素材爬取：按关键词从 B站 / 抖音 / YouTube / Telegram 抓取链接，落 source_links（可进后续加工流水线）。
+            <br />
+            · 抖音：内置 X-Bogus 签名直连，无需外部服务；登录抖音后把 Netscape cookies.txt 粘贴到下方即可出数据。
+            <br />
+            · YouTube：走 yt-dlp（可能需要代理）。
+            <br />
+            · Telegram：无免费关键词搜索，请勾选 Telegram 后填写频道 @handle（逗号分隔），按频道扫最近帖子并匹配关键词。
           </p>
+          {crawlerPlats.telegram ? (
+            <div className="row" style={{ marginTop: 8 }}>
+              <label>Telegram 频道：</label>
+              <input
+                value={crawlerTgChannels}
+                onChange={(e) => setCrawlerTgChannels(e.target.value)}
+                placeholder="@durov, channel2"
+                style={{ flex: 1 }}
+              />
+            </div>
+          ) : null}
+          <details style={{ marginTop: 8 }}>
+            <summary>抖音 Cookie（登录后粘贴 Netscape cookies.txt）</summary>
+            <div className="row" style={{ marginTop: 6 }}>
+              <textarea
+                value={cookieText}
+                onChange={(e) => setCookieText(e.target.value)}
+                placeholder={"# Netscape HTTP Cookie File\ntwww.douyin.com\tFALSE\t/\tFALSE\t0\tttwid\txxxx"}
+                style={{ width: "100%", minHeight: 90, fontFamily: "monospace" }}
+              />
+            </div>
+            <div className="row">
+              <button type="button" onClick={() => void saveDouyinCookies()}>
+                保存抖音 Cookie
+              </button>
+              {cookieMsg ? <span className="muted">{cookieMsg}</span> : null}
+            </div>
+          </details>
           <div className="row">
             <input
               value={crawlerKeyword}
@@ -312,6 +377,22 @@ export default function AdminHome() {
                 onChange={(e) => setCrawlerPlats((p) => ({ ...p, douyin: e.target.checked }))}
               />
               抖音
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={crawlerPlats.youtube}
+                onChange={(e) => setCrawlerPlats((p) => ({ ...p, youtube: e.target.checked }))}
+              />
+              YouTube
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={crawlerPlats.telegram}
+                onChange={(e) => setCrawlerPlats((p) => ({ ...p, telegram: e.target.checked }))}
+              />
+              Telegram
             </label>
             <input
               type="number"

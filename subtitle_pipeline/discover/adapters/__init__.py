@@ -1,1 +1,1 @@
-"""Platform adapters for discovery (YouTube + Bilibili only this phase)."""
+"""Platform adapters for discovery (YouTube + Bilibili + Douyin + Telegram)."""

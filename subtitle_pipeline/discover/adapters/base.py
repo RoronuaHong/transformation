@@ -27,4 +27,8 @@ def get_adapter(platform: str) -> Adapter:
         from .douyin import DouyinAdapter
 
         return DouyinAdapter()
+    if plat == "telegram":
+        from .telegram import TelegramAdapter
+
+        return TelegramAdapter()
     raise ValueError(f"unsupported platform (deferred or unknown): {platform}")

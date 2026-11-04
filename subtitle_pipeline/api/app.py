@@ -144,10 +144,18 @@ class DiscoverBody(BaseModel):
 class CrawlerCrawlBody(BaseModel):
     keyword: str = Field(..., min_length=1, description="搜索关键词 / 创作者 sec_user_id")
     platforms: str = Field(
-        default="bilibili,douyin",
-        description="逗号分隔：bilibili,douyin（抖音需 DOUYIN_API_BASE 才出数据）",
+        default="bilibili,douyin,youtube,telegram",
+        description="逗号分隔：bilibili,douyin,youtube,telegram（抖音为内置 X-Bogus 直连，需 cookies.douyin.txt；telegram 需配 telegram_channels）",
     )
     quota: int = Field(default=10, ge=1, le=50, description="每平台抓取条数上限")
+    telegram_channels: str = Field(
+        default="",
+        description="telegram 平台专用：逗号分隔的频道 @handle（无免费关键词搜索，按频道扫最近帖子并匹配关键词）",
+    )
+
+
+class DouyinCookiesBody(BaseModel):
+    cookies: str = Field(..., min_length=1, description="Netscape cookies.txt 内容（登录抖音后从浏览器扩展导出）")
 
 
 class BatchBody(BaseModel):
@@ -365,6 +373,8 @@ def admin_crawler_crawl(
         "--no-enrich",
         "--quota", str(body.quota),
     ]
+    if body.telegram_channels.strip():
+        argv += ["--telegram-channels", body.telegram_channels.strip()]
     background.add_task(_job_crawler, settings, argv)
     return {"accepted": True, "action": "crawler", "keyword": body.keyword, "platforms": body.platforms}
 
@@ -393,6 +403,31 @@ def admin_crawler_schedule(settings: Settings = Depends(get_settings)) -> dict:
 def admin_crawler_schedule_set(enabled: bool = True) -> dict:
     ok = _set_discover_schedule(enabled)
     return {"ok": ok, "discover_running": _discover_enabled()}
+
+
+@app.post("/admin/crawler/douyin_cookies", dependencies=[Depends(require_admin)])
+def admin_crawler_douyin_cookies(body: DouyinCookiesBody) -> dict:
+    """Save pasted Netscape cookies (from a logged-in Douyin session) to cookies.douyin.txt.
+
+    The in-house Douyin crawler (X-Bogus signed) reads this file; without it Douyin
+    returns a risk-control payload and yields nothing.
+    """
+    text = body.cookies.replace("\r\n", "\n").strip()
+    if not text:
+        return {"ok": False, "error": "empty"}
+    # Netscape format is tab-separated lines or starts with a # comment; require a
+    # douyin domain reference so we don't overwrite with an unrelated paste.
+    if "douyin" not in text.lower() and not text.lstrip().startswith("#"):
+        return {
+            "ok": False,
+            "error": "cookies 内容不含 douyin 域名，请导出抖音的 Netscape cookies.txt",
+        }
+    path = Path(__file__).resolve().parents[1] / "cookies.douyin.txt"
+    try:
+        path.write_text(text + "\n", encoding="utf-8")
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "path": str(path), "bytes": len(text.encode("utf-8"))}
 
 
 @app.get("/admin/logs", dependencies=[Depends(require_admin)])

@@ -78,6 +78,7 @@ def make_adhoc_topic(
     fresh_hours: float = 168,
     quota: int = 5,
     min_views: int = 0,
+    seed_channels: dict[str, list[str]] | None = None,
 ) -> TopicConfig:
     """Ephemeral topic driven by a single search phrase."""
     q = query.strip()
@@ -88,8 +89,15 @@ def make_adhoc_topic(
         fresh_hours=fresh_hours,
         daily_quota_per_platform=quota,
         min_views={p: min_views for p in plats},
-        keywords={"default": [q], "youtube": [q], "bilibili": [q]},
+        keywords={
+            "default": [q],
+            "youtube": [q],
+            "bilibili": [q],
+            "douyin": [q],
+            "telegram": [q],
+        },
         platforms=plats,
+        seed_channels=dict(seed_channels or {}),
         score_mode="views",
         quota_scope="total",
         search_mode="relevance",
