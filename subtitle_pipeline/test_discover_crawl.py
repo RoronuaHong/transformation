@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from discover.adapters.bilibili import item_to_candidate, parse_bili_seed, title_hits_keywords
 from discover.adapters.youtube import (
     entry_to_candidate,
@@ -351,3 +353,109 @@ def test_crawl_topic_mock_no_network() -> None:
     assert "mock_yt_old" not in ids
     assert "BVmock001" in ids
     assert all((c.raw or {}).get("enriched") is None for c in pool)
+
+
+# --------------------------------------------------------------------------- #
+# Douyin in-house (X-Bogus signed) crawler
+# --------------------------------------------------------------------------- #
+def test_xbogus_signature_shape_and_determinism(monkeypatch) -> None:
+    from discover.adapters.xbogus import _X_BOGUS_SHORT_STR, x_bogus
+
+    url = "https://www.douyin.com/aweme/v1/web/general/search/single/?keyword=cat&aid=6383"
+    ua = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+    # freeze time so two calls with identical input produce identical output
+    monkeypatch.setattr("discover.adapters.xbogus.time.time", lambda: 1700000000.0)
+    s1 = x_bogus(url, ua)
+    s2 = x_bogus(url, ua)
+    assert s1 == s2
+    assert len(s1) == 28  # 21 input bytes -> 28 chars in the custom base64 alphabet
+    assert set(s1) <= set(_X_BOGUS_SHORT_STR)
+    # different query -> different signature
+    assert x_bogus(url + "&keyword=dog", ua) != s1
+
+
+def test_douyin_inhouse_search_returns_candidates(monkeypatch) -> None:
+    from discover.adapters.douyin import DouyinAdapter
+
+    # pretend logged-in cookies exist (so the in-house path is attempted)
+    monkeypatch.setattr(
+        "discover.adapters.douyin._douyin_cookie_header",
+        lambda: "ttwid=abc; sessionid=xyz",
+    )
+
+    fake_aweme = {
+        "aweme_id": "70000000001",
+        "desc": "萌宠合集",
+        "share_url": "https://www.douyin.com/video/70000000001",
+        "create_time": 1700000000,
+        "author": {"nickname": "萌宠君", "sec_uid": "MS4xxx"},
+        "statistics": {
+            "play_count": "12.3万",
+            "digg_count": "3000",
+            "comment_count": "200",
+            "share_count": "100",
+        },
+        "video": {"duration": "30000", "cover": {"url_list": ["http://img/1.jpg"]}},
+    }
+    body = json.dumps(
+        {"status_code": 0, "data": {"aweme_list": [{"aweme_info": fake_aweme}]}}
+    ).encode()
+
+    captured: dict[str, str] = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return body
+
+    def _fake_urlopen(req, *a, **k):
+        captured["url"] = req.full_url
+        return _Resp()
+
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+
+    topic = TopicConfig(
+        id="adhoc",
+        locales_title={"zh": "cat"},
+        fresh_hours=168,
+        daily_quota_per_platform=5,
+        min_views={"douyin": 0},
+        keywords={"default": ["cat"], "douyin": ["cat"]},
+        platforms=["douyin"],
+        sources=["search"],
+    )
+    cands = DouyinAdapter().list_candidates(topic)
+    assert len(cands) == 1
+    c = cands[0]
+    assert c.platform == "douyin"
+    assert c.video_id == "70000000001"
+    assert c.author == "萌宠君"
+    assert c.views == 123000
+    # the in-house path must sign the request with X-Bogus
+    assert "X-Bogus=" in captured["url"]
+
+
+def test_douyin_no_cookies_no_service_returns_empty(monkeypatch) -> None:
+    from discover.adapters.douyin import DouyinAdapter
+
+    monkeypatch.setattr("discover.adapters.douyin._douyin_cookie_header", lambda: "")
+    monkeypatch.setattr("discover.adapters.douyin.DOUYIN_API_BASE", "")
+    topic = TopicConfig(
+        id="adhoc",
+        locales_title={"zh": "cat"},
+        fresh_hours=168,
+        daily_quota_per_platform=5,
+        min_views={"douyin": 0},
+        keywords={"default": ["cat"], "douyin": ["cat"]},
+        platforms=["douyin"],
+        sources=["search"],
+    )
+    assert DouyinAdapter().list_candidates(topic) == []

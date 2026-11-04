@@ -1,22 +1,17 @@
 """Douyin discovery adapter: keyword search ∪ user posts ∪ hot board.
 
-Douyin is heavily anti-bot (X-Bogus / a_bogus signing + cookie gating). A datacenter
-IP is almost always blocked. The robust path is an **external open-source parse service**
-(env ``DOUYIN_API_BASE``), e.g. Evil0ctal/Douyin_TikTok_Download_API or any fork that
-exposes the contract below. Without it, this adapter returns ``[]`` and logs a clear hint —
-no crash, no false success.
+Douyin is heavily anti-bot (X-Bogus signing + cookie gating + datacenter-IP blocking).
+This adapter now does an **in-house signed web crawl** of Douyin's web search API using a
+pure-Python X-Bogus signer (see ``./xbogus.py``) plus cookies from ``cookies.douyin.txt``
+(loaded the same way as ``fetch_media``). It requires NO external service.
 
-Expected service contract (GET, JSON):
-  {base}/api/douyin/web/search?keyword=K&count=N
-  {base}/api/douyin/web/user/post?sec_uid=S&count=N
-  {base}/api/douyin/web/hot?count=N
-each returning data.list = [ { aweme_id, desc, author:{nickname,uid,sec_uid},
-  statistics:{play_count,digg_count,comment_count,share_count}, create_time,
-  video:{cover:{url_list:[...]}}, share_url } ]  (items may be wrapped in aweme_info).
+If the in-house path cannot run (no cookies present), it transparently falls back to the
+optional external open-source parse service pointed at ``DOUYIN_API_BASE``. If neither is
+available it returns ``[]`` and logs a clear hint — no crash, no false success.
 
-To switch to an in-house web crawler later, add a signed (X-Bogus) request path here;
-the cookie/proxy helpers from fetch_media.py (clear_proxy_env, cookies.douyin.txt) are
-the right building blocks.
+Required cookies for the signed path: a logged-in ``cookies.douyin.txt`` (Netscape export)
+with at least ``ttwid`` / ``sessionid_ss`` / ``sid_tt`` / ``odin_tt``. Without them Douyin
+returns a risk-control payload and the adapter yields nothing.
 """
 
 from __future__ import annotations
@@ -27,10 +22,12 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 from ..models import Candidate, TopicConfig
 from ..parseutil import parse_count, parse_duration, trunc
+from .xbogus import append_x_bogus
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -38,6 +35,30 @@ _UA = (
 )
 
 DOUYIN_API_BASE = (os.environ.get("DOUYIN_API_BASE") or "").rstrip("/")
+
+# Web search / feed endpoints (host is www.douyin.com; X-Bogus signs the query string).
+_SEARCH_EP = "/aweme/v1/web/general/search/single/"
+_POST_EP = "/aweme/v1/web/aweme/post/"
+_HOT_EP = "/aweme/v1/web/hot/search/list/"
+
+# Common params Douyin's web app ships on every request.
+_BASE_PARAMS = {
+    "device_platform": "webapp",
+    "aid": "6383",
+    "channel": "channel_pc_web",
+    "pc_client_type": "1",
+    "version_code": "190500",
+    "version_name": "19.5.0",
+    "cookie_enabled": "true",
+    "screen_width": "1920",
+    "screen_height": "1080",
+    "browser_language": "zh-CN",
+    "browser_platform": "Win32",
+    "browser_name": "Chrome",
+    "browser_version": "120.0.0.0",
+    "msToken": "",
+    "webid": "",
+}
 
 
 def parse_douyin_sec_uid(seed: str) -> str | None:
@@ -55,6 +76,112 @@ def parse_douyin_sec_uid(seed: str) -> str | None:
     return None
 
 
+# --------------------------------------------------------------------------- #
+# Cookie loading (mirrors fetch_media.resolve_cookies_file, kept local so the
+# discover package stays lightweight).
+# --------------------------------------------------------------------------- #
+def _douyin_cookie_file() -> Path | None:
+    for key in ("VITUAL_COOKIES", "YTDLP_COOKIES"):
+        raw = (os.environ.get(key) or "").strip()
+        if raw:
+            p = Path(raw)
+            if p.is_file():
+                return p
+    root = Path(__file__).resolve().parents[2]
+    for name in ("cookies.douyin.txt", "cookies.txt"):
+        p = root / name
+        if p.is_file():
+            return p
+    return None
+
+
+def _douyin_cookie_header() -> str:
+    """Netscape ``cookies.douyin.txt`` → ``a=b; c=d`` header (douyin.com only)."""
+    p = _douyin_cookie_file()
+    if p is None:
+        return ""
+    pairs: list[str] = []
+    try:
+        for ln in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not ln.strip() or ln.lstrip().startswith("#"):
+                continue
+            parts = ln.split("\t")
+            if len(parts) >= 7:
+                domain, _flag, _path, _secure, _exp, name, value = parts[:7]
+                if "douyin" not in domain.lower():
+                    continue
+                if name and value:
+                    pairs.append(f"{name}={value}")
+            elif "=" in ln:
+                # tolerate a raw "a=b; c=d" header blob
+                for kv in ln.split(";"):
+                    if "=" in kv:
+                        pairs.append(kv.strip())
+    except OSError:
+        return ""
+    return "; ".join(pairs)
+
+
+def _has_cookies() -> bool:
+    h = _douyin_cookie_header()
+    return bool(h) and ("ttwid" in h or "sessionid" in h or "sid_tt" in h)
+
+
+# --------------------------------------------------------------------------- #
+# In-house signed web request
+# --------------------------------------------------------------------------- #
+def _signed_get(path: str, params: dict[str, Any], *, count: int = 20) -> list[dict[str, Any]]:
+    """GET a Douyin web endpoint with an X-Bogus signed query; return aweme dicts."""
+    payload = dict(_BASE_PARAMS)
+    payload["count"] = str(count)
+    for k, v in params.items():
+        payload[k] = v
+    qs = urllib.parse.urlencode(payload)
+    url = f"https://www.douyin.com{path}?{qs}"
+    signed = append_x_bogus(url, _UA)
+
+    headers = {
+        "User-Agent": _UA,
+        "Referer": "https://www.douyin.com/",
+        "Origin": "https://www.douyin.com",
+        "Accept": "application/json",
+    }
+    cookie = _douyin_cookie_header()
+    if cookie:
+        headers["Cookie"] = cookie
+
+    try:
+        req = urllib.request.Request(signed, headers=headers)
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            j = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+        print(f"[douyin] 签名请求失败 {path}: {type(e).__name__}: {e}")
+        return []
+
+    if not isinstance(j, dict):
+        return []
+    if j.get("status_code", 0) not in (0, None):
+        print(
+            f"[douyin] 签名请求被拒 status_code={j.get('status_code')} "
+            f"msg={j.get('err_msg')}"
+        )
+        return []
+    arr = (
+        (j.get("data") or {}).get("aweme_list")
+        or (j.get("data") or {}).get("aweme_info")
+        or (j.get("data") or {}).get("list")
+        or []
+    )
+    out: list[dict[str, Any]] = []
+    for it in arr:
+        if isinstance(it, dict):
+            out.append(it.get("aweme_info") or it)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# External service fallback (optional). Same JSON contract as before.
+# --------------------------------------------------------------------------- #
 def _ext_list(path: str, params: dict[str, Any]) -> list[dict[str, Any]]:
     if not DOUYIN_API_BASE:
         return []
@@ -80,9 +207,8 @@ def _ext_list(path: str, params: dict[str, Any]) -> list[dict[str, Any]]:
     )
     out: list[dict[str, Any]] = []
     for it in arr:
-        if not isinstance(it, dict):
-            continue
-        out.append(it.get("aweme_info") or it)
+        if isinstance(it, dict):
+            out.append(it.get("aweme_info") or it)
     return out
 
 
@@ -128,12 +254,16 @@ class DouyinAdapter:
         keys = topic.keywords_for("douyin") or topic.keywords_for("default")
         seeds = topic.seed_channels.get("douyin") or []
         want = {s.lower() for s in (topic.sources or ["search"])}
-        if not DOUYIN_API_BASE:
+
+        # Nothing we can do without cookies (in-house) or an external service.
+        if not _has_cookies() and not DOUYIN_API_BASE:
             print(
-                "[douyin] DOUYIN_API_BASE 未配置：跳过抖音（反爬强，需指向开源解析服务；"
-                "见 discover/adapters/douyin.py 顶部契约）"
+                "[douyin] 未配置 cookies.douyin.txt 也未设置 DOUYIN_API_BASE：跳过抖音。"
+                " 登录抖音后导出 Netscape cookies 存为 subtitle_pipeline/cookies.douyin.txt，"
+                " 或设置 DOUYIN_API_BASE 指向开源解析服务。"
             )
             return []
+
         seen: set[str] = set()
         out: list[Candidate] = []
 
@@ -147,17 +277,51 @@ class DouyinAdapter:
 
         if "search" in want:
             for kw in keys:
-                add(_ext_list("/api/douyin/web/search", {"keyword": kw, "count": 20}),
-                    query=kw, source="search")
+                rows = _signed_get(
+                    _SEARCH_EP,
+                    {
+                        "keyword": kw,
+                        "search_channel": "aweme_general",
+                        "publish_time": "0",
+                        "sort_type": "0",
+                        "search_source": "normal_search",
+                        "query_correct_type": "1",
+                    },
+                    count=20,
+                )
+                if not rows and DOUYIN_API_BASE:
+                    rows = _ext_list(
+                        "/api/douyin/web/search", {"keyword": kw, "count": 20}
+                    )
+                add(rows, query=kw, source="search")
+
         if "seed" in want:
             for s in seeds:
                 sid = parse_douyin_sec_uid(s)
                 if not sid:
                     print(f"[douyin] skip bad seed={s!r}")
                     continue
-                add(_ext_list("/api/douyin/web/user/post", {"sec_uid": sid, "count": 20}),
-                    query=f"seed:{sid}", source=f"seed:{sid}")
+                rows = _signed_get(
+                    _POST_EP,
+                    {
+                        "sec_user_id": sid,
+                        "max_cursor": "0",
+                        "locate_query": "false",
+                        "show_live_replay": "false",
+                    },
+                    count=20,
+                )
+                if not rows and DOUYIN_API_BASE:
+                    rows = _ext_list(
+                        "/api/douyin/web/user/post", {"sec_uid": sid, "count": 20}
+                    )
+                add(rows, query=f"seed:{sid}", source=f"seed:{sid}")
+
         if "popular" in want or "hot" in want:
-            add(_ext_list("/api/douyin/web/hot", {"count": 20}), query="", source="popular")
+            rows = _signed_get(_HOT_EP, {"device_id": ""}, count=20)
+            if not rows and DOUYIN_API_BASE:
+                rows = _ext_list("/api/douyin/web/hot", {"count": 20})
+            add(rows, query="", source="popular")
+
         print(f"[douyin] kept total={len(out)}")
         return out
