@@ -443,6 +443,50 @@ def test_douyin_inhouse_search_returns_candidates(monkeypatch) -> None:
     assert "X-Bogus=" in captured["url"]
 
 
+def test_douyin_signed_get_handles_list_data_and_antispam(monkeypatch, capsys) -> None:
+    """Real search endpoint returns ``data`` as a bare list, and reports anti-spam."""
+    from discover.adapters import douyin as d
+
+    fake_aweme = {
+        "aweme_id": "7123456789",
+        "desc": "猫",
+        "statistics": {"play_count": "1000"},
+        "author": {"nickname": "u"},
+        "video": {"duration": "10000"},
+    }
+
+    class _Resp:
+        def __init__(self, body: bytes) -> None:
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return self.body
+
+    def _ok(req, *a, **k):
+        return _Resp(json.dumps({"status_code": 0, "data": [fake_aweme]}).encode())
+
+    monkeypatch.setattr("urllib.request.urlopen", _ok)
+    rows = d._signed_get(d._SEARCH_EP, {"keyword": "cat"})
+    assert len(rows) == 1 and rows[0]["aweme_id"] == "7123456789"
+
+    def _blocked(req, *a, **k):
+        return _Resp(json.dumps({
+            "status_code": 0,
+            "data": [],
+            "search_nil_info": {"search_nil_type": "antispam_check", "search_nil_item": "hit_shark"},
+        }).encode())
+
+    monkeypatch.setattr("urllib.request.urlopen", _blocked)
+    assert d._signed_get(d._SEARCH_EP, {"keyword": "cat"}) == []
+    assert "antispam_check" in capsys.readouterr().out
+
+
 def test_douyin_no_cookies_no_service_returns_empty(monkeypatch) -> None:
     from discover.adapters.douyin import DouyinAdapter
 
@@ -464,6 +508,39 @@ def test_douyin_no_cookies_no_service_returns_empty(monkeypatch) -> None:
 # --------------------------------------------------------------------------- #
 # Telegram adapter (public-channel scrape)
 # --------------------------------------------------------------------------- #
+def test_cdp_cookies_anonymous_not_reported_as_logged_in() -> None:
+    """ttwid / odin_tt / passport_csrf_token are issued to anonymous visitors."""
+    from discover.adapters.douyin import cdp_cookies_to_netscape
+
+    anon = [
+        {"domain": ".douyin.com", "name": n, "value": "x", "expires": -1}
+        for n in ("ttwid", "odin_tt", "passport_csrf_token", "__ac_nonce")
+    ]
+    _text, info = cdp_cookies_to_netscape(anon)
+    assert info["count"] == 4
+    assert info["logged_in"] is False
+
+
+def test_cdp_cookies_to_netscape_filters_and_detects_login() -> None:
+    from discover.adapters.douyin import cdp_cookies_to_netscape
+
+    cdp = [
+        {"domain": ".douyin.com", "name": "ttwid", "value": "abc", "expires": 1900000000, "secure": True, "path": "/"},
+        # HttpOnly login cookie is invisible to document.cookie but present via CDP
+        {"domain": ".douyin.com", "name": "sessionid_ss", "value": "s3cr3t", "expires": -1, "httpOnly": True, "path": "/"},
+        {"domain": "other.example.com", "name": "junk", "value": "1", "expires": -1},
+        {"domain": "www.douyin.com", "name": "", "value": "empty-name", "expires": -1},
+        {"domain": ".douyin.com", "name": "ttwid", "value": "abc", "expires": 1900000000, "secure": True, "path": "/"},
+    ]
+    text, info = cdp_cookies_to_netscape(cdp)
+    assert info["count"] == 2  # deduped, non-douyin + empty-name dropped
+    assert info["logged_in"] is True
+    assert "name=sessionid_ss" not in text and "sessionid_ss\ts3cr3t" in text
+    lines = [ln for ln in text.splitlines() if ln and not ln.startswith("#")]
+    assert all(len(ln.split("\t")) == 7 for ln in lines)
+    assert all("douyin" in ln.split("\t")[0] for ln in lines)
+
+
 def test_get_adapter_telegram() -> None:
     from discover.adapters.base import get_adapter
 

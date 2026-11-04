@@ -148,6 +148,19 @@ export default function AdminHome() {
     }
   }
 
+  async function captureDouyinCookies() {
+    setCookieMsg("读取中…");
+    setErr("");
+    try {
+      const j = await adminFetch("/admin/crawler/douyin_cookies_from_browser", {
+        method: "POST",
+      });
+      setCookieMsg(JSON.stringify(j));
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  }
+
   const items = useMemo(() => {
     if (data && typeof data === "object" && "items" in data) {
       return (data as { items: Record<string, unknown>[] }).items || [];
@@ -322,7 +335,7 @@ export default function AdminHome() {
           <p className="muted">
             原素材爬取：按关键词从 B站 / 抖音 / YouTube / Telegram 抓取链接，落 source_links（可进后续加工流水线）。
             <br />
-            · 抖音：内置 X-Bogus 签名直连，无需外部服务；登录抖音后把 Netscape cookies.txt 粘贴到下方即可出数据。
+            · 抖音：内置 X-Bogus 签名直连，无需外部服务；我已打开独立抖音窗口，你在里面登录后点下方「从已登录浏览器读取 Cookie」即可（也可手动粘贴 Netscape）。
             <br />
             · YouTube：走 yt-dlp（可能需要代理）。
             <br />
@@ -339,8 +352,14 @@ export default function AdminHome() {
               />
             </div>
           ) : null}
-          <details style={{ marginTop: 8 }}>
-            <summary>抖音 Cookie（登录后粘贴 Netscape cookies.txt）</summary>
+          <details style={{ marginTop: 8 }} open>
+            <summary>抖音 Cookie（在已打开的抖音窗口登录 → 一键读取）</summary>
+            <div className="row" style={{ marginTop: 6 }}>
+              <button type="button" onClick={() => void captureDouyinCookies()}>
+                从已登录浏览器读取 Cookie
+              </button>
+              <span className="muted">自动抓取 HttpOnly 登录态，无需手动导出</span>
+            </div>
             <div className="row" style={{ marginTop: 6 }}>
               <textarea
                 value={cookieText}

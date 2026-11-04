@@ -127,6 +127,55 @@ def _has_cookies() -> bool:
     return bool(h) and ("ttwid" in h or "sessionid" in h or "sid_tt" in h)
 
 
+def cdp_cookies_to_netscape(cookies: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
+    """Convert a CDP ``Storage.getCookies`` result to Netscape cookies.txt text.
+
+    Keeps only douyin.com cookies (including HttpOnly ones such as ``sessionid_ss``,
+    which ``document.cookie`` cannot see). CDP is fed by the dedicated visible Chrome
+    launched for manual login, so the user never has to export cookies by hand.
+    """
+    rows: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    names: list[str] = []
+    for c in cookies:
+        domain = str(c.get("domain") or "")
+        if "douyin" not in domain.lower():
+            continue
+        name = str(c.get("name") or "").strip()
+        value = str(c.get("value") or "")
+        if not name or not value or (domain, name) in seen:
+            continue
+        seen.add((domain, name))
+        # CDP expires is epoch seconds; -1 means a session cookie.
+        try:
+            exp = float(c.get("expires") or -1)
+            expires = str(int(exp)) if exp > 0 else "0"
+        except (TypeError, ValueError):
+            expires = "0"
+        secure = "TRUE" if c.get("secure") else "FALSE"
+        include_sub = "TRUE" if domain.startswith(".") else "FALSE"
+        path = str(c.get("path") or "/")
+        rows.append(
+            "\t".join((domain, include_sub, path, secure, expires, name, value))
+        )
+        names.append(name)
+    text = (
+        "# Netscape HTTP Cookie File (auto-captured from CDP Chrome)\n"
+        + "\n".join(rows)
+        + ("\n" if rows else "")
+    )
+    # Only these prove a real logged-in session. ttwid / odin_tt / passport_csrf_token
+    # are issued to anonymous visitors too, so counting them would report a false
+    # "logged in" before the user actually signs in.
+    login_names = {"sessionid", "sessionid_ss", "sid_tt", "uid_tt", "uid_tt_ss"}
+    info = {
+        "count": len(rows),
+        "logged_in": bool(login_names & set(names)),
+        "names": sorted(set(names)),
+    }
+    return text, info
+
+
 # --------------------------------------------------------------------------- #
 # In-house signed web request
 # --------------------------------------------------------------------------- #
@@ -166,12 +215,24 @@ def _signed_get(path: str, params: dict[str, Any], *, count: int = 20) -> list[d
             f"msg={j.get('err_msg')}"
         )
         return []
-    arr = (
-        (j.get("data") or {}).get("aweme_list")
-        or (j.get("data") or {}).get("aweme_info")
-        or (j.get("data") or {}).get("list")
-        or []
-    )
+    data = j.get("data")
+    if isinstance(data, dict):
+        arr = data.get("aweme_list") or data.get("aweme_info") or data.get("list") or []
+    elif isinstance(data, list):
+        # The real search endpoint returns a bare list (often empty on anti-spam).
+        arr = data
+    else:
+        arr = []
+    if not arr:
+        nil = j.get("search_nil_info") or {}
+        nil_type = nil.get("search_nil_type") or nil.get("search_nil_item")
+        if nil_type:
+            print(
+                f"[douyin] 返回空结果 anti-spam={nil_type}："
+                "抖音触发了风控/验证码，请在已打开的抖音窗口完成验证后重试。"
+            )
+        else:
+            print(f"[douyin] 返回空结果 status_code={j.get('status_code')}")
     out: list[dict[str, Any]] = []
     for it in arr:
         if isinstance(it, dict):

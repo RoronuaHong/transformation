@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import urllib.request
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -428,6 +430,58 @@ def admin_crawler_douyin_cookies(body: DouyinCookiesBody) -> dict:
     except OSError as e:
         return {"ok": False, "error": str(e)}
     return {"ok": True, "path": str(path), "bytes": len(text.encode("utf-8"))}
+
+
+@app.post("/admin/crawler/douyin_cookies_from_browser", dependencies=[Depends(require_admin)])
+def admin_crawler_douyin_cookies_from_browser() -> dict:
+    """One-click: pull douyin.com cookies (incl. HttpOnly) from the dedicated CDP Chrome.
+
+    The browser is launched with ``--remote-debugging-port`` so the user can log in to
+    Douyin normally in a visible window; this endpoint reads cookies over CDP and writes
+    the Netscape file the in-house signed crawler consumes — no manual export needed.
+    """
+    from websockets.sync.client import connect
+
+    from discover.adapters.douyin import cdp_cookies_to_netscape
+
+    base = (os.environ.get("VITUAL_DOUYIN_CDP") or "http://127.0.0.1:9223").rstrip("/")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(base + "/json/version", timeout=6) as resp:
+            ws_url = json.load(resp)["webSocketDebuggerUrl"]
+        with connect(ws_url, open_timeout=6, close_timeout=2) as ws:
+            ws.send(json.dumps({"id": 1, "method": "Storage.getCookies"}))
+            while True:
+                msg = json.loads(ws.recv(timeout=10))
+                if msg.get("id") == 1:
+                    break
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": f"无法连接 CDP 浏览器({base})：{type(e).__name__}: {e}。请确认已用 --remote-debugging-port=9223 打开抖音登录窗口。",
+        }
+    if "error" in msg:
+        return {"ok": False, "error": f"CDP Storage.getCookies 失败: {msg['error']}"}
+    cookies = (msg.get("result") or {}).get("cookies") or []
+    text, info = cdp_cookies_to_netscape(cookies)
+    if not info["count"]:
+        return {"ok": False, "error": "浏览器里没有 douyin.com 的 Cookie，请先在抖音窗口打开网页。"}
+    path = Path(__file__).resolve().parents[1] / "cookies.douyin.txt"
+    try:
+        path.write_text(text, encoding="utf-8")
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
+    return {
+        "ok": True,
+        "path": str(path),
+        **info,
+        "hint": (
+            ""
+            if info["logged_in"]
+            else "抓到的是匿名 cookie（ttwid/odin_tt 等），尚未检测到 sessionid_ss/sid_tt/uid_tt。"
+            "请先在已打开的抖音窗口完成登录，再点一次本按钮覆盖写入。"
+        ),
+    }
 
 
 @app.get("/admin/logs", dependencies=[Depends(require_admin)])
