@@ -881,9 +881,12 @@ def build_dialogue_clean_plate(
             return None
         med_plain = np.median(st, axis=0)
         vals = np.where(tm[..., None], np.nan, st)
+        all_text = np.all(tm, axis=0)
+        # 每帧都是字幕的像素(all_text)做 nanmedian 会得到全 NaN 并触发告警，
+        # 但其结果在下方会被 med_plain 覆盖，故用 0 占位避免告警（不影响最终 plate）。
+        vals[:, all_text, :] = 0.0
         with np.errstate(all="ignore"):
             med_masked = np.nanmedian(vals, axis=0)
-        all_text = np.all(tm, axis=0)
         plate = np.where(all_text[..., None], med_plain, med_masked)
         plate = np.nan_to_num(plate, nan=0.0)
         # Direct residual check on the built plate: the text region must read as
