@@ -282,7 +282,7 @@ def health() -> dict[str, Any]:
         "ok": True,
         "role": "backend-ops",
         "frontend": "transform/ Next.js :3000",
-        "admin": "admin/ Next.js :3001",
+        "admin": "materials_hub /crawler (gateway -> /ops-api/admin/*)",
         "mongo": mongo_ok,
         "store": store_kind,
         "scheduler": current_status(),
@@ -482,6 +482,51 @@ def admin_crawler_douyin_cookies_from_browser() -> dict:
             "请先在已打开的抖音窗口完成登录，再点一次本按钮覆盖写入。"
         ),
     }
+
+
+@app.get("/admin/crawler/cookies", dependencies=[Depends(require_admin)])
+def admin_crawler_cookies() -> dict:
+    """List every known cookie store so the console can surface "all cookies".
+
+    Returns metadata only (paths, platform, domains, login state) — never the
+    secret cookie values. The in-house crawlers consume these Netscape files:
+    ``douyin`` (X-Bogus signed path) and ``generic`` (yt-dlp / bilibili SESSDATA).
+    """
+    import time
+
+    root = Path(__file__).resolve().parents[1]
+    stores = []
+    for key, fname, platform in (
+        ("douyin", "cookies.douyin.txt", "douyin (X-Bogus)"),
+        ("generic", "cookies.txt", "yt-dlp / bilibili"),
+    ):
+        path = root / fname
+        info: dict = {"key": key, "file": fname, "platform": platform, "path": str(path)}
+        if not path.exists():
+            info["exists"] = False
+            stores.append(info)
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        lines = [ln for ln in text.splitlines() if ln and not ln.startswith("#")]
+        domains = sorted({ln.split("\t")[0].lstrip(".") for ln in lines if "\t" in ln})
+        info.update(
+            {
+                "exists": True,
+                "bytes": path.stat().st_size,
+                "mtime": time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(path.stat().st_mtime)
+                ),
+                "line_count": len(lines),
+                "domains": domains,
+            }
+        )
+        if key == "douyin":
+            low = text.lower()
+            info["logged_in"] = any(
+                t in low for t in ("sessionid_ss", "sid_tt", "uid_tt")
+            )
+        stores.append(info)
+    return {"stores": stores}
 
 
 @app.get("/admin/logs", dependencies=[Depends(require_admin)])

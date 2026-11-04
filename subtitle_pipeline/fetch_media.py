@@ -87,6 +87,38 @@ def _youtube_proxy_url() -> str | None:
     return env_px or _local_proxy_url()
 
 
+def _telegram_proxy_url() -> str | None:
+    """HTTP proxy for plain urllib clients (Telegram adapter).
+
+    v2rayN 10808 is a mixed port, so ``http://127.0.0.1:10808`` works as a
+    CONNECT proxy for HTTPS targets (t.me). We prefer it over a possibly-flaky
+    env proxy, mirroring :func:`_youtube_proxy_url` (which uses the socks5 form
+    because yt-dlp handles it natively). Returns ``None`` when neither the local
+    port nor an env proxy is available, so callers fall back to a direct connect.
+    """
+    if _port_open("127.0.0.1", 10808):
+        chosen = "http://127.0.0.1:10808"
+        env_px = (
+            os.environ.get("HTTPS_PROXY")
+            or os.environ.get("HTTP_PROXY")
+            or os.environ.get("https_proxy")
+            or os.environ.get("http_proxy")
+        )
+        if env_px and env_px.rstrip("/") != chosen:
+            print(f"[fetch] prefer {chosen} over env proxy {env_px}")
+        return chosen
+    env_px = (
+        os.environ.get("HTTPS_PROXY")
+        or os.environ.get("HTTP_PROXY")
+        or os.environ.get("https_proxy")
+        or os.environ.get("http_proxy")
+    )
+    if env_px and "10809" in env_px:
+        print(f"[fetch] skip flaky env proxy {env_px}")
+        env_px = None
+    return env_px or None
+
+
 def find_ffmpeg() -> str:
     from pipeline import find_ffmpeg as _find
 

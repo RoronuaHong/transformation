@@ -40,6 +40,16 @@ def test_parse_count_wan_yi() -> None:
     assert parse_count("") is None
 
 
+def test_parse_count_kmb() -> None:
+    # Telegram / YouTube expose English magnitude suffixes in visible text.
+    assert parse_count("5.87M") == 5_870_000
+    assert parse_count("12.3K") == 12_300
+    assert parse_count("2.04M") == 2_040_000
+    assert parse_count("1.5B") == 1_500_000_000
+    assert parse_count("1,234K") == 1_234_000
+    assert parse_count("938.5K") == 938_500
+
+
 def test_parse_duration_iso_and_clock() -> None:
     assert parse_duration("PT1H2M3S") == 3723
     assert parse_duration("PT1M30S") == 90

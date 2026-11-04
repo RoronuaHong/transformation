@@ -29,6 +29,15 @@ def parse_count(v: Any) -> int | None:
     elif s.endswith("万"):
         mult = 10_000.0
         s = s[:-1]
+    elif s and s[-1] in "kK":
+        mult = 1_000.0
+        s = s[:-1]
+    elif s and s[-1] in "mM":
+        mult = 1_000_000.0
+        s = s[:-1]
+    elif s and s[-1] in "bB":
+        mult = 1_000_000_000.0
+        s = s[:-1]
     try:
         return int(float(s) * mult)
     except (TypeError, ValueError):

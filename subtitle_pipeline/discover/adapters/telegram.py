@@ -17,7 +17,7 @@ from datetime import datetime
 from typing import Any
 
 from ..models import Candidate, TopicConfig
-from ..parseutil import trunc
+from ..parseutil import parse_count, trunc
 from .base import Adapter
 
 _UA = (
@@ -25,8 +25,21 @@ _UA = (
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
-# ProxyHandler() with no args reads HTTP(S)_PROXY env vars (e.g. v2rayN 10808).
-_opener = urllib.request.build_opener(urllib.request.ProxyHandler())
+# Default to the local v2rayN mixed port (http CONNECT works for https t.me).
+# Falls back to env HTTP(S)_PROXY, then direct — mirrors the YouTube adapter.
+def _build_opener() -> "urllib.request.OpenerDirector":
+    px = None
+    try:
+        from fetch_media import _telegram_proxy_url
+
+        px = _telegram_proxy_url()
+    except Exception as e:  # pragma: no cover - defensive
+        print(f"[telegram] proxy resolve skip ({type(e).__name__}: {e})")
+    if px:
+        return urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": px, "https": px})
+        )
+    return urllib.request.build_opener(urllib.request.ProxyHandler())
 
 
 def parse_telegram_channel(seed: str) -> str | None:
@@ -74,9 +87,18 @@ def _parse_messages(html_text: str) -> list[dict[str, Any]]:
         )
         text = _clean(text_m.group(1)) if text_m else ""
         views = None
-        vm = re.search(r'data-view="(\d+)"', chunk)
+        # The visible count lives in the tgme_widget_message_views span text
+        # (e.g. "5.87M"). The data-view attr is now a base64 tracking token,
+        # not a raw integer, so the legacy regex below only catches old pages.
+        vm = re.search(
+            r'class="tgme_widget_message_views"[^>]*>(.*?)</span>', chunk, re.S
+        )
         if vm:
-            views = int(vm.group(1))
+            views = parse_count(vm.group(1))
+        if views is None:
+            vm2 = re.search(r'data-view="(\d+)"', chunk)
+            if vm2:
+                views = int(vm2.group(1))
         ts = None
         tm = re.search(r'<time[^>]*datetime="([^"]+)"', chunk)
         if tm:
@@ -105,7 +127,7 @@ def _fetch_channel_html(channel: str) -> str:
         },
     )
     try:
-        with _opener.open(req, timeout=20) as resp:
+        with _build_opener().open(req, timeout=20) as resp:
             return resp.read().decode("utf-8", errors="replace")
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
         print(f"[telegram] 拉取失败 {channel}: {type(e).__name__}: {e}")
