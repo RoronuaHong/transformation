@@ -14,12 +14,31 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import core  # noqa: E402
 
 
+# 测试临时目录统一落点:放 index/ 下(派生数据、可随时删),既与 HUB 同盘满足
+# core.health() 的 os.path.relpath(INDEX_DB, HUB) 约束,又不让残留散落项目根。
+# 历史上各测试各自 mkdtemp(dir=core.HUB),异常/中断时在项目根留下上百个 hub_* 目录。
+PYTEST_TMP_ROOT = os.path.join(core.HUB, "index", "_pytest_tmp")
+
+
+def _hub_tmp_root():
+    """返回测试暂存目录(不存在则建);各测试 mkdtemp 统一用它作 dir。"""
+    os.makedirs(PYTEST_TMP_ROOT, exist_ok=True)
+    return PYTEST_TMP_ROOT
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _purge_pytest_tmp():
+    """整轮 pytest 结束清空暂存区,兜底回收忘记清理/异常中断的临时目录。"""
+    yield
+    shutil.rmtree(PYTEST_TMP_ROOT, ignore_errors=True)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_core():
     saved = dict(vars(core))          # 快照当前模块全部属性
     sub_run = core.subprocess.run     # 模块属性,vars(core) 快照无法覆盖,单独保存
     # 临时库放在 HUB 同盘下:core.health() 用 os.path.relpath(INDEX_DB, HUB),跨盘会抛 ValueError
-    tmp = tempfile.mkdtemp(prefix="hub_test_", dir=core.HUB)
+    tmp = tempfile.mkdtemp(prefix="hub_test_", dir=_hub_tmp_root())
     # 重定向全部派生目录到 tmp,隔离 sidecar 文件(OCR/镜头/pHash/封面/素材)的跨测试泄漏
     core.MATERIALS = os.path.join(tmp, "materials")
     core.INGEST = os.path.join(tmp, "ingest")

@@ -290,9 +290,10 @@ interface HubCardProps {
   pendingIds: Set<string>;
   onOpen: (m: HubMaterial) => void;
   onDelete: (m: HubMaterial) => void;
+  onToggleFavorite?: (m: HubMaterial) => void;
 }
 
-const HubCard = memo(function HubCard({ m, copy, kindLabel, tagLabelMap, locale, pendingIds, onOpen, onDelete }: HubCardProps) {
+const HubCard = memo(function HubCard({ m, copy, kindLabel, tagLabelMap, locale, pendingIds, onOpen, onDelete, onToggleFavorite }: HubCardProps) {
   return (
     <article className="hub-card">
       <div className="hub-thumb">
@@ -312,6 +313,21 @@ const HubCard = memo(function HubCard({ m, copy, kindLabel, tagLabelMap, locale,
             <path d="M5.5 4V2.8c0-.44.36-.8.8-.8h3.4c.44 0 .8.36.8.8V4" />
             <path d="M4 4l.7 9.2c.04.44.4.8.85.8h4.9c.45 0 .81-.36.85-.8L12 4" />
             <path d="M6.5 6.8v4.4M9.5 6.8v4.4" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          className={`hub-card-fav${m.favorite ? " on" : ""}`}
+          title={m.favorite ? copy.unfavorite : copy.favorite}
+          aria-label={m.favorite ? copy.unfavorite : copy.favorite}
+          aria-pressed={!!m.favorite}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleFavorite?.(m);
+          }}
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M8 1.5l1.9 3.9 4.3.6-3.1 3 .7 4.3L8 11.1 4.2 13.3l.7-4.3-3.1-3 4.3-.6z" />
           </svg>
         </button>
         {m.missing ? (
@@ -409,7 +425,7 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
   const [q, setQ] = useState("");
   const [kind, setKind] = useState<string>("");
   const [tag, setTag] = useState("");
-  const [mode, setMode] = useState("auto");
+  const [mode, setMode] = useState("lexical");
   const [sort, setSort] = useState("");
   const [page, setPage] = useState(1);
   const pageSize = 48;
@@ -449,6 +465,8 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
   const [formSel, setFormSel] = useState("");   // 选中一级分组 或 二级 leaf
   const [topicSel, setTopicSel] = useState("");
   const [usageSel, setUsageSel] = useState("");
+  // 仅看收藏:置顶筛选视图(后端 favorites_only);与形式/题材/用途分面正交。
+  const [favOnly, setFavOnly] = useState(false);
   // 上传默认分类(传入新素材的 form/topics/usage)
   // 上传默认分类:持久化到 localStorage——否则刷新页面后设置就丢(用户以为"点了没用")。
   // SSR 安全铁律:首渲染一律空值(SSR 无 localStorage),挂载后再读回;在 useState 初始化器里
@@ -510,7 +528,8 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
     [copy],
   );
 
-  const load = useCallback(async () => {
+  // 查询类数据(count + 当前页 list)。分面筛选(form/topic/usage)走全量本地过滤。
+  const loadQuery = useCallback(async () => {
     const seq = ++loadSeq.current;
     setBusy(true);
     setErr("");
@@ -521,6 +540,7 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
       if (tag) qs.set("tag", tag);
       if (mode) qs.set("mode", mode);
       if (sort) qs.set("sort", sort);
+      if (favOnly) qs.set("favorites_only", "1");
       // 内容形式/题材/用途 是受控词表分面,后端 /api/list 不支持这三个参数,
       // 故在前端按全量本地过滤(素材量级小,逻辑简单且零回归风险)。
       // 但文本检索 q / kind / tag / mode / sort 是后端能力,必须继续下传,否则叠加分面时
@@ -533,6 +553,7 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
       if (tag) srv.set("tag", tag);
       if (mode) srv.set("mode", mode);
       if (sort) srv.set("sort", sort);
+      if (favOnly) srv.set("favorites_only", "1");
       let rowsAll: HubMaterial[];
       if (needLocal) {
         const list = await hubFetch<HubMaterial[]>(`/list?${srv}`); // 不带 limit = 全量
@@ -576,29 +597,63 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
       const p = Math.min(page, pages);
       if (p !== page) setPage(p);
       setRows(rowsAll.slice((p - 1) * pageSize, p * pageSize));
-      const st = await hubFetch<HubStats>("/stats");
-      setStats(st);
-      const tg = await hubFetch<HubTag[]>(`/tags?ui=1&lang=${encodeURIComponent(locale.startsWith("zh") ? "zh" : "en")}`).catch(() => [] as HubTag[]);
-      if (loadSeq.current !== seq) return;
-      setTags(Array.isArray(tg) ? tg : []);
     } catch (e) {
       if (loadSeq.current !== seq) return;
       setRows([]);
-      setStats(null);
       setErr(e instanceof Error ? e.message : copy.error);
     } finally {
       if (loadSeq.current === seq) setBusy(false);
     }
-  }, [q, kind, tag, mode, sort, page, formSel, topicSel, usageSel, taxonomy, copy.error, locale]);
+  }, [q, kind, tag, mode, sort, page, formSel, topicSel, usageSel, favOnly, taxonomy, copy.error, locale]);
+
+  // 切换收藏:乐观更新本页 rows(收藏置顶用稳定排序,组内保持当前顺序);
+  // 若处于「仅看收藏」模式且取消收藏,该卡片立即移出列表。失败回滚。
+  const toggleFav = useCallback((m: HubMaterial) => {
+    const next = !m.favorite;
+    setRows((prev) => {
+      let out = prev.map((r) => (r.id === m.id ? { ...r, favorite: next } : r));
+      out = out.slice().sort((a, b) => (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0));
+      if (favOnly && !next) out = out.filter((r) => r.id !== m.id);
+      return out;
+    });
+    hubSetFavorite(m.id, next).catch(() => {
+      setRows((prev) => prev.map((r) => (r.id === m.id ? { ...r, favorite: !next } : r)));
+    });
+  }, [favOnly]);
+
+  // 全局统计/词表(stats + tags):与筛选无关,只在挂载与结构性变更(上传/删除/保存)时刷新,
+  // 不再每次敲字都重拉,避免无谓的串行请求拖慢交互。
+  const loadMeta = useCallback(async () => {
+    try {
+      const [st, tg] = await Promise.all([
+        hubFetch<HubStats>("/stats"),
+        hubFetch<HubTag[]>(`/tags?ui=1&lang=${encodeURIComponent(locale.startsWith("zh") ? "zh" : "en")}`).catch(() => [] as HubTag[]),
+      ]);
+      setStats(st);
+      setTags(Array.isArray(tg) ? tg : []);
+    } catch {
+      /* 保留上一次的 stats/tags,不让一次失败清空分面 */
+    }
+  }, [locale, copy.error]);
+
+  // 完整刷新(上传/删除/保存后调用):查询 + 全局元信息一起并行拉。
+  const load = useCallback(async () => {
+    await Promise.all([loadQuery(), loadMeta()]);
+  }, [loadQuery, loadMeta]);
 
   useEffect(() => {
-    // 250ms 防抖:搜索框每敲一个字不再立刻发 count/list/stats/tags 四个请求
-    // (count+list 各做一次全量排序,auto 模式还要过 embedding,连续击键会堆积请求)。
+    // 250ms 防抖:搜索框每敲一个字不再立刻发请求。只拉查询数据(loadQuery);
+    // 全局 stats/tags 由 loadMeta 在挂载/结构性变更时拉一次即可,避免每次击键都重拉拖慢交互。
     // busy 立即置 true:防抖窗口内不能闪现「没有匹配的素材」空态。
     setBusy(true);
-    const t = window.setTimeout(() => void load(), 250);
+    const t = window.setTimeout(() => void loadQuery(), 250);
     return () => window.clearTimeout(t);
-  }, [load]);
+  }, [loadQuery]);
+
+  // 挂载时拉一次全局统计/词表(分面计数、标签 UI),之后仅在上传/删除/保存后由 load() 刷新。
+  useEffect(() => {
+    void loadMeta();
+  }, [loadMeta]);
 
   useEffect(() => {
     if (!toast) return;
@@ -630,7 +685,9 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
     const desc = taxonomy?.form_descendants || {};
     const leafCount = (id: string) => {
       const d = desc[id];
-      if (d) return d.reduce((s: number, lid: string) => s + (forms[lid] || 0), 0);
+      // 防御性去重:taxonomy 的 descendants 若含重复 id(历史上 other 曾重复),
+      // 累加会把 facet 计数翻倍;去重不改变「选父即选全部后代」的筛选语义。
+      if (d) return Array.from(new Set(d)).reduce((s: number, lid: string) => s + (forms[lid] || 0), 0);
       return forms[id] || 0;
     };
     // 英文模式:叶子取 form_options_en 路径末段(树里叶子值是中文标签,见 core.FORM_TAXONOMY)
@@ -1226,6 +1283,15 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
                 <option value="name">{copy.sortName}</option>
                 <option value="size">{copy.sortSize}</option>
               </select>
+              <button
+                type="button"
+                className={`watch-btn${favOnly ? " on" : ""}`}
+                onClick={() => { setFavOnly((v) => !v); setPage(1); }}
+                aria-pressed={favOnly}
+                title={copy.favOnly}
+              >
+                {favOnly ? "★ " + copy.favOnly : "☆ " + copy.favOnly}
+              </button>
               {upNote ? <span className="hub-upnote">{upNote}</span> : null}
               <button type="button" className="watch-btn" onClick={() => void load()} disabled={busy}>
                 {copy.refresh}
@@ -1432,6 +1498,7 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
                   pendingIds={pendingIds}
                   onOpen={openDetail}
                   onDelete={removeMaterial}
+                  onToggleFavorite={toggleFav}
                 />
               ))}
             </div>

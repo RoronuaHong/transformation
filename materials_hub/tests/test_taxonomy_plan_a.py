@@ -17,7 +17,10 @@ import mcp_server  # noqa: E402
 
 
 def _setup_tmp():
-    tmp = tempfile.mkdtemp(prefix="hub_tax_", dir=core.HUB)
+    # 临时库统一落 index/_pytest_tmp(同盘、可随时清),不散落项目根
+    _root = os.path.join(core.HUB, "index", "_pytest_tmp")
+    os.makedirs(_root, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="hub_tax_", dir=_root)
     core.INDEX_DIR = tmp
     core.MATERIALS = os.path.join(tmp, "materials")
     core.OCR_DIR = os.path.join(tmp, "ocr")

@@ -48,6 +48,7 @@ export type HubMaterial = {
   form?: string;
   topics?: string;
   usage?: string;
+  favorite?: boolean;
 };
 
 export type HubStats = {
@@ -280,6 +281,15 @@ export function hubSetReviewed(id: string, value: boolean): Promise<HubUnderstan
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ id, value, confirm: true }),
+  });
+}
+
+/** 写:切换某素材的收藏状态。后端独立 favorites 表,与素材本体解耦(重扫不丢)。 */
+export function hubSetFavorite(id: string, on: boolean): Promise<{ ok: boolean; favorite: boolean }> {
+  return hubFetch<{ ok: boolean; favorite: boolean }>("/favorite", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id, on }),
   });
 }
 

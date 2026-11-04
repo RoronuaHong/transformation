@@ -410,6 +410,9 @@ export type HubCopy = {
   exportConfirm: string;
   exportDownload: string;
   exportResult: string;
+  favorite: string;
+  unfavorite: string;
+  favOnly: string;
 };
 
 export type UiCopy = {
@@ -785,6 +788,9 @@ const en: UiCopy = {
     save: "Save",
     close: "Close",
     del: "Delete",
+    favorite: "Favorite",
+    unfavorite: "Unfavorite",
+    favOnly: "Favorites only",
     copyPath: "Copy path",
     openFile: "Open file",
     typeSize: "Type · size",
@@ -1199,6 +1205,9 @@ const zh: UiCopy = {
     save: "保存",
     close: "关闭",
     del: "删除",
+    favorite: "收藏",
+    unfavorite: "取消收藏",
+    favOnly: "仅看收藏",
     copyPath: "复制路径",
     openFile: "打开文件",
     typeSize: "类型 · 大小",
@@ -1431,6 +1440,9 @@ const zhHant: UiCopy = {
     save: "儲存",
     close: "關閉",
     del: "刪除",
+    favorite: "收藏",
+    unfavorite: "取消收藏",
+    favOnly: "僅看收藏",
     copyPath: "複製路徑",
     openFile: "開啟檔案",
     typeSize: "類型 · 大小",

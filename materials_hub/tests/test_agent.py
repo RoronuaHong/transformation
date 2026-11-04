@@ -598,7 +598,9 @@ def test_update_tags_merge_preserves_facets():
 
 def test_merge_material_tags_protects_system_facets():
     # 直接测 core 护栏:remove 无法删 job:/role:;可删普通标签
-    tmp = tempfile.mkdtemp(prefix="hub_merge_", dir=core.HUB)
+    _root = os.path.join(core.HUB, "index", "_pytest_tmp")
+    os.makedirs(_root, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="hub_merge_", dir=_root)
     old_db, old_idx = core.INDEX_DB, core.INDEX_DIR
     try:
         core.INDEX_DIR = tmp

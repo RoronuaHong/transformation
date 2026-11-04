@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 import shutil
+import atexit
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import core
@@ -19,8 +20,12 @@ def _setup():
     """惰性初始化临时环境(直接跑与 pytest 均可用)。"""
     global _TMP
     if _TMP is None:
-        # 同盘临时目录,避免污染真实 index/phash
-        _TMP = tempfile.mkdtemp(prefix="hub_phash_test_", dir=core.HUB)
+        # 临时库统一落 index/_pytest_tmp(同盘、可随时清),不散落项目根;
+        # 注册 atexit:pytest 下不会走 __main__ 的 _teardown,否则每跑一轮留一个目录。
+        _root = os.path.join(core.HUB, "index", "_pytest_tmp")
+        os.makedirs(_root, exist_ok=True)
+        _TMP = tempfile.mkdtemp(prefix="hub_phash_test_", dir=_root)
+        atexit.register(_teardown)
         core.INDEX_DB = os.path.join(_TMP, "hub.db")
         core.INDEX_DIR = _TMP
         core.PHASH_DIR = os.path.join(_TMP, "phash")

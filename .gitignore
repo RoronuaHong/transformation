@@ -181,3 +181,6 @@ materials_hub/index/
 # 本地素材库与回收站（运行时数据，不入库）
 materials_hub/materials/
 materials_hub/trash/
+
+# 根目录抖音 Cookie(登录凭据,敏感,不入库)
+douyin_cookies.txt

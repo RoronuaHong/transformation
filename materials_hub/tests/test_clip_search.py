@@ -13,7 +13,10 @@ import core  # noqa: E402
 
 
 def _setup():
-    tmp = tempfile.mkdtemp(prefix="hub_clip_", dir=core.HUB)
+    # 临时库统一落 index/_pytest_tmp(同盘、可随时清),不散落项目根
+    _root = os.path.join(core.HUB, "index", "_pytest_tmp")
+    os.makedirs(_root, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="hub_clip_", dir=_root)
     core.INDEX_DIR = tmp
     core.INDEX_DB = os.path.join(tmp, "hub.db")
     core.MATERIALS = os.path.join(tmp, "materials")

@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import obs                      # 可观测:结构化日志 + 指标埋点(§8 G 维度)
 
 from core import (
-    init_hub, HUB, MATERIALS, get_material, all_materials, search,
+    init_hub, HUB, MATERIALS, get_material, all_materials, search, add_favorite, remove_favorite,
     count_materials, ingest_file, ingest_dir, scan_materials,
     update_description, remove_material, duplicates, sanitize_name,
     distinct_tags, tags_for_ui, make_thumb, thumb_path, thumbs_status, purge_thumbs,
@@ -360,6 +360,8 @@ class Handler(BaseHTTPRequestHandler):
             p = "/api"
         if p in ("/", "/index.html"):
             return self._serve_static("index.html", "text/html; charset=utf-8")
+        if p in ("/crawler", "/crawler/"):
+            return self._serve_static("crawler.html", "text/html; charset=utf-8")
         if p.startswith("/static/"):
             return self._serve_static(p[len("/static/"):])
         if p in ("/api/list", "/api/materials", "/api/search"):
@@ -371,10 +373,12 @@ class Handler(BaseHTTPRequestHandler):
             off = q.get("offset", [""])[0]
             mode = q.get("mode", ["auto"])[0]
             sort = q.get("sort", [""])[0]
+            fav_only = q.get("favorites_only", [""])[0] in ("1", "true", "on")
             limit = int(lim) if lim.isdigit() else None   # 不传 limit = 不分页
             offset = int(off) if off.isdigit() else 0
             rows = search(kw, kind, tag, limit=limit, offset=offset, mode=mode,
-                          sort=sort if sort in ("newest", "oldest", "name", "size") else "")
+                          sort=sort if sort in ("newest", "oldest", "name", "size") else "",
+                          favorites_only=fav_only)
             for m in rows:
                 # 标注封面是否已就绪(视频抽帧 / 图片·动画 PIL 缩略图),
                 # 前端据此(m.thumb)决定请求 /api/thumb 还是原文件,图片即走小图加载。
@@ -388,10 +392,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(rows)
         if p == "/api/count":
             q = urllib.parse.parse_qs(u.query)
+            fav_only = q.get("favorites_only", [""])[0] in ("1", "true", "on")
             return self._json({"total": count_materials(q.get("q", [""])[0],
                                                          q.get("kind", [""])[0],
                                                          q.get("tag", [""])[0],
-                                                         q.get("mode", ["auto"])[0])})
+                                                         q.get("mode", ["auto"])[0],
+                                                         favorites_only=fav_only)})
         if p == "/api/stats":
             ms = all_materials()
             # 始终返回完整 KINDS 分类体系(含 0 计数):让前端筛选器展示全部
@@ -760,6 +766,18 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/describe":
             update_description(body.get("id"), body.get("description", ""))
             return self._json({"ok": True})
+        if p == "/api/favorite":
+            mid = str(body.get("id") or "").strip()
+            on = bool(body.get("on"))
+            m = get_material(mid)
+            if not m:
+                return self._json({"ok": False, "error": "not found: " + mid})
+            # favorites 表与素材本体解耦:重扫/索引重建不会丢失收藏。
+            if on:
+                add_favorite(mid)
+            else:
+                remove_favorite(mid)
+            return self._json({"ok": True, "favorite": on})
         if p == "/api/review":
             # 步骤 5:只有人确认后才置复核(默认 false)。写操作需 confirm,
             # 且只落理解记录 sidecar,不进主排序。

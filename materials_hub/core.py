@@ -262,13 +262,20 @@ def _collect_form_ids(node):
     return ids
 
 
-# node id → 其子树全部 id(含自身);前端「选父即选全部后代」筛选匹配用
+# node id → 其子树全部 id(含自身);前端「选父即选全部后代」筛选匹配用。
+# 必须保序去重:当 group id 与其叶子 id 同名(如 "other": {"other": "其他"})时,
+# [_g] + _collect_form_ids(_node) 会出现重复 id,前端按此列表累加 stats.forms 会把
+# 计数翻倍(15 → 30,表现为 facet「其他 30」)。去重不影响 includes 式的后代匹配语义。
+def _uniq(seq):
+    return list(dict.fromkeys(seq))
+
+
 FORM_DESCENDANTS: dict[str, list[str]] = {}
 for _g, _node in FORM_TAXONOMY.items():
-    FORM_DESCENDANTS[_g] = [_g] + _collect_form_ids(_node)
+    FORM_DESCENDANTS[_g] = _uniq([_g] + _collect_form_ids(_node))
     for _nid, _val in _node.items():
         if isinstance(_val, dict):
-            FORM_DESCENDANTS[_nid] = [_nid] + _collect_form_ids(_val)
+            FORM_DESCENDANTS[_nid] = _uniq([_nid] + _collect_form_ids(_val))
 
 
 # 上传表单用:扁平 [id, "L1 › L2 › L3"] 选项(中间节点可作未细分归类值);中英文各一份
@@ -913,6 +920,13 @@ def _init_db():
             action TEXT,
             target_id TEXT,
             detail TEXT
+        )"""
+    )
+    # 收藏(与素材本体解耦的置顶标记;索引重建/扫描不丢,零迁移风险)
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS favorites(
+            mid TEXT PRIMARY KEY,
+            created_at TEXT
         )"""
     )
     con.commit()
@@ -1845,7 +1859,29 @@ def _maybe_translate(q):
     return (zh + " " + q) if zh else q
 
 
-def search(q="", kind="", tag="", limit=None, offset=0, mode="auto", sort=""):
+# ---------- 收藏(与素材本体解耦的置顶标记;索引重建/扫描不丢) ----------
+def add_favorite(mid):
+    con = _con()
+    con.execute("INSERT OR IGNORE INTO favorites(mid, created_at) VALUES(?,?)",
+                (mid, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())))
+    con.commit(); con.close()
+
+
+def remove_favorite(mid):
+    con = _con()
+    con.execute("DELETE FROM favorites WHERE mid=?", (mid,))
+    con.commit(); con.close()
+
+
+def favorite_ids():
+    """返回收藏集合,供 search 批量打标(避免逐条查询 N+1)。"""
+    con = _con()
+    rows = con.execute("SELECT mid FROM favorites").fetchall()
+    con.close()
+    return {r[0] for r in rows}
+
+
+def search(q="", kind="", tag="", limit=None, offset=0, mode="auto", sort="", favorites_only=False):
     """检索:自然语言问句 → 排序后返回,支持分页。
     mode="auto"     有 embedding 模型且素材已建向量 → 稠密+词法混合;
                     否则纯词法加权(与旧行为一致)
@@ -1853,10 +1889,11 @@ def search(q="", kind="", tag="", limit=None, offset=0, mode="auto", sort=""):
     limit=None 表示不分页;offset 在排序之后生效(全局偏移,非页内)。
     sort=""         默认相关性/时间序;q 存在时=相关性,无 q=时间倒序。
                     显式指定 "newest"/"oldest"/"name"/"size" 时覆盖相关性排序
-                    (DAM 面板的排序控件;在分页之前生效,全库级排序)。"""
+                    (DAM 面板的排序控件;在分页之前生效,全库级排序)。
+    favorites_only=True 只看收藏;收藏始终置顶(稳定排序,favorite 在最前)。"""
     _t0 = time.perf_counter()
     q = _maybe_translate(q)
-    ck = (q, kind, tag, limit, offset, mode, sort)
+    ck = (q, kind, tag, limit, offset, mode, sort, favorites_only)
     if os.environ.get("VITUAL_CACHE_SEARCH"):
         if ck in _SEARCH_CACHE:
             _hit = _SEARCH_CACHE[ck]
@@ -1864,8 +1901,13 @@ def search(q="", kind="", tag="", limit=None, offset=0, mode="auto", sort=""):
                        zero_hit=not _hit, mode=mode, cached=True)
             return _hit
     rows, _ = _ranked(q, kind, tag, mode)
+    fav = favorite_ids()                      # 一次取全部收藏,避免 N+1
+    for m in rows:
+        m["favorite"] = m.get("id") in fav    # 后端打标,前端据此渲染星标 + 置顶
     if q:
         rows = [_mark_hit(q, m) for m in rows]
+    if favorites_only:
+        rows = [m for m in rows if m.get("favorite")]
     if sort in ("newest", "oldest", "name", "size"):
         if sort == "name":
             rows = sorted(rows, key=lambda m: (m.get("name") or "").lower())
@@ -1874,6 +1916,9 @@ def search(q="", kind="", tag="", limit=None, offset=0, mode="auto", sort=""):
         else:
             key = lambda m: m.get("created_at") or ""        # noqa: E731
             rows = sorted(rows, key=key, reverse=(sort == "newest"))
+    # 收藏始终置顶:稳定排序(favorite 在最前),组内保持当前 sort/相关性顺序。
+    # 必须位于 offset/limit 切片之前,否则收藏会被分页截到后面。
+    rows = sorted(rows, key=lambda m: 0 if m.get("favorite") else 1)
     if offset > 0 or limit is not None:
         end = None if limit is None else offset + limit
         rows = rows[offset:end]
@@ -2037,9 +2082,13 @@ def chunk_search(q, limit=10, kind="", tag=""):
     return [dict(r) for _, r in hits[:limit]]
 
 
-def count_materials(q="", kind="", tag="", mode="auto"):
+def count_materials(q="", kind="", tag="", mode="auto", favorites_only=False):
     """当前条件下的命中总数(配合分页使用;语义模式下与排序结果集一致)。"""
-    return len(_ranked(q, kind, tag, mode)[0])
+    rows = _ranked(q, kind, tag, mode)[0]
+    if favorites_only:
+        fav = favorite_ids()
+        rows = [m for m in rows if m.get("id") in fav]
+    return len(rows)
 
 
 # ---------- 语义检索(本地 ollama embedding,零依赖) ----------

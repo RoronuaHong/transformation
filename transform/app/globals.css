@@ -4103,6 +4103,34 @@ html[data-theme="dark"] .theme-toggle-track {
 .hub-card-del:hover {
   background: var(--danger);
 }
+.hub-card-fav {
+  position: absolute;
+  top: 0.35rem;
+  right: 2.4rem;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 8px;
+  padding: 0.3rem;
+  cursor: pointer;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.62);
+}
+.hub-card-fav svg {
+  display: block;
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.hub-card-fav:hover { color: var(--warn, #f5b301); }
+.hub-card-fav.on { color: #f5b301; }
+.hub-card-fav.on svg { fill: #f5b301; }
 .hub-card-body { display: flex; flex-direction: column; gap: 0.25rem; padding: 0.65rem 0.75rem 0.85rem; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; width: 100%; }
 .hub-card-body:hover { background: color-mix(in srgb, var(--primary) 5%, transparent); }
 .hub-card-body strong { font-size: 0.85rem; word-break: break-all; }

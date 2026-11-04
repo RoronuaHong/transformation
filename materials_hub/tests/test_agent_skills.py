@@ -15,8 +15,10 @@ import mcp_server  # noqa: E402
 
 
 def _setup_tmp():
-    # 与 conftest 一致:临时库放 HUB 同盘,避免 health() relpath 跨盘 ValueError
-    tmp = tempfile.mkdtemp(prefix="hub_skills_", dir=core.HUB)
+    # 临时库统一落 index/_pytest_tmp(同盘,避免 health() relpath 跨盘 ValueError;可随时清)
+    _root = os.path.join(core.HUB, "index", "_pytest_tmp")
+    os.makedirs(_root, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="hub_skills_", dir=_root)
     core.INDEX_DIR = tmp
     core.MATERIALS = os.path.join(tmp, "materials")
     core.OCR_DIR = os.path.join(tmp, "ocr")
