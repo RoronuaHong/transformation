@@ -179,12 +179,8 @@ def cdp_cookies_to_netscape(cookies: list[dict[str, Any]]) -> tuple[str, dict[st
 # --------------------------------------------------------------------------- #
 # In-house signed web request
 # --------------------------------------------------------------------------- #
-def _signed_get(path: str, params: dict[str, Any], *, count: int = 20) -> list[dict[str, Any]]:
-    """GET a Douyin web endpoint with an X-Bogus signed query; return aweme dicts."""
-    payload = dict(_BASE_PARAMS)
-    payload["count"] = str(count)
-    for k, v in params.items():
-        payload[k] = v
+def _direct_signed_get(path: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Vendored X-Bogus signer over direct urllib. Returns the JSON dict or None."""
     qs = urllib.parse.urlencode(payload)
     url = f"https://www.douyin.com{path}?{qs}"
     signed = append_x_bogus(url, _UA)
@@ -202,9 +198,31 @@ def _signed_get(path: str, params: dict[str, Any], *, count: int = 20) -> list[d
     try:
         req = urllib.request.Request(signed, headers=headers)
         with urllib.request.urlopen(req, timeout=20) as resp:
-            j = json.loads(resp.read().decode("utf-8", errors="replace"))
+            return json.loads(resp.read().decode("utf-8", errors="replace"))
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
         print(f"[douyin] 签名请求失败 {path}: {type(e).__name__}: {e}")
+        return None
+
+
+def _signed_get(path: str, params: dict[str, Any], *, count: int = 20) -> list[dict[str, Any]]:
+    """GET a Douyin web endpoint with an X-Bogus signed query; return aweme dicts.
+
+    Preferred path: execute the signed request inside the user's real logged-in Chrome
+    over CDP (the page's own ``frontierSign`` — the vendored signer goes stale whenever
+    Douyin rotates the algorithm). Falls back to the vendored signer when no CDP browser
+    is open.
+    """
+    payload = dict(_BASE_PARAMS)
+    payload["count"] = str(count)
+    for k, v in params.items():
+        payload[k] = v
+
+    from . import douyin_cdp
+
+    j = douyin_cdp.cdp_get_json(path, payload)
+    if j is None:
+        j = _direct_signed_get(path, payload)
+    if j is None:
         return []
 
     if not isinstance(j, dict):

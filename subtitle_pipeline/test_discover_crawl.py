@@ -487,6 +487,25 @@ def test_douyin_signed_get_handles_list_data_and_antispam(monkeypatch, capsys) -
     assert "antispam_check" in capsys.readouterr().out
 
 
+def test_douyin_cdp_bridge_pure_helpers() -> None:
+    from discover.adapters.douyin_cdp import build_evaluate_expression, _parse_eval_result
+
+    expr = build_evaluate_expression("/aweme/v1/web/hot/search/list/", {"count": "20"})
+    assert "frontierSign" in expr
+    assert "/aweme/v1/web/hot/search/list/" in expr
+    assert '"count": "20"' in expr
+    assert "AbortController" in expr  # JS-side timeout so a gated request cannot hang us
+
+    # well-formed evaluate value -> parsed body dict
+    ok = _parse_eval_result(json.dumps({"http": 200, "body": json.dumps({"status_code": 0, "data": []})}))
+    assert ok == {"status_code": 0, "data": []}
+    # error bubbled from the page / non-JSON body / wrong type -> None
+    assert _parse_eval_result(json.dumps({"error": "boom"})) is None
+    assert _parse_eval_result(json.dumps({"http": 200, "body": "not json"})) is None
+    assert _parse_eval_result(None) is None
+    assert _parse_eval_result("") is None
+
+
 def test_douyin_no_cookies_no_service_returns_empty(monkeypatch) -> None:
     from discover.adapters.douyin import DouyinAdapter
 
