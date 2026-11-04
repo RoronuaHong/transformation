@@ -6,7 +6,7 @@
 
 topics:
   - id: home_tips
-    daily: true
+    daily: false
     locales_title:
       zh: 居家小技巧
       en: Home Tips
