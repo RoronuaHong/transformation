@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>爬虫管理 · Materials Hub</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { font: 14px/1.5 system-ui, "Segoe UI", Arial, sans-serif; margin: 0; background: #0f1115; color: #e6e6e6; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 24px; }
+  .badge { display:inline-block; font-size:12px; padding:2px 8px; border-radius:10px; background:#1f6feb33; color:#79c0ff; }
+  h1 { margin: 8px 0 4px; font-size: 22px; }
+  .muted { color: #8b949e; font-size: 13px; }
+  .card { background:#161b22; border:1px solid #30363d; border-radius:10px; padding:16px; margin-top:14px; }
+  .tabs { display:flex; gap:6px; margin:16px 0; flex-wrap:wrap; }
+  .tabs button { background:#21262d; color:#c9d1d9; border:1px solid #30363d; padding:7px 14px; border-radius:8px; cursor:pointer; }
+  .tabs button.on { background:#1f6feb; border-color:#1f6feb; color:#fff; }
+  input, textarea, select { background:#0d1117; color:#e6e6e6; border:1px solid #30363d; border-radius:6px; padding:7px 9px; }
+  textarea { width:100%; font-family:ui-monospace,monospace; }
+  button.act { background:#238636; color:#fff; border:1px solid #2ea043; border-radius:6px; padding:7px 12px; cursor:pointer; }
+  button.act.sec { background:#21262d; border-color:#30363d; color:#c9d1d9; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:8px 0; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid #21262d; vertical-align:top; }
+  th { color:#8b949e; font-weight:600; }
+  a { color:#79c0ff; }
+  .ok { color:#3fb950; }
+  .err { color:#f85149; }
+  .sev-error { color:#f85149; }
+  .sev-warn { color:#d29922; }
+  pre { white-space:pre-wrap; word-break:break-word; background:#0d1117; padding:12px; border-radius:8px; overflow:auto; }
+  .quota { width:70px; }
+  .muted a { color:#79c0ff; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <span class="badge">素材中心后台 · 非前台</span>
+  <h1>Materials Hub · 爬虫管理</h1>
+  <p class="muted">本页由 <b>素材中心 Materials Hub</b>（:8000）提供，经同源网关 <code>/ops-api</code> 调用 subtitle_pipeline 的 FastAPI <code>/admin/*</code> 接口——浏览器全程只跟 :8000 通信，无 CORS、无需 iframe。默认 Token：<code>local-admin</code>。</p>
+
+  <div id="gate" class="card">
+    <label>Admin token：</label>
+    <div class="row">
+      <input id="token" value="local-admin" style="width:240px" />
+      <button class="act" onclick="enter()">进入后台</button>
+      <span id="gateErr" class="err"></span>
+    </div>
+  </div>
+
+  <div id="app" style="display:none">
+    <nav class="tabs">
+      <button data-tab="status" class="on" onclick="switchTab('status')">状态</button>
+      <button data-tab="links" onclick="switchTab('links')">原始链接</button>
+      <button data-tab="logs" onclick="switchTab('logs')">日志</button>
+      <button data-tab="alerts" onclick="switchTab('alerts')">告警</button>
+      <button data-tab="run" onclick="switchTab('run')">触发任务</button>
+      <button data-tab="crawler" onclick="switchTab('crawler')">爬虫</button>
+    </nav>
+    <div id="msg" class="ok"></div>
+    <div id="err" class="err"></div>
+    <div id="view"></div>
+  </div>
+</div>
+
+<script>
+const TOKEN_KEY = "vitual_admin_token";
+let TOKEN = localStorage.getItem(TOKEN_KEY) || "local-admin";
+
+function api(path, opts = {}) {
+  const headers = { "Content-Type": "application/json" };
+  if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
+  return fetch(path, { ...opts, headers }).then(async (r) => {
+    if (!r.ok) throw new Error(r.status + " " + (await r.text()).slice(0, 200));
+    try { return await r.json(); } catch { return {}; }
+  });
+}
+function setMsg(m) { document.getElementById("msg").textContent = m || ""; }
+function setErr(e) { document.getElementById("err").textContent = e || ""; }
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+}
+
+async function enter() {
+  TOKEN = document.getElementById("token").value.trim();
+  localStorage.setItem(TOKEN_KEY, TOKEN);
+  setErr(""); setMsg("");
+  try {
+    await api("/ops-api/admin/status");
+    document.getElementById("gate").style.display = "none";
+    document.getElementById("app").style.display = "block";
+    switchTab("status");
+  } catch (e) { setErr("Token 校验失败：" + e.message); }
+}
+
+function switchTab(t) {
+  document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("on", b.dataset.tab === t));
+  if (t === "status") return loadStatus();
+  if (t === "links") return loadLinks();
+  if (t === "logs") return loadLogs();
+  if (t === "alerts") return loadAlerts();
+  if (t === "run") return renderRun();
+  if (t === "crawler") return loadCrawler();
+}
+
+async function loadStatus() {
+  setErr("");
+  try {
+    const j = await api("/ops-api/admin/status");
+    document.getElementById("view").innerHTML = "<pre>" + esc(JSON.stringify(j, null, 2)) + "</pre>";
+  } catch (e) { setErr(e.message); }
+}
+
+async function loadLinks() {
+  setErr("");
+  try {
+    const j = await api("/ops-api/admin/links?limit=200");
+    const rows = (j.items || []).map((r) => `<tr>
+      <td>${esc(r.original_url)}</td><td>${esc(r.canonical_url)}</td>
+      <td>${esc(r.platform)} / ${esc(r.video_id)}</td><td>${esc(r.status)}</td></tr>`).join("");
+    document.getElementById("view").innerHTML = `<div class="card"><table>
+      <thead><tr><th>原始链接</th><th>canonical</th><th>平台</th><th>状态</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>`;
+  } catch (e) { setErr(e.message); }
+}
+
+async function loadLogs() {
+  setErr("");
+  try {
+    const j = await api("/ops-api/admin/logs?limit=200");
+    const rows = (j.items || []).map((r) => `<tr><td>${esc(r.level)}</td><td>${esc(r.action)}</td><td>${esc(r.message)}</td></tr>`).join("");
+    document.getElementById("view").innerHTML = `<div class="card"><table>
+      <thead><tr><th>level</th><th>action</th><th>message</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>`;
+  } catch (e) { setErr(e.message); }
+}
+
+async function loadAlerts() {
+  setErr("");
+  try {
+    const j = await api("/ops-api/admin/alerts");
+    const rows = (j.items || []).map((r) => `<tr>
+      <td class="${r.severity === "error" ? "sev-error" : "sev-warn"}">${esc(r.severity)}</td>
+      <td>${esc(r.title)}</td><td>${esc(r.message)}</td>
+      <td>${r.acked ? "已确认" : `<button class="act sec" onclick="ack('${esc(r.id)}')">确认</button>`}</td></tr>`).join("");
+    document.getElementById("view").innerHTML = `<div class="card"><table>
+      <thead><tr><th>级别</th><th>标题</th><th>内容</th><th></th></tr></thead>
+      <tbody>${rows}</tbody></table></div>`;
+  } catch (e) { setErr(e.message); }
+}
+
+async function ack(id) {
+  setErr(""); setMsg("");
+  try { await api("/ops-api/admin/alerts/" + id + "/ack", { method: "POST" }); setMsg("已确认 " + id); loadAlerts(); }
+  catch (e) { setErr(e.message); }
+}
+
+function renderRun() {
+  setErr("");
+  document.getElementById("view").innerHTML = `<div class="card">
+    <p class="muted">任务在 subtitle_pipeline FastAPI 后台线程跑；失败会写日志并产生告警。</p>
+    <div class="row">
+      <button class="act" onclick="runJob('discover')">日更发现</button>
+      <button class="act" onclick="runJob('batch')">短加工</button>
+      <button class="act" onclick="runJob('export')">导出站点</button>
+    </div>
+    <div class="row">
+      <input id="inboxUrl" placeholder="https://..." style="flex:1" />
+      <button class="act sec" onclick="inbox()">inbox 入库</button>
+    </div></div>`;
+}
+async function runJob(a) {
+  setErr(""); setMsg("");
+  const body = a === "discover" ? { topic: "life_hacks" }
+    : a === "batch" ? { fast: true, limit: 1 }
+    : a === "export" ? {} : {};
+  try { const j = await api("/ops-api/admin/" + a, { method: "POST", body: JSON.stringify(body) }); setMsg(JSON.stringify(j)); }
+  catch (e) { setErr(e.message); }
+}
+async function inbox() {
+  setErr(""); setMsg("");
+  const url = document.getElementById("inboxUrl").value.trim();
+  if (!url) { setErr("请填写链接"); return; }
+  try { const j = await api("/ops-api/admin/inbox", { method: "POST", body: JSON.stringify({ url, topic: "life_hacks" }) }); setMsg(JSON.stringify(j)); }
+  catch (e) { setErr(e.message); }
+}
+
+// ---- crawler tab ----
+let C = { bilibili: true, douyin: true, youtube: true, telegram: false };
+let CRAWLER_LOADED = false;
+function renderCrawlerStatic() {
+  document.getElementById("view").innerHTML = `<div class="card">
+    <p class="muted">原素材爬取：按关键词从 B站 / 抖音 / YouTube / Telegram 抓取链接，落 source_links（可进后续加工流水线）。
+      <br>· 抖音：内置 X-Bogus 签名直连；可用「从已登录浏览器读取 Cookie」（需 9223 CDP 抖音窗口已登录）。
+      <br>· YouTube：走 yt-dlp（经 10808 代理）。
+      <br>· Telegram：无免费关键词搜索，请勾选后填写频道 @handle（逗号分隔），按频道扫最近帖子并匹配关键词。</p>
+    <div class="row">
+      <input id="cKeyword" placeholder="关键词，或抖音 sec_user_id" style="flex:1" />
+      <label><input type="checkbox" id="pB" checked onchange="C.bilibili=this.checked"> B站</label>
+      <label><input type="checkbox" id="pD" checked onchange="C.douyin=this.checked"> 抖音</label>
+      <label><input type="checkbox" id="pY" checked onchange="C.youtube=this.checked"> YouTube</label>
+      <label><input type="checkbox" id="pT" onchange="C.telegram=this.checked"> Telegram</label>
+      <input id="cQuota" type="number" class="quota" value="10" min="1" max="50" />
+      <button class="act" onclick="crawlNow()">立即抓取</button>
+      <button class="act sec" onclick="loadCrawler()">刷新结果</button>
+    </div>
+    <div class="row" id="tgRow" style="display:none">
+      <label>Telegram 频道：</label>
+      <input id="cTg" placeholder="@durov, channel2" style="flex:1" />
+    </div>
+    <details style="margin-top:10px">
+      <summary>抖音 Cookie（在已打开的抖音窗口登录 → 一键读取）</summary>
+      <div class="row" style="margin-top:6px">
+        <button class="act sec" onclick="captureCookie()">从已登录浏览器读取 Cookie</button>
+        <span class="muted">自动抓取 HttpOnly 登录态</span>
+      </div>
+      <div class="row">
+        <textarea id="cookieText" placeholder="# Netscape HTTP Cookie File" style="min-height:80px"></textarea>
+      </div>
+      <div class="row"><button class="act sec" onclick="saveCookie()">保存抖音 Cookie</button>
+        <span id="cookieMsg" class="muted"></span></div>
+    </details>
+    <div class="row" id="schedRow"></div>
+    <div id="crawlLinks"></div>
+  </div>`;
+  document.getElementById("pT").onchange = (e) => { C.telegram = e.target.checked; document.getElementById("tgRow").style.display = e.target.checked ? "flex" : "none"; };
+}
+async function loadCrawler() {
+  setErr("");
+  if (!CRAWLER_LOADED) { renderCrawlerStatic(); CRAWLER_LOADED = true; }
+  try {
+    const links = await api("/ops-api/admin/crawler/links?limit=100");
+    const rows = (links.items || []).map((r) => `<tr>
+      <td>${esc((r.title || "").slice(0, 60))}</td><td>${esc(r.platform)}</td><td>${esc(r.author)}</td>
+      <td><a href="${esc(r.canonical_url || r.original_url)}" target="_blank" rel="noreferrer">${esc(r.video_id)}</a></td>
+      <td>${esc(r.status)}</td></tr>`).join("");
+    document.getElementById("crawlLinks").innerHTML = `<table style="margin-top:14px">
+      <thead><tr><th>标题</th><th>平台</th><th>作者</th><th>链接</th><th>状态</th></tr></thead>
+      <tbody>${rows}</tbody></table>`;
+    const sch = await api("/ops-api/admin/crawler/schedule");
+    const on = sch.discover_running === true || sch.discover_running === "true";
+    document.getElementById("schedRow").innerHTML = `<span class="muted">定时发现：cron ${esc(sch.cron)} · ${on ? "已启用" : "已暂停"}</span>
+      ${on ? `<button class="act sec" onclick="toggleSched(false)">暂停定时</button>` : `<button class="act sec" onclick="toggleSched(true)">启用定时</button>`}`;
+  } catch (e) { setErr(e.message); }
+}
+async function crawlNow() {
+  setErr(""); setMsg("");
+  const kw = document.getElementById("cKeyword").value.trim();
+  const plats = Object.entries(C).filter(([, v]) => v).map(([k]) => k).join(",");
+  const quota = document.getElementById("cQuota").value || 10;
+  const tg = C.telegram ? document.getElementById("cTg").value.trim() : "";
+  if (!kw || !plats) { setErr("请填写关键词并至少选择一个平台"); return; }
+  try {
+    const j = await api("/ops-api/admin/crawler/crawl", { method: "POST", body: JSON.stringify({ keyword: kw, platforms: plats, quota: Number(quota), telegram_channels: tg }) });
+    setMsg(JSON.stringify(j));
+    setTimeout(loadCrawler, 5000);
+  } catch (e) { setErr(e.message); }
+}
+async function toggleSched(on) {
+  setErr(""); setMsg("");
+  try { const j = await api("/ops-api/admin/crawler/schedule?enabled=" + on, { method: "POST" }); setMsg(JSON.stringify(j)); loadCrawler(); }
+  catch (e) { setErr(e.message); }
+}
+async function captureCookie() {
+  document.getElementById("cookieMsg").textContent = "读取中…"; setErr("");
+  try { const j = await api("/ops-api/admin/crawler/douyin_cookies_from_browser", { method: "POST" }); document.getElementById("cookieMsg").textContent = JSON.stringify(j); }
+  catch (e) { setErr(e.message); document.getElementById("cookieMsg").textContent = ""; }
+}
+async function saveCookie() {
+  setErr(""); document.getElementById("cookieMsg").textContent = "";
+  const txt = document.getElementById("cookieText").value.trim();
+  if (!txt) { document.getElementById("cookieMsg").textContent = "请粘贴 Netscape cookies.txt"; return; }
+  try { const j = await api("/ops-api/admin/crawler/douyin_cookies", { method: "POST", body: JSON.stringify({ cookies: txt }) }); document.getElementById("cookieMsg").textContent = JSON.stringify(j); }
+  catch (e) { setErr(e.message); }
+}
+
+// restore token field
+document.getElementById("token").value = TOKEN;
+</script>
+</body>
+</html>
