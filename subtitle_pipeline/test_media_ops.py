@@ -946,6 +946,84 @@ def test_hardsub_fast_fill_uses_segment_windows(tmp_path: Path, monkeypatch) -> 
     assert probe_video_wh(cleaned) == src_wh
 
 
+def test_a1_auto_does_not_skip_when_dense_scan_finds_captions(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """回归 A1：弱 5 点检测漏判(detected=False)但稠密扫描命中时，auto 不得整段跳过。
+
+    旧逻辑只信 detect_hardsubs 的均匀 5 点采样 → 漏判即 skip → 漏去字。
+    修复后改用 scan_caption_timeline 稠密复核，命中即继续去字。
+    """
+    from media_ops import probe_video_wh, strip_hardsubs
+
+    media = tmp_path / "media"
+    media.mkdir()
+    src = media / "source.mp4"
+    _tiny_mp4_with_bottom_bar(src, seconds=10.0)
+    src_wh = probe_video_wh(src)
+    assert src_wh is not None
+
+    def fake_detect(*_args, **_kwargs):
+        return {"detected": False, "score": 0.0, "hits": 0, "samples": 6, "frames": []}
+
+    def fake_scan(*_args, **_kwargs):
+        return {
+            "hits": [1.6, 3.2, 7.8],
+            "hits_n": 3,
+            "frames": 20,
+            "hit_frac": 0.15,
+            "fps": 2.0,
+            "reason": "caption_timeline",
+        }
+
+    monkeypatch.setattr("media_ops.detect_hardsubs", fake_detect)
+    monkeypatch.setattr("media_ops.scan_caption_timeline", fake_scan)
+    cleaned, meta = strip_hardsubs(
+        tmp_path, video=src, force=False, mode="auto", engine="ocr_telea"
+    )
+    assert cleaned.is_file()
+    assert meta["action"] != "skip", "A1: 稠密扫描已命中却仍被整段跳过（漏去字）"
+    assert probe_video_wh(cleaned) == src_wh
+
+
+def test_a1_boxes_override_forces_dehardsub_when_detect_misses(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """回归 A1：即便弱检测漏判，传入 boxes_override 也应强制去字，而非被跳过。"""
+    from media_ops import probe_video_wh, strip_hardsubs
+
+    media = tmp_path / "media"
+    media.mkdir()
+    src = media / "source.mp4"
+    _tiny_mp4_with_bottom_bar(src, seconds=1.5)
+    src_wh = probe_video_wh(src)
+    assert src_wh is not None
+
+    def fake_detect(*_args, **_kwargs):
+        return {"detected": False, "score": 0.0, "hits": 0, "samples": 6, "frames": []}
+
+    monkeypatch.setattr("media_ops.detect_hardsubs", fake_detect)
+    boxes = [
+        {
+            "x": 20,
+            "y": int(src_wh[1] * 0.8),
+            "w": src_wh[0] - 40,
+            "h": int(src_wh[1] * 0.15),
+        }
+    ]
+    cleaned, meta = strip_hardsubs(
+        tmp_path,
+        video=src,
+        force=False,
+        mode="auto",
+        engine="ocr_telea",
+        boxes_override=boxes,
+    )
+    assert cleaned.is_file()
+    assert meta["action"] != "skip", "A1: boxes_override 未强制去字，被整段跳过"
+    assert probe_video_wh(cleaned) == src_wh
+
+
 def test_run_postproc_dehardsub(tmp_path: Path) -> None:
     from media_ops import probe_video_wh, run_postproc
 
