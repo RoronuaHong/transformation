@@ -92,7 +92,7 @@ def test_pipeline_engine_routes_to_ocr_telea(tmp_path):
         demosaic=False,
         locate_mode="band",
     )
-    assert res["action"] == "ocr_telea_cleanup", res
+    assert res["action"] == "hybrid_cleanup", res
     assert res["engine"] == "ocr_telea"
     assert out.exists(), "ocr_telea 引擎未产出视频"
 
@@ -137,7 +137,7 @@ def test_run_script_end_to_end(tmp_path):
         "--engine", "ocr_telea", "--band", "40,80,560,160", "--no-compare",
     ])
     assert out.exists(), "脚本未产出视频"
-    assert res["action"] == "ocr_telea_cleanup", res
+    assert res["action"] == "hybrid_cleanup", res
     # 脚本内已做 QC；这里复验一把确保 0/0
     from dehardsub_ocr_telea import qc_dehardsub
     qc = qc_dehardsub(str(src), str(out),

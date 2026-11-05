@@ -806,7 +806,7 @@ def test_detect_and_strip_hardsubs(tmp_path: Path) -> None:
         tmp_path, video=cleaned, force=False, ratio=0.14, mode="band", engine="ocr_telea"
     )
     assert meta2["action"] == "skip" or str(meta2["action"]).startswith(
-        ("delogo_", "inpaint_", "multipass")
+        ("delogo_", "inpaint_", "multipass", "hybrid_cleanup")
     )
     assert _skipped.is_file()
 

@@ -1139,7 +1139,7 @@ def _open_ffmpeg_writer(
             "-keyint_min",
             str(gop),
             "-movflags",
-            _WRITE_MOVFLAGS,
+            "+frag_keyframe+empty_moov+default_base_moof",  # 写 fragmented mp4;_finalize_writing_mp4 再 remux +faststart
             "-flush_packets",
             "1",
             "-fps_mode",
