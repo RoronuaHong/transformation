@@ -3415,6 +3415,80 @@ def _purge_material_derived(mid):
         pass
 
 
+# 派生数据目录 + 向量表(用于孤儿扫描/清理)
+# 注意:必须用函数动态取当前目录——INDEX_DIR 可经测试/运行时重定向,
+# 若用导入期快照元组,重定向后扫描会落到旧路径(探针/清理失效)。
+_VECTOR_TABLES = ("embeddings", "image_embeddings", "clip_frame_embeddings")
+
+
+def _derived_targets():
+    return [
+        (OCR_DIR, ".txt"), (VISUAL_DIR, ".txt"), (ASR_DIR, ".txt"),
+        (SHOT_DIR, ".json"), (PHASH_DIR, ".json"), (TECH_DIR, ".json"),
+        (AUTOTAG_DIR, ".json"), (RUN_DIR, ".json"), (UNDERSTAND_DIR, ".json"),
+        (THUMBS, ".jpg"),
+    ]
+
+
+def count_orphan_derived():
+    """统计孤儿派生数据:sidecar/向量属于已删除素材(最佳实践:主记录删除须级联失效)。"""
+    mats = {m["id"] for m in all_materials()}
+    n = 0
+    for d, ext in _derived_targets():
+        if not os.path.isdir(d):
+            continue
+        for fn in os.listdir(d):
+            if fn.endswith(ext) and fn[:-len(ext)] not in mats:
+                n += 1
+    con = _con()
+    try:
+        for tbl in _VECTOR_TABLES:
+            try:
+                for (mid,) in con.execute(f"SELECT mid FROM {tbl}"):
+                    if mid not in mats:
+                        n += 1
+            except Exception:
+                pass
+    finally:
+        con.close()
+    return n
+
+
+def purge_orphan_derived(dry_run=False):
+    """清理孤儿派生数据(删除素材后遗留的 sidecar/向量)。默认 dry_run=True 只看不删。"""
+    mats = {m["id"] for m in all_materials()}
+    removed = 0
+    for d, ext in _derived_targets():
+        if not os.path.isdir(d):
+            continue
+        for fn in os.listdir(d):
+            if not fn.endswith(ext):
+                continue
+            mid = fn[:-len(ext)]
+            if mid not in mats:
+                p = os.path.join(d, fn)
+                if not dry_run and os.path.isfile(p):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+                removed += 1
+    con = _con()
+    try:
+        for tbl in _VECTOR_TABLES:
+            try:
+                ids = [mid for (mid,) in con.execute(f"SELECT mid FROM {tbl}") if mid not in mats]
+                if ids and not dry_run:
+                    con.executemany(f"DELETE FROM {tbl} WHERE mid=?", [(i,) for i in ids])
+                    con.commit()
+                removed += len(ids)
+            except Exception:
+                pass
+    finally:
+        con.close()
+    return removed
+
+
 def remove_material(mid):
     m = get_material(mid)
     if m:
@@ -3431,8 +3505,9 @@ def remove_material(mid):
     con.commit()
     con.close()
     _purge_material_derived(mid)    # 向量/sidecar/缩略图级联清理,不留孤儿
+    mm = m or {}
     log_history("app", "remove", mid,
-                f"removed: {m.get('name', '')} (location={m.get('location', '')})")
+                f"removed: {mm.get('name', '')} (location={mm.get('location', '')})")
 
 
 # ---------- 采集 / 整理 ----------

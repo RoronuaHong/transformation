@@ -83,6 +83,38 @@ def evaluate(gt, limit=20):
     return per_q, p5s / n, r20s / n, mrrs / n, ndcgs / n
 
 
+def gt_staleness(gt, corpora=None):
+    """GT 与当前语料一致性(与 eval_search.gt_staleness 同语义):标注的 id 有多少仍存在。
+
+    语料重构/清理后旧 GT 引用的 id 可能已删除 → 召回虚低、门禁假失败。
+    coverage<0.5 或半数查询整组缺失 → stale=True(评估休眠,应重标而非当回归)。"""
+    if not gt:
+        return {"queries": 0, "coverage": None, "stale": False,
+                "note": "no GT file"}
+    if corpora is None:
+        corpora = core.all_materials()
+    have = {m["id"] for m in corpora}
+    total = existing = empty = 0
+    for _q, ids in gt.items():
+        if not ids:
+            continue
+        total += len(ids)
+        hit = sum(1 for i in ids if i in have)
+        existing += hit
+        if hit == 0:
+            empty += 1
+    coverage = (existing / total) if total else None
+    stale = bool(gt) and (total == 0 or coverage < 0.5
+                          or empty >= max(1, len(gt) // 2))
+    if existing == 0:
+        note = ("GT 无任何标注相关集" if total == 0
+                else "标注的 %d 个 id 全部不在当前语料" % total)
+    else:
+        note = ""
+    return {"queries": len(gt), "total_gt_ids": total, "existing": existing,
+            "coverage": coverage, "empty_queries": empty, "stale": stale, "note": note}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--gate", action="store_true",
@@ -102,6 +134,13 @@ def main():
         print(f"{q:<14}{a:>8.2f}{b:>8.2f}{m:>8.2f}{g:>9.2f}{h:>6}")
     print(f"{'MEAN':<14}{p5:>8.2f}{r20:>8.2f}{mrr:>8.2f}{ndcg:>9.2f}")
     if args.gate:
+        # 与文本门禁一致:GT 与当前语料严重不匹配时评估不可信,跳过而非误报回归
+        st = gt_staleness(gt)
+        if st.get("stale"):
+            print(f"\n=== 回归门禁 (image) ===")
+            print(f"GATE: GT_STALE (SKIPPED) — {st.get('note', '')} "
+                  f"(coverage={st.get('coverage')}, empty_queries={st.get('empty_queries')})")
+            sys.exit(0)
         ok, details = check_gate(p5, r20, mrr, ndcg)
         print(f"\n=== 回归门禁 (image, oracle=human-ground-truth) ===")
         print(f"{'metric':<8}{'baseline':>10}{'actual':>9}{'delta':>9}  result")

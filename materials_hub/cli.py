@@ -72,6 +72,7 @@ from core import (
 from core import (
     governance_report, distribution_readiness, log_feedback, learning_summary, add_veto,
     normalize_name, normalize_all_names,
+    count_orphan_derived, purge_orphan_derived,
     tech_material, tech_all, tech_stats, read_tech,
     describe_material, describe_all,
     write_run_record, read_run_record,
@@ -499,6 +500,17 @@ def main():
         changed, total = normalize_all_names(dry_run=dry)
         print(f"rename: {'DRY-RUN(未写入)' if dry else 'APPLIED'} "
               f"changed={changed}/{total} unique={len({x for _, x in plan})}/{total}")
+
+    elif cmd == "orphans":
+        # 派生数据孤儿扫描/清理(最佳实践:主记录删除须级联失效 sidecar/向量)。
+        # 默认仅统计;--apply 才删除(删素材后遗留的 OCR/视觉/向量等孤儿)。
+        n = count_orphan_derived()
+        print("孤儿派生数据(属于已删除素材的 sidecar/向量): %d" % n)
+        if "--apply" in args:
+            removed = purge_orphan_derived(dry_run=False)
+            print("已清理: %d (剩余 %d)" % (removed, count_orphan_derived()))
+        else:
+            print("（dry-run，加 --apply 执行清理）")
 
     elif cmd == "tech":
         # 技术元数据(Cloudinary MAM / Adobe AEM「技术类元数据」):时长/分辨率/编码/帧率/采样率。
