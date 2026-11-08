@@ -562,7 +562,8 @@ def t_learning(a):
 def t_search_eval(a):
     """只读:按需跑检索质量评估(P@5/R@20/MRR/nDCG + 回归门禁),复用 eval_search。
 
-    mode=auto|lexical|semantic;有 eval_ground_truth.json 则用权威标注(否则启发式)。
+    mode=auto|lexical|semantic;有 eval_ground_truth.json 则用权威标注,
+    否则按当前语料确定性派生临时 GT 自检(语料感知,不再是写死的旧查询集)。
     附带 GT 过期检测:语料重构后旧 GT 标注的 id 可能已不存在,导致召回虚低、
     门禁【假失败】——此时 verdict=gt_stale,应先用 gen_ground_truth.py 重标 GT,
     而非当检索回归处理。

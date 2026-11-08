@@ -3,7 +3,10 @@
 
 覆盖:
   1. P@5 归一化:|rel|<5 时 P@min(5,|rel|),|rel|>=5 时仍 /5(历史基线不变);
-  2. gen_ground_truth 语料感知:不写空查询、不写陈旧 id、不复活死查询。
+  2. gen_ground_truth 语料感知:不写空查询、不写陈旧 id、不复活死查询;
+  3. eval_search 删除写死的 11 条死查询后,GT 是唯一 oracle(无 GT 则语料派生),
+     GT 含旧同名键也不回退到死查询集;
+  4. evaluate_extra 语料感知(不再假定 chicken wings / lang:ja 存在)。
 全部 mock 驱动,不依赖真实语料/模型。
 """
 import os
@@ -14,6 +17,15 @@ import eval_search as ev  # noqa: E402
 import eval_image as ei  # noqa: E402
 import gen_ground_truth as gg  # noqa: E402
 import core  # noqa: E402
+
+
+def _fake_materials():
+    return [
+        {"id": "m1", "name": "旺财.jpg", "orig_name": "旺财.jpg", "tags": "",
+         "description": "", "rel_path": "旺财.jpg", "external_path": ""},
+        {"id": "m2", "name": "橄榄油.jpg", "orig_name": "橄榄油.jpg", "tags": "",
+         "description": "", "rel_path": "橄榄油.jpg", "external_path": ""},
+    ]
 
 
 def test_text_p5_normalized_small_gold():
@@ -95,6 +107,78 @@ def test_gt_candidates_skip_generic_tokens():
     print("PASS test_gt_candidates_skip_generic_tokens")
 
 
+def test_eval_search_has_no_hardcoded_dead_queries():
+    """写死的 11 条旧流水线查询集已删除;GT 是唯一 oracle。"""
+    assert not hasattr(ev, "EVAL_QUERIES"), "EVAL_QUERIES 不应再存在"
+    # 旧查询名恰好出现在 GT 里时,也不能回退到死查询集(原 intersection 隐患)
+    gt = {"人脸修复": ["A"]}          # 这是旧 EVAL_QUERIES 里的键名
+    orig = core.search
+    core.search = lambda q, limit=20, mode="auto": [{"id": "A"}]
+    try:
+        per, p5, _, _, _ = ev.evaluate("lexical", gt)
+    finally:
+        core.search = orig
+    assert len(per) == 1 and per[0][0] == "人脸修复", per
+    assert abs(p5 - 1.0) < 1e-9, p5
+    print("PASS test_eval_search_has_no_hardcoded_dead_queries")
+
+
+def test_derived_ground_truth_is_corpus_aware():
+    """无权威 GT 时按当前语料派生,且过滤检索召回不到的噪声 token。"""
+    ms = _fake_materials() + [
+        {"id": "m3", "name": "LUOB6.png", "orig_name": "LUOB6.png", "tags": "",
+         "description": "", "rel_path": "LUOB6.png", "external_path": ""},
+    ]
+    orig = core.search
+    # 只让「旺财/橄榄油」可召回,luob 查不到 → 验证 verify=True 会剔除噪声
+    core.search = (lambda q, limit=20, mode="auto":
+                   [{"id": "m1"}] if q == "旺财" else
+                   ([{"id": "m2"}] if q == "橄榄油" else []))
+    try:
+        derived = ev.derived_ground_truth(ms)
+    finally:
+        core.search = orig
+    assert "luob" not in derived, derived
+    assert derived.get("旺财") == ["m1"] and derived.get("橄榄油") == ["m2"], derived
+    assert all(v for v in derived.values()), derived
+    print("PASS test_derived_ground_truth_is_corpus_aware")
+
+
+def test_evaluate_without_gt_uses_derived_not_dead_queries():
+    """gt=None 时不再跑 11 条死查询(均值 0.09),而是语料派生自检。"""
+    ms = _fake_materials()
+    orig_all, orig_search = core.all_materials, core.search
+    core.all_materials = lambda: ms
+    core.search = (lambda q, limit=20, mode="auto":
+                   [{"id": "m1"}] if q == "旺财" else
+                   ([{"id": "m2"}] if q == "橄榄油" else []))
+    try:
+        per, p5, r20, mrr, ndcg = ev.evaluate("lexical", None)
+    finally:
+        core.all_materials, core.search = orig_all, orig_search
+    assert per and all(q in ("旺财", "橄榄油") for q, *_ in per), per
+    assert abs(p5 - 1.0) < 1e-9 and abs(r20 - 1.0) < 1e-9, (p5, r20)
+    print("PASS test_evaluate_without_gt_uses_derived_not_dead_queries")
+
+
+def test_evaluate_extra_corpus_aware():
+    """额外检查不再假定 chicken wings / lang:ja 存在,返回语料派生字段。"""
+    ms = _fake_materials()
+    orig_all, orig_search = core.all_materials, core.search
+    core.all_materials = lambda: ms
+    core.search = (lambda q, limit=20, mode="auto":
+                   [{"id": "m1"}] if q == "旺财" else
+                   ([{"id": "m2"}] if q == "橄榄油" else []))
+    try:
+        ex = ev.evaluate_extra()
+    finally:
+        core.all_materials, core.search = orig_all, orig_search
+    assert "english_query" in ex and "lang_facets" in ex, ex
+    assert "chicken wings" not in str(ex), ex
+    assert isinstance(ex["lang_facets"], dict), ex
+    print("PASS test_evaluate_extra_corpus_aware")
+
+
 if __name__ == "__main__":
     test_text_p5_normalized_small_gold()
     test_text_p5_unchanged_for_large_gold()
@@ -102,4 +186,8 @@ if __name__ == "__main__":
     test_gt_generator_no_empty_queries()
     test_gt_merge_drops_stale_and_never_resurrects_dead()
     test_gt_candidates_skip_generic_tokens()
+    test_eval_search_has_no_hardcoded_dead_queries()
+    test_derived_ground_truth_is_corpus_aware()
+    test_evaluate_without_gt_uses_derived_not_dead_queries()
+    test_evaluate_extra_corpus_aware()
     print("OK")

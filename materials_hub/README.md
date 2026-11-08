@@ -163,8 +163,10 @@ python cli.py embed                # 增量构建语义检索索引
 python cli.py embed --force        # 全量重建;--status 只看状态
 python cli.py search --file q.txt  # 中文查询建议走文件(Windows 终端 GBK 代码页会弄坏命令行中文)
 python cli.py search --stdin       # 或从标准输入读查询
-python eval_search.py --baseline  # 检索质量评估(16 查询人工标注 ground truth,P@5/R@20/MRR/NDCG@10,lexical↔auto 对比)
-python eval_search.py --mode lexical --gate  # 回归门禁:均值掉出基线(容差 0.02)→ GATE: FAIL 且退出码 1
+python gen_ground_truth.py [--force|--dry]  # 按当前语料重标检索 GT(语料感知,永不写空查询/陈旧 id)
+python eval_search.py --baseline  # 检索质量评估(权威 GT,P@5/R@20/MRR/NDCG@10,lexical↔auto 对比)
+python eval_search.py --mode lexical --gate  # 回归门禁:均值掉出基线(容差 0.02)→ GATE: FAIL 且退出码 1;GT 失配则 GT_STALE 休眠
+python eval_search.py --extra  # 多语言/分面额外检查(语料感知,不进门禁分母)
 python eval_gt_candidates.py  # GT 补全候选(证据驱动,**不改权威 GT**,产出供人工核对的清单)
 python cli.py metrics [--days N]  # 指标埋点(从落盘日志聚合,跨进程):调用数/失败率/零命中率/耗时分位
 python cli.py ocr <id> [--force]  # 视频画面 OCR(离线 rapidocr,文本入检索;--all 批量)
@@ -356,6 +358,16 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 > `eval_ground_truth.all.json`,若要切换:`copy eval_ground_truth.all.json eval_ground_truth.json`。
 
 个别查询收益更明显:「把模糊画面变清晰」0.20 → 0.80(P@5)、「按时间切的片段」0.00 → 0.16(R@20)。
+
+> ⚠️ **以上 P@5 表与 GT 补全数字均为 2026-09/10 的 344–384 条流水线语料历史归档**,
+> 仅作方法沿革,**不代表当前值**。2026-10-14 清退流水线素材后生产库为 **15 条个人图片**:
+> - GT 由 `python gen_ground_truth.py` 按当前语料派生(9 查询,均非空相关集),不再引用已删 id;
+> - `eval_search.py` 已删除写死的 11 条旧查询及其同义词展开启发式判定,**GT 是唯一 oracle**;
+>   无 GT 文件时按当前语料确定性派生临时自检(不会跑死查询);
+> - P@5 归一化到 `P@min(5,|rel|)`(小相关集不再被 `|rel|/5` 结构性封顶);
+>   历史基线数值保留为下限护栏;
+> - 当前实测:文本 lexical / auto 与图像共 3 个门禁 **GATE PASS**(四项指标均 1.00)。
+> GT 与语料严重失配时门禁判 `GT_STALE (SKIPPED)` 休眠,应重标 GT 而非当回归处理。
 
 **环境变量**
 

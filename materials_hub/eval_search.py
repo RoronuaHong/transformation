@@ -1,78 +1,53 @@
 """素材中心检索质量评估(回归门禁)。
 
-固化 README 里的中文查询集,跑检索并算 P@5 / R@20,任何检索改动先跑它防回归。
+跑检索并算 P@5 / R@20 / MRR / NDCG@10,任何检索改动先跑它防回归。
 用法:
     python eval_search.py                 # 混合(auto)
     python eval_search.py --mode lexical  # 仅词法
     python eval_search.py --mode semantic # 仅语义
     python eval_search.py --baseline      # 同时输出 lexical 与 auto 的对比
     python eval_search.py --mode lexical --gate   # 回归门禁:掉出基线则退出码 1
+    python eval_search.py --extra         # 多语言/分面额外检查(不进门禁分母)
 
-相关性判定(默认启发式):用 core.expand_query 把中文查询扩出的英文词,命中素材的
-tags/name/description/path 即判相关 —— 这是 README 里 P@5 提升叙事的直接代理指标。
-**权威数字需人工标注**:把每句查询对应的相关素材 id 写进 eval_ground_truth.json
-({ "查询": ["id1","id2",...], ... }),本脚本检测到后会改用精确标注计算(覆盖启发式)。
+相关性判定:**以 eval_ground_truth.json 的权威标注为准**({ "查询": ["id1",...] })。
+GT 由 `python gen_ground_truth.py` 按当前语料派生(语料感知,可人工核对后修订)。
+GT 与当前语料严重失配时门禁判 GT_STALE 休眠,应重标 GT 而非当检索回归处理。
+
+2026-11-08:删除写死的 11 条旧流水线查询(去除字幕/人脸修复/字幕文本…)及其
+同义词展开启发式判定 —— 语料清退到 15 条个人图片后这些查询全部 dead,
+无 GT 时评估均值仅 0.09 且毫无意义;曾用的 `intersection(EVAL_QUERIES)` 判断
+还有真实隐患:GT 一旦出现同名键就会回退到死查询集。现改为:
+  * 有 GT → 无条件用 GT 的键;
+  * 无 GT → `derived_ground_truth()` 按当前语料文件名确定性派生临时 GT(不写文件)。
 """
 import os
 import sys
 import json
 import math
-import re
 import argparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import core
 
-# 固化查询集(取自 README 实测场景)。新增查询直接在下面加一行即可。
-# 2026-10-09 语料重构(移除 256 条 mode-renders QA 渲染):5 个死亡查询移除
-# (对比渲染结果/用 Lama 补全的画面/字形检测的渲染输出/视觉语言模型抽的关键帧/
-#  去台标 delogo 处理的片段——其 GT 目标全部随语料移除),余 11 查询。
-EVAL_QUERIES = [
-    "去除字幕只留背景",
-    "把模糊画面变清晰",
-    "按时间切的片段",
-    "字幕文本文件",
-    "人脸修复",
-    "基准测试视频",
-    "b站下载的字幕",
-    "修好的成品",
-    # 窄查询(2026-09-28 补):相关集 1-6 条,大相关性集下 P@5 饱和无法区分排序,靠这些恢复区分度
-    "去马赛克处理结果",
-    "繁体中文字幕 srt",
-    "b站视频的音频文件",
-]
-
 GT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eval_ground_truth.json")
 
 
-def expected_tokens(q):
-    ex = core.expand_query(q)
-    if ex == q:
-        return []
-    return [t for t in ex[len(q):].strip().split() if t]
+def derived_ground_truth(corpora=None):
+    """无权威 GT 时,按当前语料确定性派生临时 GT(**语料感知**,不写文件)。
 
+    复用 `gen_ground_truth.build_gt`:查询 = 素材文件名里可检索的 token,
+    相关集 = 文本含该 token 的素材 id。相比旧实现(写死 11 条流水线查询 +
+    同义词展开启发式判定),语料换成什么就测什么,永不出现 dead 查询,
+    也不会因为 GT 与旧查询同名而被 `intersection` 误回退。
 
-def _mat_text(m):
-    # OCR 文本只进语义(稠密)索引,不进词法 token 索引(见 core._material_text);
-    # 门禁测的是词法检索质量,故相关性判定也必须剥掉 description 的 [OCR] 段,
-    # 否则 240 条素材批量 OCR 后自由字幕文本会稀释相关性分母/分子(ndcg 0.84→0.80)。
-    desc = re.sub(r"\s*\[OCR\][\s\S]*$", "", str(m.get("description", ""))).strip()
-    return " ".join(
-        (desc if k == "description" else str(m.get(k, "")))
-        for k in ("tags", "name", "description", "external_path", "rel_path")
-    ).lower()
-
-
-def heuristic_rel(q, rows):
-    toks = expected_tokens(q)
-    if not toks:
-        return set()
-    rel = set()
-    for m in rows:
-        t = _mat_text(m)
-        if any(tok.lower() in t for tok in toks):
-            rel.add(m["id"])
-    return rel
+    注意:派生 GT 是**确定性自检(smoke)**,不是人工标注的质量基准;
+    正式门禁应跑 `python gen_ground_truth.py` 生成权威 GT 文件。
+    """
+    from gen_ground_truth import build_gt
+    ms = corpora if corpora is not None else core.all_materials()
+    # verify=True 与权威 GT 生成逻辑一致:过滤掉「文件名有 token 但检索召回不到」的
+    # 噪声查询(例:乱码名 LUOB6.png 派生出的 "luob"),否则派生自检会凭空多一条 0 分。
+    return build_gt(ms, verify=True)
 
 
 def load_ground_truth(path=None):
@@ -147,7 +122,7 @@ def gt_staleness(gt=None, corpora=None):
     if not gt:
         return {"queries": 0, "total_gt_ids": 0, "existing": 0, "missing": 0,
                 "coverage": None, "empty_queries": 0, "stale": False,
-                "note": "no GT file (heuristic mode)"}
+                "note": "no GT file (按当前语料派生临时 GT 自检)"}
     if corpora is None:
         corpora = core.all_materials()
     have = {m["id"] for m in corpora}
@@ -182,26 +157,17 @@ def gt_staleness(gt=None, corpora=None):
 
 def evaluate(mode, gt=None):
     corpora = core.all_materials()
-    total_rel = {}
-    if gt is None:
-        # 语料级相关计数(用于召回率分母):对每句查询,全库里启发式相关的条目数
-        for q in EVAL_QUERIES:
-            total_rel[q] = len(heuristic_rel(q, corpora))
-
-    queries = EVAL_QUERIES
-    if gt and not set(gt).intersection(EVAL_QUERIES):
-        queries = list(gt)
+    # GT 是唯一 oracle:有则用其键,无则按当前语料确定性派生临时 GT。
+    # 不再有 `intersection(EVAL_QUERIES)` 回退(GT 一旦含旧同名键就会误跑死查询)。
+    oracle_gt = gt if gt else derived_ground_truth(corpora)
+    queries = list(oracle_gt)
     per_q = []
     p5_sum = r20_sum = mrr_sum = ndcg_sum = 0.0
     for q in queries:
         rows = core.search(q, limit=20, mode=mode)
         ids = [m["id"] for m in rows]
-        if gt and q in gt:
-            rel_set = set(gt[q])
-            total = len(rel_set)
-        else:
-            rel_set = heuristic_rel(q, rows)
-            total = total_rel.get(q, len(rel_set)) or 1
+        rel_set = set(oracle_gt[q])
+        total = len(rel_set)
         top5 = ids[:5]
         top20 = ids[:20]
         # P@5 归一化:标准 P@K 在 |rel|<K 时被 |rel|/K 结构性封顶(1 条相关集的完美
@@ -225,25 +191,40 @@ def evaluate(mode, gt=None):
         mrr_sum += mrr
         ndcg_sum += ndcg
         per_q.append((q, p5, r20, mrr, ndcg, len(ids)))
-    n = len(queries)
+    n = len(queries) or 1          # 空 GT 不除零(门禁随后会判 GT_STALE)
     return per_q, p5_sum / n, r20_sum / n, mrr_sum / n, ndcg_sum / n
 
 
 # ---------------------------------------------------------------------------
-# 步骤 9:不进旧中文门禁分母的两条多语言检查(独立报告,不影响门禁均值)
-#   ① 英文问句(经翻译桥)应命中画面是鸡翅的素材;② lang:ja 过滤应命中日文字幕文件。
+# 步骤 9:多语言 / 分面额外检查(独立报告,不进门禁分母)。
+# 2026-11-08:原版写死 "chicken wings" 与 lang:ja —— 清退流水线素材后两者皆 dead,
+# 报告恒空。改为语料感知:从当前素材派生英文 token 查询,并报告**实际存在**的 lang: 分面。
 # ---------------------------------------------------------------------------
 def evaluate_extra():
-    """返回 {english_chicken_wings_top5, lang_ja_subs_count, lang_ja_subs_sample}。"""
-    eng = core.search("chicken wings", limit=5)
+    """语料感知的多语言/分面检查;返回派生英文查询 top5 + 实际 lang: 分面计数。"""
+    ms = core.all_materials()
+    # 复用派生 GT 的键(已经过两模式可召回校验),不再拿乱码文件名 token 当英文查询
+    toks = list(derived_ground_truth(ms))
+    eng_q = next((t for t in toks if t.isascii() and t.isalpha()), "")
+    eng = core.search(eng_q, limit=5) if eng_q else []
     eng_top = [{"id": m["id"], "name": m.get("name", ""), "kind": m.get("kind")}
                for m in eng]
-    ja = core.search("", tag="lang:ja", limit=200)
-    ja_subs = [m for m in ja if m.get("kind") == "subs"]
+    # 统计当前语料里真实存在的 lang: 面标签(不再假定日文字幕一定存在)
+    lang_facets = {}
+    for m in ms:
+        for t in str(m.get("tags") or "").split(","):
+            t = t.strip()
+            if t.startswith("lang:"):
+                lang_facets[t] = lang_facets.get(t, 0) + 1
+    sample_tag = sorted(lang_facets)[0] if lang_facets else ""
+    hits = core.search("", tag=sample_tag, limit=200) if sample_tag else []
     return {
-        "english_chicken_wings_top5": eng_top,
-        "lang_ja_subs_count": len(ja_subs),
-        "lang_ja_subs_sample": [m["id"] for m in ja_subs[:8]],
+        "english_query": eng_q,
+        "english_top5": eng_top,
+        "lang_facets": lang_facets,
+        "lang_facet_checked": sample_tag,
+        "lang_facet_hit_count": len(hits),
+        "lang_facet_sample": [m["id"] for m in hits[:8]],
     }
 
 
@@ -259,21 +240,27 @@ def main():
                     help="指定 ground-truth JSON(默认 eval_ground_truth.json);"
                          "用于 A/B 不同的 GT 标注方案")
     ap.add_argument("--extra", action="store_true",
-                    help="步骤 9:额外跑两条多语言检查(英文 chicken wings + lang:ja 过滤),"
-                         "只报告不影响旧中文门禁")
+                    help="步骤 9:多语言/分面额外检查(语料感知,只报告不进门禁分母)")
     args = ap.parse_args()
 
     if args.extra:
         ex = evaluate_extra()
-        print("=== 步骤 9 多语言额外检查(不进中文门禁分母) ===")
-        print("英文 chicken wings 前 5:")
-        for r in ex["english_chicken_wings_top5"]:
+        print("=== 步骤 9 多语言/分面额外检查(语料感知,不进门禁分母) ===")
+        print("派生英文查询 %r 前 5:" % ex["english_query"])
+        for r in ex["english_top5"]:
             print(f"  {r['id']}  [{r['kind']}]  {r['name']}")
-        print(f"lang:ja 字幕命中数: {ex['lang_ja_subs_count']}  样本: {ex['lang_ja_subs_sample']}")
+        print("当前语料实际 lang: 分面:", ex["lang_facets"] or "(无)")
+        print(f"抽查 {ex['lang_facet_checked'] or '(无)'} 命中数: "
+              f"{ex['lang_facet_hit_count']}  样本: {ex['lang_facet_sample']}")
         return
 
     gt = load_ground_truth(args.gt)
-    oracle = "human-ground-truth" if gt else "heuristic(synonym-expansion)"
+    if gt:
+        oracle = "human-ground-truth"
+    else:
+        # 无权威 GT:按当前语料确定性派生临时 GT,评估仍有意义(不再是死查询)
+        gt = derived_ground_truth()
+        oracle = "corpus-derived(smoke;建议 gen_ground_truth.py 生成权威 GT)"
 
     def _show(mode):
         per, p5, r20, mrr, ndcg = evaluate(mode, gt)
