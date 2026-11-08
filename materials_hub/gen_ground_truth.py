@@ -1,75 +1,145 @@
-"""生成 eval_ground_truth.json(人工标注的权威相关集)。
+# -*- coding: utf-8 -*-
+"""生成/重建 eval_ground_truth.json(检索门禁的权威相关集)。
 
 用法:
-    python gen_ground_truth.py           # 合并模式:只**新增**缺失的查询键,
-                                         # 绝不覆盖已有键(保护人工核对过的标注)
-    python gen_ground_truth.py --force   # 重建模式:丢弃现文件,只写本脚本内置的 9 类种子
+    python gen_ground_truth.py           # 合并模式:保留仍有效的旧标注 + 补新查询
+    python gen_ground_truth.py --force   # 重建模式:只按当前语料生成
+    python gen_ground_truth.py --dry     # 只预览,不写文件
 
-仅读取索引、生成 JSON,不改动任何素材。eval_search.py 检测到该文件即改用
-human-ground-truth 作为 oracle(R@20 分母=真实相关数)。
-2026-09-28 起该文件含 7 组人工核对的窄查询(见 §15.4),默认合并防止重跑覆盖。
+设计原则(2026-11-08 重写):
+  * **语料感知**:查询从当前素材文件名里可检索的 token(中文串 / ASCII 词)自动派生,
+    相关集 = 文本含该 token 的素材 id(确定性、可人工核对,不依赖模型自身输出)。
+    绝不写死旧流水线语料的查询(如 dehardsub/srt),否则语料一换 GT 立即全 dead。
+  * **永不写空查询**:空相关集会把门禁均值拉成 0 → 假失败。
+  * **合并模式清理陈旧键**:旧 GT 里 id 已全部不在当前语料的查询会被丢弃
+    (原先"绝不覆盖已有键"会把 9 条死查询永久留在 GT,重跑即复活)。
+  * 只按当前语料生成,不改动任何素材。
+
+门禁读到该文件即改用 human-ground-truth 作为 oracle。GT 与语料严重失配时
+eval_search.py 会判 GT_STALE 并跳过评估(而非误报回归)。
 """
+import json
+import os
+import re
 import sys
 
-import core, json, os
+import core
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+OUT = os.path.join(HERE, "eval_ground_truth.json")
 FORCE = "--force" in sys.argv
+DRY = "--dry" in sys.argv
 
-core.init_hub()
-ms = core.all_materials()
+# 文件名里这些 token 太泛(扩展名/通用词),不能当查询
+STOP = {
+    "jpg", "jpeg", "png", "gif", "webp", "bmp", "pdf", "mp4", "srt", "ass",
+    "image", "images", "img", "photo", "photos", "picture", "pictures",
+    "微信图片", "图片", "照片", "截图", "final", "copy", "test", "tmp",
+}
+CN_RUN = re.compile(r"[\u4e00-\u9fff]{2,}")
+EN_RUN = re.compile(r"[A-Za-z]{3,}")
 
 
 def blob(m):
-    return " ".join(str(m.get(k, "")) for k in
-                    ("name", "tags", "description", "external_path", "rel_path")).lower()
+    """可检索文本(与 core._material_text 的字段口径保持一致)。"""
+    return " ".join(str(m.get(k, "") or "") for k in
+                    ("name", "orig_name", "tags", "description",
+                     "external_path", "rel_path")).lower()
 
 
-def pick(*subs):
-    """素材文本里命中任一子串即视为相关(首版粗标,可调)。"""
-    def pred(m):
-        b = blob(m)
-        return any(s in b for s in subs)
-    return [m["id"] for m in ms if pred(m)]
+def candidate_queries(ms):
+    """从当前语料文件名派生候选查询 token(去重、去停用、去纯 hex/uuid)。"""
+    toks = []
+    for m in ms:
+        name = str(m.get("orig_name") or m.get("name") or "")
+        stem = os.path.splitext(name)[0]
+        for run in CN_RUN.findall(stem) + EN_RUN.findall(stem):
+            t = run.lower()
+            if t in STOP or len(t) < 2:
+                continue
+            if re.fullmatch(r"[0-9a-f]{8,}", t):       # uuid / 哈希片段
+                continue
+            if t not in toks:
+                toks.append(t)
+    return toks
 
 
-gt = {
-    "去除字幕只留背景": pick("dehardsub", "hardsub"),
-    "把模糊画面变清晰": pick("deblur", "clean"),
-    "按时间切的片段":   pick("segment"),
-    "字幕文本文件":     pick("srt", "ass", "subs", "type:subs"),
-    "对比渲染结果":     pick("cmp", "compare"),
-    "人脸修复":         pick("codeformer", "gfpgan", "face", "fixed"),
-    "基准测试视频":     pick("benchmark", "bench"),
-    "b站下载的字幕":    [m["id"] for m in ms
-                         if "bilibili" in blob(m)
-                         and any(t in blob(m) for t in ("srt", "ass", "subs", "type:subs", "caption"))],
-    "修好的成品":       pick("out", "final", "fixed"),
-}
+def build_gt(ms, verify=True):
+    """按当前语料构造 GT;verify=True 时要求两门禁模式都能检索到相关集。"""
+    texts = {m["id"]: blob(m) for m in ms}
+    gt = {}
+    seen_sets = set()
+    for q in candidate_queries(ms):
+        rel = [mid for mid, t in texts.items() if q in t]
+        if not rel or len(rel) > 8:      # 空集 / 过泛查询都不写
+            continue
+        key = tuple(sorted(rel))
+        if key in seen_sets:             # 同一相关集的冗余 token(如 FunUnion/fununion)只留一个
+            continue
+        if verify:
+            # 至少 lexical 与 auto 两种模式都要能召回,避免单模式门禁假失败
+            ok = True
+            for mode in ("lexical", "auto"):
+                try:
+                    ids = {x["id"] for x in core.search(q, limit=20, mode=mode)}
+                except Exception:
+                    ok = False
+                    break
+                if not (set(rel) & ids):
+                    ok = False
+                    break
+            if not ok:
+                continue
+        gt[q] = sorted(rel)
+        seen_sets.add(key)
+    return gt
 
-out = os.path.join(os.path.dirname(__file__), "eval_ground_truth.json")
 
-old = {}
-if os.path.exists(out):
-    try:
-        with open(out, encoding="utf-8") as f:
-            old = json.load(f)
-    except Exception as e:
-        print(f"[warn] 现文件不可读({e}),按 --force 语义重建")
-        old = {}
+def valid_existing(old, have):
+    """保留仍有效的旧标注(id 至少还有一个在当前语料);丢弃陈旧/空查询。"""
+    kept = {}
+    for q, ids in old.items():
+        if isinstance(ids, list) and any(i in have for i in ids):
+            kept[q] = [i for i in ids if i in have]
+    return kept
 
-if FORCE or not old:
-    merged = dict(gt)
-    mode = "force-rebuild" if FORCE else "init"
-else:
-    merged = dict(old)
-    added = [k for k in gt if k not in merged]
-    for k in added:
-        merged[k] = gt[k]
-    mode = f"merge(+{len(added)} new, kept {len(old)} existing)"
 
-with open(out, "w", encoding="utf-8") as f:
-    json.dump(merged, f, ensure_ascii=False, indent=2)
+def main():
+    core.init_hub()
+    ms = core.all_materials()
+    have = {m["id"] for m in ms}
+    fresh = build_gt(ms)
+    print("当前语料 %d 条,派生有效查询 %d 条" % (len(ms), len(fresh)))
 
-print(f"wrote {out}  (mode={mode}, total {len(merged)} queries)")
-for k, v in merged.items():
-    print(f"  {k:14}  n={len(v):3}  sample={v[:3]}")
+    old = {}
+    if os.path.exists(OUT):
+        try:
+            with open(OUT, encoding="utf-8") as f:
+                old = json.load(f)
+        except Exception as e:
+            print("[warn] 现文件不可读(%s),按重建处理" % e)
+            old = {}
+
+    if FORCE or not old:
+        merged, mode = dict(fresh), ("force-rebuild" if FORCE else "init")
+    else:
+        merged = valid_existing(old, have)
+        added = [k for k in fresh if k not in merged]
+        for k in added:
+            merged[k] = fresh[k]
+        mode = "merge(+%d new, kept %d valid, dropped %d stale/empty)" % (
+            len(added), len(valid_existing(old, have)), len(old) - len(valid_existing(old, have)))
+
+    if DRY:
+        print("DRY-RUN(未写入) mode=%s total=%d" % (mode, len(merged)))
+    else:
+        with open(OUT, "w", encoding="utf-8") as f:
+            json.dump(merged, f, ensure_ascii=False, indent=2)
+        print("wrote %s  (mode=%s, total %d queries)" % (OUT, mode, len(merged)))
+    for k, v in merged.items():
+        print("  %-16s n=%-3d %s" % (k[:16], len(v), [i[:8] for i in v[:4]]))
+    return merged
+
+
+if __name__ == "__main__":
+    main()

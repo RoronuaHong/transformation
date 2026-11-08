@@ -107,6 +107,12 @@ GATE_BASELINE = {"p5": 0.78, "r20": 0.92, "mrr": 0.93, "ndcg": 0.92}
 AUTO_GATE_BASELINE = {"p5": 0.49, "r20": 0.84, "mrr": 0.80, "ndcg": 0.75}
 GATE_TOL = 0.02          # 容差:允许浮点/排序稳定性带来的微小波动
 GATE_METRICS = ("p5", "r20", "mrr", "ndcg")
+# 2026-11-08 语料重定基线(384 条流水线素材 → 15 条个人图片):
+#   ① GT 由 gen_ground_truth.py 按当前语料重建(9 查询,均非空相关集),不再引用已删 id;
+#   ② P@5 归一化到 P@min(5,|rel|)——标准 P@K 在 |rel|<K 时被 |rel|/K 结构性封顶
+#      (1 条相关的完美检索仅 0.2),小语料上会假失败;|rel|>=5 时定义不变,基线数值无需改动;
+#   ③ 实测 lexical 1.00/1.00/1.00/1.00、auto 全 1.00,门禁从 GT_STALE 休眠恢复为真实 PASS。
+#   基线仍保留历史值作为**下限护栏**(只判"是否跌破",不随语料上调放过回归)。
 
 
 def check_gate(p5, r20, mrr, ndcg, baseline=None, tol=GATE_TOL):
@@ -198,7 +204,11 @@ def evaluate(mode, gt=None):
             total = total_rel.get(q, len(rel_set)) or 1
         top5 = ids[:5]
         top20 = ids[:20]
-        p5 = sum(1 for i in top5 if i in rel_set) / 5.0
+        # P@5 归一化:标准 P@K 在 |rel|<K 时被 |rel|/K 结构性封顶(1 条相关集的完美
+        # 检索也只有 0.2),小语料上会假失败。用 min(5, total) 作分母 → P@min(5,|rel|);
+        # 当 |rel|>=5 时与标准定义完全一致,故历史基线数值无需改动。
+        den5 = min(5, total) if total else 5.0
+        p5 = sum(1 for i in top5 if i in rel_set) / den5
         r20 = sum(1 for i in top20 if i in rel_set) / total if total else 0.0
         # MRR / NDCG@10:对排序质量敏感,P@5 在大相关性集下饱和时用它区分 lexical vs auto
         mrr = 0.0

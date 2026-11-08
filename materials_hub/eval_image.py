@@ -5,8 +5,10 @@
 查询跑 core.search_by_text_image,算 P@5 / R@20 / MRR / NDCG@10,均值掉出基线(容差
 0.02)即 FAIL(退出码 1)。GT 人工标注({查询:[相关素材 id,...]}),检测到即用精确标注。
 
-注:个人素材语料小(19 条),R@20 基本饱和(~1.0),真正对 CLIP 退化敏感的是 P@5/MRR/NDCG。
+注:个人素材语料小,R@20 基本饱和(~1.0),真正对 CLIP 退化敏感的是 P@5/MRR/NDCG。
 建 GT/基线的教训同词法门禁:先跑真实输出再标期望,基线按实测回填(见文件尾沿革)。
+2026-11-08:P@5 归一化到 min(5,|rel|)(小相关集不再被 |rel|/5 结构性封顶),
+GT 随当前 15 图语料重标(见沿革)。
 
 用法:
   python eval_image.py            # 跑一遍看指标(不门禁)
@@ -66,7 +68,9 @@ def evaluate(gt, limit=20):
         rows = rows or []
         ids = [x.get("id") for x in rows if isinstance(x, dict)]
         top5, top20 = ids[:5], ids[:20]
-        p5 = sum(1 for i in top5 if i in rel) / 5.0
+        # 与 eval_search 一致:P@K 在 |rel|<K 时结构性封顶,归一化到 min(5,total)。
+        den5 = min(5, total) if total else 5.0
+        p5 = sum(1 for i in top5 if i in rel) / den5
         r20 = (sum(1 for i in top20 if i in rel) / total) if total else 0.0
         mrr = 0.0
         for i, mid in enumerate(ids):
@@ -158,6 +162,11 @@ def main():
 # 7 查询均为"先跑真实输出再标期望":宠物图零样本匹配"宠物狗"偏弱(排 3-5),故 P@5 不高,
 # 但 MRR/NDCG 对 CLIP 退化(换错模型/向量损坏→排序随机化)敏感,可作回归护栏。
 # 换 CLIP 模型或重建向量后必须重跑本门禁回填基线。
+# 2026-11-08 二次重标:语料清退到 15 条个人图,原 7 查询标注的 5 个 id 已删除 →
+# GT_STALE 休眠(门禁不能误报回归);GT 随当前语料重建(6 个有结果查询,空相关集丢弃)。
+# 同批修复 P@5:标准 P@K 在 |rel|<K 时被 |rel|/K 封顶(1 条相关的完美检索仅 0.2),
+# 统一改用 min(5,total) 分母 = P@min(5,|rel|);|rel|>=5 时与标准定义一致,基线数值不变。
+# 实测 1.00/1.00/1.00/1.00,两处门禁(文本 lexical+auto、图像)全部 GATE PASS 而非 SKIP。
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     main()

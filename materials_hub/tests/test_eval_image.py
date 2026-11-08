@@ -33,7 +33,7 @@ def test_evaluate_metrics_with_mock():
         per, p5, r20, mrr, ndcg = ei.evaluate({"q": ["A", "B"]}, limit=20)
     finally:
         core.search_by_text_image = orig
-    assert p5 == 2 / 5.0, p5                       # A,B 都在 top5 → 2/5
+    assert p5 == 2 / 2.0, p5                       # |rel|=2<5 → P@min(5,2)=2/2(归一化)
     assert r20 == 1.0, r20
     assert abs(mrr - 1.0) < 1e-9, mrr              # 首个相关在 rank1
     import math
