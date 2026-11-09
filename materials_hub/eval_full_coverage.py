@@ -265,17 +265,20 @@ def main():
     # :8000 的后台 auto 链(待处理素材的 describe/visual)会持续占用 ollama,
     # 本子进程的 embed 请求可能在队列里排队超时——此时若 auto 链确实在跑,
     # 记 SKIP(门禁保障由独立运行 `--mode auto --gate` 承担,本轮已实跑 PASS)。
+    # 超时设 600s:auto 模式单次检索要过 翻译/embed/CLIP/重排 四道模型,本机 6GB VRAM
+    # 装不下 bge-m3+CLIP+translategemma,ollama 在查询间驱逐重载(单查 0.2s↔39s 抖动),
+    # 9 查询常态 ~340s;重排进程已改常驻(只首查加载一次 560MB 模型),不再每查冷加载。
     try:
         out = subprocess.run([sys.executable, "eval_search.py", "--mode", "auto", "--gate"],
                              capture_output=True, text=True, encoding="utf-8", errors="replace",
-                             cwd=HERE, timeout=300)
+                             cwd=HERE, timeout=600)
         so = out.stdout + out.stderr
         gate_pass = ("GATE: PASS" in so) or ("GATE: GT_STALE (SKIPPED)" in so)
         check("O2", "语义(auto)门禁 PASS 或 GT 失配正确 SKIP(主路径同等受保护)", gate_pass,
               "stdout=%s" % [l for l in so.splitlines() if "GATE" in l or "FAIL" in l][:2])
     except subprocess.TimeoutExpired:
         # 争用信号:后台 auto 链消化待处理素材时占满 CPU/GPU,auto 检索单查可到
-        # 35-60s(实测),11 查询远超 300s。pending>0 即判环境争用,记 SKIP——
+        # 35-60s(实测),9 查询可逼近 600s。pending>0 即判环境争用,记 SKIP——
         # 门禁保障由独立运行 `--mode auto --gate` 承担(本轮语料重构后已实跑 PASS)。
         pending_n = -1
         try:
@@ -288,7 +291,7 @@ def main():
             check("O2", "语义(auto)门禁 PASS(主路径同等受保护)", True,
                   f"SKIP: auto 链消化中(pending={pending_n})占满资源,独立 --gate 已实跑 PASS")
         else:
-            check("O2", "语义(auto)门禁 PASS", False, "err: timeout 300s 且 pending=0,需排查")
+            check("O2", "语义(auto)门禁 PASS", False, "err: timeout 600s 且 pending=0,需排查")
     except Exception as e:
         check("O2", "语义(auto)门禁 PASS", False, "err: %s" % e)
 

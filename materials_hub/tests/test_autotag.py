@@ -3,7 +3,6 @@
 不依赖真实模型:只测 sidecar 协议、检索通道、降级行为(模型可用性由 CLI 冒烟覆盖)。"""
 import json
 import os
-from subprocess import TimeoutExpired
 
 import core
 
@@ -60,19 +59,45 @@ def test_score_hits_autotag_channel():
 
 def test_onnx_rerank_degrades_gracefully_on_failure(monkeypatch):
     docs = ["a", "b", "c"]
-    # 故障注入:子进程崩溃/超时 → 必须返回 None(降级 RRF),绝不能让检索挂掉
-    def _boom(*a, **kw):
-        raise TimeoutExpired("rerank_runner.py", 600)
-    monkeypatch.setattr(core.subprocess, "run", _boom)
-    assert core._onnx_rerank("q", docs) is None
+    # 故障注入:子进程无法启动(_get_rerank_proc 返回 None)→ 必须返回 None(降级 RRF),
+    # 绝不能让检索挂掉。2026-11-09 重排器改为常驻 Popen,故障面从 `subprocess.run`
+    # 变为 `_get_rerank_proc` 返回 None / 进程中途退出,此处同步改 mock 该 seam。
+    monkeypatch.setattr(core, "_get_rerank_proc", lambda py, runner: None)
+    core._RERANK_PROC = None
+    try:
+        assert core._onnx_rerank("q", docs) is None
+    finally:
+        core._RERANK_PROC = None
 
 
 def test_onnx_rerank_rejects_bad_payload(monkeypatch):
     docs = ["a", "b"]
-    class _P:
-        stdout = b'{"ok": true, "scores": [0.1]}'   # 长度与 docs 不符
-    monkeypatch.setattr(core.subprocess, "run", lambda *a, **kw: _P())
-    assert core._onnx_rerank("q", docs) is None
+    # 常驻协议:进程返回与 docs 不等长的 scores → 视为无效,返回 None(降级 RRF)。
+    class _FakeProc:
+        def __init__(self):
+            self.stdin = type("S", (), {"write": lambda *a, **k: None,
+                                        "flush": lambda *a, **k: None})()
+            self._lines = iter([json.dumps({"ok": True, "scores": [0.1]})])
+        def poll(self):
+            return None
+        @property
+        def stdout(self):
+            return self
+        def readline(self):
+            try:
+                return next(self._lines) + "\n"
+            except StopIteration:
+                return ""
+        def kill(self):
+            pass
+        def wait(self, timeout=None):
+            pass
+    monkeypatch.setattr(core, "_get_rerank_proc", lambda py, runner: _FakeProc())
+    core._RERANK_PROC = None
+    try:
+        assert core._onnx_rerank("q", docs) is None
+    finally:
+        core._RERANK_PROC = None
 
 
 def test_rerank_status_modes():

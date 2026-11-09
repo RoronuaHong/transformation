@@ -7,12 +7,17 @@
     materials_hub/models/rerank/tokenizer.json (XLM-RoBERTa BPE,tokenizers 库直接加载,
                                                 无需 sentencepiece)
 
-协议:
-    stdin : {"query": "...", "texts": ["...", ...]}
-    stdout: {"ok": true, "scores": [float, ...]}   与 texts 等长同序,分数越高越相关
-            {"error": "..."}
+协议(常驻模式):
+    core._onnx_rerank 持有本子进程并**复用**——进程常驻,从 stdin 逐行读请求、
+    逐行回响应,模型只在首次请求时加载一次(避免每次重排都冷加载 560MB 模型)。
+    单行请求:  {"query": "...", "texts": ["...", ...]}
+    单行响应:  {"ok": true, "scores": [float, ...]}   与 texts 等长同序,分数越高越相关
+               {"error": "..."}                       该请求失败,进程继续处理下一行
+    空 stdin(EOF)→ 进程退出。
+    (旧版是一次性进程:每次重排 spawn + 加载模型,单次语义检索就可观延迟;
+     现改为常驻后,首次请求承担模型加载,后续请求只做推理,跨查询/跨检索调用均复用。)
 
-为什么走 cross-encoder:RRF/稠密余弦是「向量空间里的距离」,而 cross-encoder 把
+为什么走 cross-encoder:RRF/稠密余弦是「向量 space 里的距离」,而 cross-encoder 把
 (query, doc) 拼在一起过模型,能看见词级交互,是检索精度的最后一道精排
 (bge-reranker-v2-m3 与库内 bge-m3 同源配套,多语一致)。
 """
@@ -89,23 +94,33 @@ def score_pairs(query, texts):
     return [float(x) for x in np.asarray(logits).reshape(-1)]
 
 
-def main():
-    try:
-        payload = json.loads(sys.stdin.read() or "{}")
-    except Exception as e:
-        print(json.dumps({"error": "bad_stdin:%s" % e}, ensure_ascii=False))
-        return
+def _handle(payload):
     q = (payload.get("query") or "").strip()
     texts = payload.get("texts") or []
     if not q or not texts:
-        print(json.dumps({"error": "empty_query_or_texts"}, ensure_ascii=False))
-        return
+        return {"error": "empty_query_or_texts"}
     try:
         scores = score_pairs(q, [str(t) for t in texts])
-        print(json.dumps({"ok": True, "scores": scores}, ensure_ascii=False))
+        return {"ok": True, "scores": scores}
     except Exception as e:
-        print(json.dumps({"error": "%s: %s" % (type(e).__name__, e)},
-                         ensure_ascii=False))
+        # 单请求失败不影响进程:返回错误行,继续读下一行(模型已加载,无需重启)
+        return {"error": "%s: %s" % (type(e).__name__, e)}
+
+
+def main():
+    # 常驻循环:逐行读 JSON 请求 → 逐行回 JSON 响应。模型在首次 score_pairs 时加载一次,
+    # 之后所有请求复用(见文件头协议说明)。stdin EOF(对端关闭)即退出。
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except Exception as e:
+            print(json.dumps({"error": "bad_stdin:%s" % e},
+                             ensure_ascii=False), flush=True)
+            continue
+        print(json.dumps(_handle(payload), ensure_ascii=False), flush=True)
 
 
 if __name__ == "__main__":

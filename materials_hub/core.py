@@ -1840,11 +1840,14 @@ def _translate_to_zh(q):
     if not model:
         return ""
     try:
+        # keep_alive 与 embed 一致(默认 30m):否则 translategemma 被并发任务挤出后,
+        # 下一次跨语查询要冷加载,拖累含英文查询的检索门禁时序。
+        ka = os.environ.get("VITUAL_EMBED_KEEP_ALIVE", "30m")
         r = _http_json(_embed_url() + "/api/generate", timeout=60,
                        payload={"model": model,
                                 "prompt": "Translate the following text into Simplified Chinese. "
                                           "Output only the translation, no explanation or quotes.\n\n" + q,
-                                "stream": False})
+                                "stream": False, "keep_alive": ka})
         return (r.get("response") or "").strip().strip("\"' \n")
     except Exception:
         return ""
@@ -2175,29 +2178,96 @@ def _ollama_rerank_fallback_model():
     return ""
 
 
+# 常驻重排子进程(模型只加载一次,跨查询/跨检索复用;详见 rerank_runner.py 协议)。
+_RERANK_PROC = None
+_RERANK_LOCK = None
+
+
+def _rerank_lock():
+    global _RERANK_LOCK
+    if _RERANK_LOCK is None:
+        import threading
+        _RERANK_LOCK = threading.Lock()
+    return _RERANK_LOCK
+
+
+def _get_rerank_proc(py, runner):
+    global _RERANK_PROC
+    if _RERANK_PROC is not None:
+        if _RERANK_PROC.poll() is None:   # 还活着就复用
+            return _RERANK_PROC
+        _RERANK_PROC = None
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    flags = 0x08000000 if os.name == "nt" else 0
+    try:
+        # text=True + encoding=utf-8 + bufsize=1 = 行缓冲且统一 UTF-8(中文 Windows 默认
+        # cp936 会把中文 JSON 写成 GBK 字节,子进程 sys.stdin 按 utf-8 解码即 UnicodeDecodeError
+        # 崩溃,必须两端显式 UTF-8);stderr 丢弃避免满管道死锁
+        p = subprocess.Popen([py, runner], stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             env=env, creationflags=flags,
+                             text=True, encoding="utf-8", bufsize=1)
+    except Exception:
+        return None
+    _RERANK_PROC = p
+    return p
+
+
+def _kill_rerank_proc():
+    global _RERANK_PROC
+    p = _RERANK_PROC
+    _RERANK_PROC = None
+    if p is not None:
+        try:
+            p.stdin.close()
+        except Exception:
+            pass
+        try:
+            p.kill()
+        except Exception:
+            pass
+        try:
+            p.wait(timeout=5)
+        except Exception:
+            pass
+
+
 def _onnx_rerank(q, docs, timeout=600):
-    """本地 cross-encoder 重排:rerank_runner.py 子进程(SP venv onnxruntime + tokenizers)。
+    """本地 cross-encoder 重排:常驻 rerank_runner.py 子进程(SP venv onnxruntime + tokenizers)。
 
     返回按相关性降序的文档下标列表;任何异常都返回 None(调用方降级为原 RRF 融合)。
-    文本经 **stdin JSON** 传入——60 条 × 1.2KB 会超 Windows 32KB argv 上限,不能用命令行传。"""
+    文本经 **stdin 单行 JSON** 传入——60 条 × 1.2KB 会超 Windows 32KB argv 上限,不能用命令行传。
+
+    2026-11-09 改为**常驻进程**:早期每次重排都 `subprocess.run` 一个全新子进程并冷加载
+    560MB 模型,单次语义检索(含 rerank 的 mode=auto)因此延迟 ~15–25s,检索回归门禁也受牵连
+    逼近 300s 超时。现复用一个长活子进程,模型仅在首请求加载一次,后续请求只做推理。"""
     py = _clip_python()
     runner = os.path.join(HUB, "rerank_runner.py")
     if not py or not os.path.isfile(runner) or not docs:
         return None
-    env = dict(os.environ, PYTHONIOENCODING="utf-8")
-    flags = 0x08000000 if os.name == "nt" else 0
-    try:
-        p = subprocess.run([py, runner], input=json.dumps(
-            {"query": q, "texts": list(docs)}, ensure_ascii=False).encode("utf-8"),
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            timeout=timeout, env=env, creationflags=flags)
-    except Exception:
-        return None
-    try:
-        raw = (p.stdout or b"").decode("utf-8", "replace").strip()
-        r = json.loads(raw.splitlines()[-1])
-    except Exception:
-        return None
+    req = json.dumps({"query": q, "texts": list(docs)}, ensure_ascii=False)
+    with _rerank_lock():
+        p = _get_rerank_proc(py, runner)
+        if p is None:
+            return None
+        try:
+            p.stdin.write(req + "\n")
+            p.stdin.flush()
+            line = p.stdout.readline()
+            if not line:                       # 进程中途挂了 → 清理并重 spawn 一次重试
+                _kill_rerank_proc()
+                p = _get_rerank_proc(py, runner)
+                if p is None:
+                    return None
+                p.stdin.write(req + "\n")
+                p.stdin.flush()
+                line = p.stdout.readline()
+                if not line:
+                    return None
+            r = json.loads(line.strip())
+        except Exception:
+            _kill_rerank_proc()
+            return None
     scores = r.get("scores")
     if r.get("error") or not isinstance(scores, list) or len(scores) != len(docs):
         return None

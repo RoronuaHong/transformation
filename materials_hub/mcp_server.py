@@ -577,7 +577,10 @@ def t_search_eval(a):
     except Exception:
         gt = None
     per_q, p5, r20, mrr, ndcg = ev.evaluate(mode, gt=gt or None)
-    ok, details = ev.check_gate(p5, r20, mrr, ndcg)
+    # 门禁基线:auto 模式用 AUTO_GATE_BASELINE,否则(词法/语义)用 GATE_BASELINE;
+    # 漏传 baseline 会让 auto 模式误用词法基线,导致门禁判据失真。
+    base = ev.AUTO_GATE_BASELINE if mode == "auto" else None
+    ok, details = ev.check_gate(p5, r20, mrr, ndcg, baseline=base)
     try:
         stale = ev.gt_staleness(gt)
     except Exception:
@@ -587,7 +590,7 @@ def t_search_eval(a):
         "mode": mode, "gt_used": bool(gt),
         "metrics": {"p5": round(p5, 4), "r20": round(r20, 4),
                     "mrr": round(mrr, 4), "ndcg": round(ndcg, 4)},
-        "baseline": ev.GATE_BASELINE,
+        "baseline": base if base is not None else ev.GATE_BASELINE,
         "gate": {"ok": ok, "details": details},
         "gt_stale": stale,
         "verdict": verdict,

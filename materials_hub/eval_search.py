@@ -283,6 +283,17 @@ def main():
                   f"{st.get('empty_queries')}/{st.get('queries')} 条查询整组缺失")
             print("  → 指标不可信；请先用 gen_ground_truth.py 按当前语料重标 GT 再跑门禁")
             sys.exit(0)
+        # 预热:先用一条真实 GT 查询跑一次目标模式检索,把 embed/CLIP/重排(及英文查询的
+        # 翻译)等模型在**门禁计时循环之外**冷加载一次;否则 9 条查询里第一条会独吞全部模型
+        # 加载(~80s),让门禁时序不可复现且逼近 harness 超时。常驻重排进程也会在这一次里
+        # 完成 560MB 模型加载。注:本机 6GB VRAM 装不下 bge-m3+CLIP+translategemma 三模型,
+        # ollama 会在查询间驱逐并重载(每查询 0.2s↔39s 抖动)——这是硬件限制,门禁超时已相应放宽。
+        try:
+            warm_q = next(iter(gt), None)
+            if warm_q:
+                core.search(warm_q, limit=20, mode=args.mode)
+        except Exception:
+            pass
         _per, p5, r20, mrr, ndcg = evaluate(args.mode, gt)
         base = AUTO_GATE_BASELINE if args.mode == "auto" else None
         ok, details = check_gate(p5, r20, mrr, ndcg, baseline=base)
