@@ -358,12 +358,6 @@ def admin_links(limit: int = 100) -> dict:
     return {"items": store().list_links(limit=limit)}
 
 
-@app.get("/admin/links", dependencies=[Depends(require_admin)])
-def admin_links(limit: int = 100) -> dict:
-    sync_links_from_queue(store(), source="sync")
-    return {"items": store().list_links(limit=limit)}
-
-
 @app.post("/admin/crawler/crawl", dependencies=[Depends(require_admin)])
 def admin_crawler_crawl(
     body: CrawlerCrawlBody, background: BackgroundTasks, settings: Settings = Depends(get_settings)

@@ -70,8 +70,12 @@ class OllamaClient:
         except Exception:
             if not self.ollama_bin:
                 raise
+            # 通过 stdin 传 prompt：Windows 上 subprocess 会把 argv 按 GBK 编码，
+            # 含 GBK 无法编码的 CJK 字符时会抛 UnicodeEncodeError。改用 stdin 管道
+            # （utf-8）即可规避该问题。`ollama run <model>` 在未给 prompt 参数时会从 stdin 读取。
             r = subprocess.run(
-                [self.ollama_bin, "run", self.model, prompt],
+                [self.ollama_bin, "run", self.model],
+                input=prompt,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",

@@ -19,6 +19,20 @@ UNIT_TARGETS = [
     "test_segment_subs.py",
     "test_merge_slices.py",
     "test_media_ops.py",
+    # Added 2026-11-05: pure-logic / lightweight suites with no hard external
+    # deps (mongo/ollama/network). All verified passing locally (57 passed,
+    # 2 skipped) under `-k "not (remix_burns or run_postproc or vertical_ffmpeg)"`.
+    "test_m3u8.py",
+    "test_job_layout.py",
+    "test_job_pack.py",
+    "test_glyph_hybrid.py",
+    "test_notes.py",
+    "test_plate.py",
+    "test_workflows.py",
+    "test_stages.py",
+    "test_game_claim.py",
+    "test_keypoint_clips.py",
+    "test_llm_fallback.py",
 ]
 UNIT_IGNORE = "remix_burns or run_postproc or vertical_ffmpeg"
 
