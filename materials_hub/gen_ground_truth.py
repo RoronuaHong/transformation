@@ -104,13 +104,39 @@ def valid_existing(old, have):
     return kept
 
 
+def merged_gt(ms, old=None, force=False, verify=True):
+    """纯函数:按当前语料 + 可选旧 GT 合并出权威 GT。返回 (merged, mode, stats)。
+
+    抽出为独立函数是 2026-11-10 的改动:`gt_guard.py` 的语料变更自动重标钩子需要
+    **复用同一套合并语义**(保留仍有效的人工标注、只补新查询、丢弃死查询),
+    否则两条路径会各自演化,自动重标可能悄悄抹掉人工标注。
+    verify=False 供离线/快速预览(不跑检索),正式重标用 True。
+    """
+    have = {m["id"] for m in ms}
+    fresh = build_gt(ms, verify=verify)
+    old = old or {}
+    if force or not old:
+        merged = dict(fresh)
+        mode = "force-rebuild" if force else "init"
+        kept, added = 0, len(fresh)
+    else:
+        kept_gt = valid_existing(old, have)
+        merged = dict(kept_gt)
+        new_keys = [k for k in fresh if k not in merged]
+        for k in new_keys:
+            merged[k] = fresh[k]
+        added, kept = len(new_keys), len(kept_gt)
+        mode = "merge(+%d new, kept %d valid, dropped %d stale/empty)" % (
+            added, kept, len(old) - kept)
+    stats = {"materials": len(ms), "fresh_queries": len(fresh),
+             "kept": kept, "added": added, "dropped": len(old) - kept if old else 0,
+             "total": len(merged)}
+    return merged, mode, stats
+
+
 def main():
     core.init_hub()
     ms = core.all_materials()
-    have = {m["id"] for m in ms}
-    fresh = build_gt(ms)
-    print("当前语料 %d 条,派生有效查询 %d 条" % (len(ms), len(fresh)))
-
     old = {}
     if os.path.exists(OUT):
         try:
@@ -119,23 +145,15 @@ def main():
         except Exception as e:
             print("[warn] 现文件不可读(%s),按重建处理" % e)
             old = {}
-
-    if FORCE or not old:
-        merged, mode = dict(fresh), ("force-rebuild" if FORCE else "init")
-    else:
-        merged = valid_existing(old, have)
-        added = [k for k in fresh if k not in merged]
-        for k in added:
-            merged[k] = fresh[k]
-        mode = "merge(+%d new, kept %d valid, dropped %d stale/empty)" % (
-            len(added), len(valid_existing(old, have)), len(old) - len(valid_existing(old, have)))
-
+    merged, _mode, stats = merged_gt(ms, old=old, force=FORCE, verify=True)
+    print("当前语料 %d 条,派生有效查询 %d 条,合并后 %d 条" % (
+        stats["materials"], stats["fresh_queries"], stats["total"]))
     if DRY:
-        print("DRY-RUN(未写入) mode=%s total=%d" % (mode, len(merged)))
+        print("DRY-RUN(未写入) mode=%s total=%d" % (_mode, len(merged)))
     else:
         with open(OUT, "w", encoding="utf-8") as f:
             json.dump(merged, f, ensure_ascii=False, indent=2)
-        print("wrote %s  (mode=%s, total %d queries)" % (OUT, mode, len(merged)))
+        print("wrote %s  (mode=%s, total %d queries)" % (OUT, _mode, len(merged)))
     for k, v in merged.items():
         print("  %-16s n=%-3d %s" % (k[:16], len(v), [i[:8] for i in v[:4]]))
     return merged

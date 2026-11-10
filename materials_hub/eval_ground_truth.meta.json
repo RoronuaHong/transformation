@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "gt_file": "eval_ground_truth.json",
+  "corpus_hash": "f1d48a86f94e835a",
+  "text_hash": "50e73a218d300726",
+  "materials": 15,
+  "queries": 9,
+  "generated_at": "2026-11-10T01:57:38Z",
+  "generator": "gt_guard.py",
+  "note": "adopt: 现有 GT 视为可信基线(未改动 GT)"
+}

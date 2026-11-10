@@ -275,13 +275,28 @@ def main():
         # GT 过期保护：语料重构后旧 GT 标注的 id 可能已不存在 → 召回虚低、门禁【假失败】。
         # 此时判 GT_STALE 并跳过（退出码 0），提示先重标 GT，而非误报检索回归。
         st = gt_staleness(gt)
-        if st.get("stale"):
+        # gt_staleness 只看「标注 id 是否还在」,看不见「旧 id 全在但语料新增/改名/
+        # 内容变了」——这种情况旧 GT 会让门禁报出误导性的 PASS。指纹判定由 gt_guard 补齐,
+        # 任一判失配都休眠(2026-11-10)。CI 另有 `gt_guard.py --check` 主动拦过期 GT。
+        guard_reasons = []
+        try:
+            import gt_guard
+            gs = gt_guard.status()
+            if gs.get("blocking"):
+                guard_reasons = ["%s: %s" % (k, "; ".join(t["hard_reasons"]))
+                                 for k, t in gs.get("targets", {}).items()
+                                 if t["state"] in ("stale", "legacy", "missing")]
+        except Exception as e:
+            print(f"[warn] 语料指纹检查不可用({e})，仅按 id 存活率判定")
+        if st.get("stale") or guard_reasons:
             print(f"\n=== 回归门禁 (mode={args.mode}) ===")
             print("GATE: GT_STALE (SKIPPED)")
             print(f"  GT 标注 {st.get('existing')}/{st.get('total_gt_ids')} 个 id "
                   f"仍存在于当前语料（coverage={st.get('coverage')}），"
                   f"{st.get('empty_queries')}/{st.get('queries')} 条查询整组缺失")
-            print("  → 指标不可信；请先用 gen_ground_truth.py 按当前语料重标 GT 再跑门禁")
+            for r in guard_reasons:
+                print("  语料指纹:", r)
+            print("  → 指标不可信；请跑 `python gt_guard.py --apply` 重标 GT 并刷新指纹基线")
             sys.exit(0)
         # 预热:先用一条真实 GT 查询跑一次目标模式检索,把 embed/CLIP/重排(及英文查询的
         # 翻译)等模型在**门禁计时循环之外**冷加载一次;否则 9 条查询里第一条会独吞全部模型

@@ -140,10 +140,20 @@ def main():
     if args.gate:
         # 与文本门禁一致:GT 与当前语料严重不匹配时评估不可信,跳过而非误报回归
         st = gt_staleness(gt)
-        if st.get("stale"):
+        # 与文本门禁一致:补上「语料指纹变化」这一 id 存活率看不到的失配来源。
+        guard_stale = False
+        try:
+            import gt_guard
+            gs = gt_guard.status()
+            img = gs.get("targets", {}).get("image", {})
+            guard_stale = img.get("state") in ("stale", "legacy", "missing")
+        except Exception as e:
+            print(f"[warn] 语料指纹检查不可用({e})，仅按 id 存活率判定")
+        if st.get("stale") or guard_stale:
             print(f"\n=== 回归门禁 (image) ===")
-            print(f"GATE: GT_STALE (SKIPPED) — {st.get('note', '')} "
+            print(f"GATE: GT_STALE (SKIPPED) — {st.get('note', '') or '语料指纹失配'} "
                   f"(coverage={st.get('coverage')}, empty_queries={st.get('empty_queries')})")
+            print("  → 请跑 `python gt_guard.py --apply` 对齐指纹基线并重标 GT")
             sys.exit(0)
         ok, details = check_gate(p5, r20, mrr, ndcg)
         print(f"\n=== 回归门禁 (image, oracle=human-ground-truth) ===")

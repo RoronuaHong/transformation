@@ -18,7 +18,7 @@
 | search_by_image | 多模态检索（pHash + CLIP + 以文搜图） | phash/clip 双路 + text-to-image | ✅ |
 | find_similar | 感知去重（dHash）+ 精确（sha256）互补 | dHash 近重复 + sha256 | ✅ |
 
-**行动**：① **P1 已对齐**（auto 默认本地 bge-reranker ONNX；补 ONNX→ollama 回退）。② **P2 已实施** —— 新增 `search_eval` MCP 工具，按需跑 P@5/R@20/MRR/nDCG + 回归门禁（复用 `eval_search`；有 `eval_ground_truth.json` 用权威标注，否则启发式）。③ **门禁「假失败」已定位并修复** —— 实测 `p5=0.073` 远低于基线 `0.78`，诊断发现**语料已从 256+ 清到 19 条，而 GT 标注的 86 个 id 全部不存在于当前语料**（`coverage=0.0`，9/9 查询整组缺失）→ 召回虚低、门禁假失败，**不是检索回归**（检索对当前语料工作正常）。已加 `eval_search.gt_staleness()`（GT id 在语料中的存活率/覆盖度）、`search_eval` 的 `verdict` 字段（`gt_stale`/`pass`/`regression`），并让 CLI `--gate` 在 GT 过期时判 `GT_STALE (SKIPPED)` **退出码 0**（不再误报 FAIL/1）。实测门禁现输出 `0/86 存活、9/9 查询整组缺失 → SKIPPED, exit 0`。
+**行动**：① **P1 已对齐**（auto 默认本地 bge-reranker ONNX；补 ONNX→ollama 回退）。② **P2 已实施** —— 新增 `search_eval` MCP 工具，按需跑 P@5/R@20/MRR/nDCG + 回归门禁（复用 `eval_search`；有 `eval_ground_truth.json` 用权威标注，否则按当前语料派生临时 GT 自检）。③ **门禁「假失败」已定位并修复** —— 实测 `p5=0.073` 远低于基线 `0.78`，诊断发现**语料已从 256+ 清到 19 条，而 GT 标注的 86 个 id 全部不存在于当前语料**（`coverage=0.0`，9/9 查询整组缺失）→ 召回虚低、门禁假失败，**不是检索回归**（检索对当前语料工作正常）。已加 `eval_search.gt_staleness()`（GT id 在语料中的存活率/覆盖度）、`search_eval` 的 `verdict` 字段（`gt_stale`/`pass`/`regression`），并让 CLI `--gate` 在 GT 过期时判 `GT_STALE (SKIPPED)` **退出码 0**（不再误报 FAIL/1）。实测门禁现输出 `0/86 存活、9/9 查询整组缺失 → SKIPPED, exit 0`。
 
 ## 二、多模态理解
 | 工具 | 最佳实践 | 现状 | 判定 |
@@ -63,4 +63,6 @@ assemble_package（manifest 驱动）+ deliver_package（转码/裁剪/格式归
 3. ~~P6 Agent cost/token/latency 埋点~~ **已实施**（`_chat` 累计 + `state.usage` + `agent_status` surfaces）。
 4. P3/P4/P5 均已完成（OCR bbox+置信 / 入库近重复预检 / 治理可执行建议）。
 
-> 结论：工具套件主体已对齐 2026 最佳实践（混合检索 + cross-encoder rerank / 多模态 / 幂等 / 去重 / Agent 规划+HITL+可观测+可恢复+防幻觉 / 非破坏交付）。**P1–P8 增量已全部完成**（rerank 回退 / 检索评估+GT过期检测 / Agent 用量+成功率 / 交付 SHA256 / OCR bbox+置信 / 入库近重复预检 / 治理可执行建议 / 过期描述修复）。**门禁假失败已修**：GT 过期时判 `GT_STALE (SKIPPED)` 退出码 0，不再误报回归。剩余唯一实质项：**语料增长后用 `gen_ground_truth.py` 重标 GT**（届时 `search_eval` 的 `verdict` 自动转 `pass`/`regression`）。
+> 结论：工具套件主体已对齐 2026 最佳实践（混合检索 + cross-encoder rerank / 多模态 / 幂等 / 去重 / Agent 规划+HITL+可观测+可恢复+防幻觉 / 非破坏交付）。**P1–P8 增量已全部完成**（rerank 回退 / 检索评估+GT过期检测 / Agent 用量+成功率 / 交付 SHA256 / OCR bbox+置信 / 入库近重复预检 / 治理可执行建议 / 过期描述修复）。**门禁假失败已修**：GT 过期时判 `GT_STALE (SKIPPED)` 退出码 0，不再误报回归。
+>
+> **2026-11-10 收口**：原先「剩余唯一实质项：语料增长后手动重标 GT」**已完成自动化**。新增 `gt_guard.py`：语料指纹 sidecar + 分级 stale 判定（补齐「旧 id 全在但语料变了」这一 `gt_staleness` 看不见的盲区）、CI `--check --ci` 主动拦过期 GT（退出码 2）、显式 `--apply` 自动重标（备份 + 原子写 + 保留人工标注 + 幂等）。同批补上**素材版本追踪**（`versions` 表结构化写前快照 + 精确回滚，维度 J 从「只有审计日志」升级为真实可回滚）。详见《最佳实践与优化分析》§29。

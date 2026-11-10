@@ -27,3 +27,14 @@ jobs:
           python tests/test_agent.py
           python tests/test_agent_skills.py
           python tests/test_agent_eval.py
+      # 2026-11-10:语料变更但 GT 未重标时主动亮红灯(此前门禁只会静默 SKIP)。
+      # --ci 在无语料库的 CI runner 上明确 SKIP,避免因环境差异误报。
+      - name: GT corpus fingerprint guard (blocks stale ground truth)
+        working-directory: materials_hub
+        run: python gt_guard.py --check --ci
+      # 版本追踪 + GT/门禁离线回归(此前这些测试从未进 CI)。
+      - name: Version tracking + GT gate regression tests
+        working-directory: materials_hub
+        run: |
+          python -m pip install -q pytest
+          python -m pytest tests/test_eval_gate.py tests/test_gt_baseline.py tests/test_eval_image.py tests/test_versions.py tests/test_gt_guard.py tests/test_rerank_persistent.py -q

@@ -929,6 +929,21 @@ def _init_db():
             created_at TEXT
         )"""
     )
+    # 素材版本(维度 J):每次可编辑元数据变更前存一份**写前整行快照**,可精确回滚。
+    # 与 history 的区别:history 只记「谁在何时改了什么」的自由文本审计(不可回滚),
+    # versions 存结构化 old 值(payload JSON),是真正的版本追踪+回滚能力。
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS versions(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mid TEXT,
+            ts TEXT,
+            actor TEXT,
+            action TEXT,
+            payload TEXT,
+            note TEXT
+        )"""
+    )
+    con.execute("CREATE INDEX IF NOT EXISTS idx_versions_mid ON versions(mid, id)")
     con.commit()
     con.close()
 
@@ -966,6 +981,171 @@ def get_history(limit=50, target_id=""):
     return [dict(r) for r in rows]
 
 
+# ---------- 素材版本管理(维度 J:结构化快照 + 可回滚) ----------
+# 只版本化「用户可编辑的元数据」。文件本体 / 派生路径 / 索引位置不属于版本:
+# 它们由 ingest/扫描/索引重定向改写,回滚会把 rel_path 指到已不存在的文件。
+VERSION_FIELDS = ("name", "orig_name", "tags", "ai_tags", "description",
+                  "form", "topics", "usage", "source", "kind", "ext", "rel_path")
+
+
+def _versioned_update(mid, fields, actor="app", action="update",
+                      log_action=None, detail=None):
+    """元数据写入的唯一咽喉:**同一连接/事务**内完成 写前快照 → UPDATE → 审计。
+
+    * payload 存**写前**的 VERSION_FIELDS 整行快照(结构化,可精确回滚);
+    * 只有 VERSION_FIELDS 里的字段真发生变化才建版本,避免派生动作用海量空版本灌库;
+    * `log_action` 由显式写入口传入,才会顺带写 history(避免 autotag/describe 等
+      自己已 log_history 的调用方重复记审计);
+    * 值无变化直接 rollback 返回,不产生版本也不产生审计。
+    返回 {ok, changed, version_id, diff}。
+    """
+    if not fields:
+        return {"ok": False, "changed": False, "version_id": None,
+                "diff": {}, "error": "no fields"}
+    con = _con()
+    con.row_factory = sqlite3.Row
+    try:
+        row = con.execute("SELECT * FROM materials WHERE id=?", (mid,)).fetchone()
+        if not row:
+            con.rollback()
+            return {"ok": False, "changed": False, "version_id": None,
+                    "diff": {}, "error": "not found: " + str(mid)}
+        cur = dict(row)
+        diff = {k: {"old": cur.get(k), "new": v}
+                for k, v in fields.items() if cur.get(k) != v}
+        if not diff:
+            con.rollback()
+            return {"ok": True, "changed": False, "version_id": None, "diff": {}}
+        vid = None
+        if any(k in VERSION_FIELDS for k in diff):
+            payload = {k: cur.get(k, "") for k in VERSION_FIELDS}
+            ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            con.execute(
+                "INSERT INTO versions(mid,ts,actor,action,payload,note) VALUES(?,?,?,?,?,?)",
+                (mid, ts, actor or "app", action,
+                 json.dumps(payload, ensure_ascii=False), (detail or "")[:300]))
+            vid = con.execute("SELECT last_insert_rowid()").fetchone()[0]
+        cols = ", ".join(f"{k}=?" for k in fields)
+        con.execute(f"UPDATE materials SET {cols} WHERE id=?",
+                    list(fields.values()) + [mid])
+        if log_action:
+            d = detail or "; ".join(
+                f"{k}: {v['old']!r} -> {v['new']!r}" for k, v in diff.items())
+            con.execute(
+                "INSERT INTO history(ts,actor,action,target_id,detail) VALUES(?,?,?,?,?)",
+                (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                 actor or "app", log_action, mid, (d or "")[:300]))
+        con.commit()
+        return {"ok": True, "changed": True, "version_id": vid, "diff": diff}
+    except Exception as e:
+        con.rollback()
+        return {"ok": False, "changed": False, "version_id": None,
+                "diff": {}, "error": "%s: %s" % (type(e).__name__, e)}
+    finally:
+        con.close()
+
+
+def list_versions(mid=None, limit=50):
+    """按时间倒序列出版本(不含完整 payload,只给摘要)。"""
+    con = _con()
+    con.row_factory = sqlite3.Row
+    if mid:
+        rows = con.execute(
+            "SELECT id,mid,ts,actor,action,note FROM versions WHERE mid=? "
+            "ORDER BY id DESC LIMIT ?", (mid, int(limit))).fetchall()
+    else:
+        rows = con.execute(
+            "SELECT id,mid,ts,actor,action,note FROM versions "
+            "ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+    con.close()
+    return [dict(r) for r in rows]
+
+
+def get_version(version_id):
+    """返回单条版本详情(payload 解析为 dict);不存在返回 None。"""
+    con = _con()
+    con.row_factory = sqlite3.Row
+    r = con.execute("SELECT * FROM versions WHERE id=?", (int(version_id),)).fetchone()
+    con.close()
+    if not r:
+        return None
+    v = dict(r)
+    try:
+        v["payload"] = json.loads(v.get("payload") or "{}")
+    except Exception:
+        v["payload"] = {}
+    return v
+
+
+def version_diff(version_id):
+    """版本快照 vs 当前状态:返回 {字段: {version, current}}(只列有差异的)。"""
+    v = get_version(version_id)
+    if not v:
+        return None
+    cur = get_material(v["mid"]) or {}
+    return {k: {"version": old, "current": cur.get(k)}
+            for k, old in v["payload"].items() if cur.get(k) != old}
+
+
+def restore_version(version_id, actor="app", dry_run=True):
+    """回滚到某版本的写前快照。
+
+    默认 **dry_run=True**(护栏):只返回 diff 不写库;调用方(CLI `--apply` /
+    MCP `confirm=true`)显式关掉才真正执行。真正执行时 `_versioned_update` 会先把
+    「回滚前状态」再存成一个新版本,因此回滚本身也可再回滚,历史永不丢失。
+    """
+    v = get_version(version_id)
+    if not v:
+        return {"ok": False, "error": "version not found: %s" % version_id}
+    mid = v["mid"]
+    cur = get_material(mid)
+    if not cur:
+        return {"ok": False, "error": "material not found: %s" % mid}
+    fields = {k: old for k, old in v["payload"].items()
+              if k in VERSION_FIELDS and cur.get(k) != old}
+    preview = {"ok": True, "mid": mid, "version_id": int(version_id),
+               "fields": {k: {"current": cur.get(k), "restore": val}
+                          for k, val in fields.items()}}
+    if dry_run:
+        return dict(preview, dry_run=True, changed=bool(fields))
+    if not fields:
+        return dict(preview, dry_run=False, changed=False, version_id=None)
+    r = _versioned_update(
+        mid, fields, actor=actor, action="before_restore",
+        log_action="restore_version",
+        detail=f"restore version {version_id} (pre-restore state snapshotted)")
+    return {"ok": r["ok"], "dry_run": False, "changed": r["changed"],
+            "mid": mid, "version_id": r["version_id"],
+            "fields": preview["fields"], "error": r.get("error")}
+
+
+def version_stats():
+    """版本追踪概况:总版本数 / 覆盖素材数 / 最近一条(供维度 J 机制验证)。"""
+    con = _con()
+    con.row_factory = sqlite3.Row
+    n = con.execute("SELECT COUNT(*) c FROM versions").fetchone()["c"]
+    m = con.execute("SELECT COUNT(DISTINCT mid) c FROM versions").fetchone()["c"]
+    con.close()
+    return {"versions": n, "materials_with_versions": m,
+            "version_fields": list(VERSION_FIELDS)}
+
+
+def prune_versions(mid, keep=50, dry_run=True):
+    """治理:某素材只保留最近 keep 条版本(默认 dry-run,--apply 才删)。"""
+    con = _con()
+    con.row_factory = sqlite3.Row
+    rows = con.execute("SELECT id FROM versions WHERE mid=? ORDER BY id DESC",
+                       (mid,)).fetchall()
+    doomed = [r["id"] for r in rows[int(keep):]]
+    if not dry_run and doomed:
+        con.executemany("DELETE FROM versions WHERE id=?", [(i,) for i in doomed])
+        con.commit()
+    con.close()
+    return {"ok": True, "mid": mid, "kept": min(len(rows), int(keep)),
+            "would_delete": len(doomed), "deleted": 0 if dry_run else len(doomed),
+            "dry_run": bool(dry_run)}
+
+
 def add_material(**kw):
     # form/topics/usage 为新增结构化分类列,默认空串——旧调用方(不带这三参数的 ingest/
     # bridge/测试助手)必须继续可用,否则 INSERT 绑定参数缺失直接抛 ProgrammingError。
@@ -994,14 +1174,15 @@ def get_material(mid):
 
 
 def _update_material(mid, **fields):
-    """就地更新素材字段(描述/标签等),按 id 定位。"""
+    """就地更新素材字段(描述/标签等),按 id 定位。
+
+    2026-11-10 起统一走 `_versioned_update` 这个咽喉:可编辑元数据的变更会在同一
+    事务里自动留下**写前快照**(维度 J 版本追踪);派生字段(location/external_path/
+    size…)仍只是普通 UPDATE,不产生版本。所有既有调用方无需改动。
+    """
     if not fields:
         return
-    con = _con()
-    cols = ", ".join(f"{k}=?" for k in fields)
-    con.execute(f"UPDATE materials SET {cols} WHERE id=?", list(fields.values()) + [mid])
-    con.commit()
-    con.close()
+    _versioned_update(mid, fields, actor="app", action="update")
 
 
 def all_materials():
@@ -3210,25 +3391,26 @@ def update_tags(mid, tags, purge_ai_tags=True):
     使「删除幻觉标签」目标真正落地(agent 与 MCP 的 update_tags 共用本逻辑)。
     返回 {"ok","id","tags","ai_tags_kept","ai_tags_removed"} 供调用方回显。
     """
-    old = (get_material(mid) or {}).get("tags", "")
-    con = _con()
-    con.execute("UPDATE materials SET tags=? WHERE id=?", (tags, mid))
-    con.commit()
-    con.close()
-    log_history("app", "update_tags", mid, f"tags: {old!r} -> {tags!r}")
-    _sync_material_vector(mid)          # 向量失效闭环:tags 是 doc_text 组成部分
+    m = get_material(mid)
+    old = (m or {}).get("tags", "")
+    # 2026-11-10:tags 与 purge 后的 ai_tags 在**同一事务**里一次写入,
+    # 并由 `_versioned_update` 留写前快照(旧版两次独立 UPDATE,原子性/版本都不完整)。
+    fields = {"tags": tags}
     kept, removed = [], []
-    if purge_ai_tags:
-        m = get_material(mid)
-        if m:
-            ai = [t.strip() for t in (m.get("ai_tags") or "").split(",") if t.strip()]
-            want = set(t.strip() for t in tags.split(",") if t.strip())
-            for t in ai:
-                (kept if t in want else removed).append(t)
-            if removed:
-                _update_material(mid, ai_tags=",".join(kept))
-    return {"ok": True, "id": mid, "tags": tags,
-            "ai_tags_kept": kept, "ai_tags_removed": removed}
+    if purge_ai_tags and m:
+        ai = [t.strip() for t in (m.get("ai_tags") or "").split(",") if t.strip()]
+        want = set(t.strip() for t in tags.split(",") if t.strip())
+        for t in ai:
+            (kept if t in want else removed).append(t)
+        if removed:
+            fields["ai_tags"] = ",".join(kept)
+    r = _versioned_update(mid, fields, actor="app", action="update_tags",
+                          log_action="update_tags",
+                          detail=f"tags: {old!r} -> {tags!r}")
+    _sync_material_vector(mid)          # 向量失效闭环:tags 是 doc_text 组成部分
+    return {"ok": r["ok"], "id": mid, "tags": tags,
+            "ai_tags_kept": kept, "ai_tags_removed": removed,
+            "version_id": r["version_id"]}
 
 
 # 系统面标签(方案 A / bridge):Agent 合并打标时永不可删。
@@ -3431,13 +3613,12 @@ def merge_material_tags(mid, tags="", remove=None, *, purge_ai_tags=True):
 
 def update_description(mid, desc):
     old = (get_material(mid) or {}).get("description", "")
-    con = _con()
-    con.execute("UPDATE materials SET description=? WHERE id=?", (desc, mid))
-    con.commit()
-    con.close()
-    log_history("app", "update_description", mid,
-                f"desc: {old!r} -> {desc!r}")
+    r = _versioned_update(mid, {"description": desc}, actor="app",
+                          action="update_description",
+                          log_action="update_description",
+                          detail=f"desc: {old!r} -> {desc!r}")
     _sync_material_vector(mid)      # 向量失效闭环:description 是 doc_text 组成部分
+    return r
 
 
 def _purge_material_derived(mid):

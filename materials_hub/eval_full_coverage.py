@@ -221,6 +221,46 @@ def main():
     # ---- J. 版本/溯源/审计 ----
     hist = core.get_history() if hasattr(core, "get_history") else None
     check("J", "get_history 返回审计记录(溯源/审计)", isinstance(hist, list), "entries=%d" % (len(hist) if hist is not None else -1))
+    # 2026-11-10:维度 J 从「只有审计日志」升级为**真实版本追踪**——
+    # 临时插一条素材,实测 写前结构化快照 → dry-run 只读 → apply 精确回滚 → 可反向恢复,
+    # 结束即清理(临时 id 前缀 verify_,不碰生产资产)。
+    vtmp = "verify_version_tmp"
+    vcon = core._con()
+    try:
+        vcon.execute(
+            "INSERT INTO materials(id,kind,ext,name,rel_path,size,sha256,tags,description,"
+            "source,orig_name,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (vtmp, "images", ".jpg", "verify.jpg", "", 1, "v" * 64, "", "",
+             "verify", "verify.jpg", "2026-11-10"))
+        vcon.commit()
+        wr = core.update_tags(vtmp, "v-tag")
+        vs = core.list_versions(vtmp)
+        v = core.get_version(wr.get("version_id")) if wr.get("version_id") else None
+        snap_ok = bool(wr.get("version_id")) and len(vs) == 1 and isinstance(
+            (v or {}).get("payload"), dict) and (v or {}).get("payload", {}).get("tags") == ""
+        check("J", "元数据写前产生结构化版本快照(非仅自由文本审计)", snap_ok,
+              "version_id=%s versions=%d payload_tags=%r" % (
+                  wr.get("version_id"), len(vs), (v or {}).get("payload", {}).get("tags")))
+        dry = core.restore_version(wr["version_id"]) if wr.get("version_id") else {}
+        dry_ok = bool(dry.get("dry_run")) and core.get_material(vtmp)["tags"] == "v-tag"
+        back = core.restore_version(wr["version_id"], actor="verify",
+                                    dry_run=False) if wr.get("version_id") else {}
+        restore_ok = bool(back.get("ok")) and core.get_material(vtmp)["tags"] == ""
+        reversible = len(core.list_versions(vtmp)) == 2   # 回滚前状态也存了版本
+        check("J", "版本回滚 dry-run 只读 + apply 精确恢复且可反向", dry_ok and restore_ok and reversible,
+              "dry=%s restored=%s versions_after=%d" % (
+                  dry_ok, restore_ok, len(core.list_versions(vtmp))))
+        st = core.version_stats()
+        check("J", "version_stats 报告版本覆盖", isinstance(st, dict)
+              and st.get("versions", 0) >= 2 and st.get("version_fields"),
+              "versions=%s fields=%d" % (st.get("versions"), len(st.get("version_fields", []))))
+    finally:
+        vcon.execute("DELETE FROM versions WHERE mid=?", (vtmp,))
+        vcon.execute("DELETE FROM history WHERE target_id=?", (vtmp,))
+        vcon.execute("DELETE FROM embeddings WHERE mid=?", (vtmp,))
+        vcon.execute("DELETE FROM materials WHERE id=?", (vtmp,))
+        vcon.commit()
+        vcon.close()
 
     # ---- K. 去重 ----
     ndr = core.near_duplicate_report() if hasattr(core, "near_duplicate_report") else {}
@@ -319,9 +359,18 @@ def main():
     try:
         import mcp_server as _mcp  # noqa
         mcp_tool_count = len(_mcp.TOOLS) if hasattr(_mcp, "TOOLS") else 0
-    except Exception as e:
+        tool_names = {t["name"] for t in _mcp.TOOLS}
+        handler_names = set(_mcp.HANDLERS)
+    except Exception:
         mcp_tool_count = 0
-    check("Q", "MCP 工具数==32", mcp_tool_count == 32, "count=%d" % mcp_tool_count)
+        tool_names, handler_names = set(), set()
+    # 2026-11-10:原写死 `==32`,每加一个工具就假失败。改为「两份手工清单一一对应」,
+    # 这才是 MCP 集成真正要保证的不变量(漏注册 HANDLERS 会导致 tools/call 打不通)。
+    check("Q", "MCP 工具清单与 HANDLERS 一一对应(工具数>=32)",
+          mcp_tool_count >= 32 and tool_names == handler_names,
+          "count=%d only_in_tools=%s only_in_handlers=%s" % (
+              mcp_tool_count, sorted(tool_names - handler_names),
+              sorted(handler_names - tool_names)))
     # CLI 主要命令存在
     cli = open(os.path.join(HERE, "cli.py"), encoding="utf-8").read()
     cli_cmds = ["ingest", "scan", "search", "dupes", "ocr", "shots", "phash", "auto",
@@ -329,6 +378,36 @@ def main():
     missing = [c for c in cli_cmds if ('"%s"' % c) not in cli and ("'%s'" % c) not in cli]
     check("Q", "CLI 主要命令齐备", not missing, "missing=%s" % missing)
     check("Q", "Web 面板入口(server.py)存在", os.path.exists(os.path.join(HERE, "server.py")), "")
+
+    # ---- Y. GT 语料指纹守卫(语料变更自动重标钩子,2026-11-10) ----
+    try:
+        import gt_guard as _gg  # noqa
+        ms_y = core.all_materials()
+        fp0 = _gg.corpus_fingerprint(ms_y)
+        if ms_y:
+            fake = [dict(ms_y[0], id="__verify_new__", sha256="0" * 64)]
+            changed = _gg.corpus_fingerprint(ms_y + fake) != fp0
+            retag = [dict(ms_y[0], tags="__verify_autotag__")] + ms_y[1:]
+            stable = _gg.corpus_fingerprint(retag) == fp0
+        else:
+            changed = stable = True
+        check("Y", "语料指纹:集合变化敏感、autotag 改写不误报", changed and stable,
+              "changed=%s stable=%s hash=%s" % (changed, stable, fp0))
+        st_y = _gg.status(ms_y)
+        states = {k: t["state"] for k, t in st_y["targets"].items()}
+        check("Y", "GT 指纹基线与当前语料一致(全部 fresh/warn)",
+              not st_y["blocking"] and all(s in ("fresh", "warn") for s in states.values()),
+              "states=%s" % states)
+        import io as _io
+        import contextlib as _cl
+        with _cl.redirect_stdout(_io.StringIO()):
+            rc = _gg.main(["--check"])
+        check("Y", "gt_guard --check 返回 0(过期 GT 会返回 2 拦 CI)", rc == 0, "rc=%d" % rc)
+        guard_src = open(os.path.join(HERE, "gt_guard.py"), encoding="utf-8").read()
+        modes_ok = all(f in guard_src for f in ("--check", "--dry", "--apply", "--adopt", "--ci"))
+        check("Y", "自动重标四模式 + CI 模式齐备且默认只读", modes_ok, "flags_ok=%s" % modes_ok)
+    except Exception as e:
+        check("Y", "GT 语料指纹守卫可用", False, "err: %s" % e)
 
     # ---- R. 文档与用户采用 ----
     readme = os.path.join(HERE, "README.md")

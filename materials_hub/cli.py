@@ -46,6 +46,11 @@
   python cli.py agent --list [--limit N]  盘点历史任务(状态/步数/创建时间)
   python cli.py agent --cleanup [--max-age 72]  清理超龄的终态任务工作区(running 永不删)
   python cli.py agent --file task.txt   中文任务用 UTF-8 文件传(规避终端 GBK)
+  python cli.py versions [id] [--limit N]    列出版本快照(写前整行元数据)+ 版本统计
+  python cli.py version <版本id>         查看快照 + 与当前状态差异(默认只读预览)
+  python cli.py version <版本id> --apply     回滚到该版本(回滚前状态也存版本,可反向恢复)
+  python cli.py versions --prune <id> [--keep N] [--apply]  治理:只保留最近 N 条版本
+  python cli.py gt-guard [--check|--dry|--apply|--adopt] [--ci]  GT 与语料指纹一致性检查/重标
 """
 import sys
 import os
@@ -80,6 +85,8 @@ from core import (
     backfill_lang_tags,
     job_lang_readiness,
     SITE_LANGS, normalize_lang_tag, VISUAL_KINDS,
+    list_versions, get_version, version_diff, restore_version,
+    version_stats, prune_versions,
 )
 
 
@@ -511,6 +518,42 @@ def main():
             print("已清理: %d (剩余 %d)" % (removed, count_orphan_derived()))
         else:
             print("（dry-run，加 --apply 执行清理）")
+
+    elif cmd == "versions":
+        # 维度 J:版本快照盘点/治理。默认只读,--apply 才真正删旧版本。
+        if "--prune" in args and args.index("--prune") + 1 < len(args):
+            mid = args[args.index("--prune") + 1]
+            keep = int(args[args.index("--keep") + 1]) if "--keep" in args else 50
+            r = prune_versions(mid, keep=keep, dry_run="--apply" not in args)
+            print(json.dumps(r, ensure_ascii=False, indent=2))
+        else:
+            mid = args[1] if len(args) > 1 and not args[1].startswith("--") else None
+            limit = int(args[args.index("--limit") + 1]) if "--limit" in args else 50
+            print(json.dumps({"stats": version_stats(),
+                              "versions": list_versions(mid=mid, limit=limit)},
+                             ensure_ascii=False, indent=2))
+
+    elif cmd == "version":
+        # 查看/回滚单个版本。默认 dry-run 预览,--apply 才写库(回滚本身也留版本)。
+        if len(args) < 2 or args[1].startswith("--"):
+            print("用法: python cli.py version <版本id> [--apply]")
+            return
+        vid = int(args[1])
+        v = get_version(vid)
+        if not v:
+            print("版本不存在: %s" % vid)
+            return
+        print(json.dumps({"version": v, "diff_current_vs_version": version_diff(vid)},
+                         ensure_ascii=False, indent=2))
+        if "--apply" in args:
+            print("回滚:", json.dumps(restore_version(vid, actor="cli", dry_run=False),
+                                     ensure_ascii=False))
+        else:
+            print("（dry-run，加 --apply 执行回滚；回滚前状态也会存成新版本，可反向恢复）")
+
+    elif cmd == "gt-guard":
+        import gt_guard
+        raise SystemExit(gt_guard.main(sys.argv[2:]))
 
     elif cmd == "tech":
         # 技术元数据(Cloudinary MAM / Adobe AEM「技术类元数据」):时长/分辨率/编码/帧率/采样率。

@@ -166,6 +166,43 @@ def t_update_tags(a):
     return core.merge_material_tags(mid, a.get("tags", ""), a.get("remove"))
 
 
+def t_versions_list(a):
+    """只读:列出素材版本快照(写前整行元数据),不传 id 则列全库最近记录。"""
+    mid = (a.get("id") or "").strip() or None
+    return {"versions": core.list_versions(mid=mid, limit=int(a.get("limit", 50))),
+            "stats": core.version_stats()}
+
+
+def t_version_get(a):
+    """只读:查看单个版本的快照内容 + 与当前状态的字段差异。"""
+    vid = a.get("version_id")
+    if vid is None:
+        raise ValueError("version_id required")
+    v = core.get_version(vid)
+    if not v:
+        raise ValueError("version not found: %s" % vid)
+    return {"version": v, "diff": core.version_diff(vid)}
+
+
+def t_version_restore(a):
+    """写:回滚素材到某版本的写前快照。需 confirm=true;默认只预览 diff,
+    apply=true 才真正写库(回滚本身会再存一个版本,可反向回滚)。"""
+    _require_confirm(a)
+    vid = a.get("version_id")
+    if vid is None:
+        raise ValueError("version_id required")
+    dry = not (a.get("apply") is True)
+    if not dry and not core.get_version(vid):
+        raise ValueError("version not found: %s" % vid)
+    return core.restore_version(vid, actor=a.get("actor", "mcp"), dry_run=dry)
+
+
+def t_gt_guard_status(a):
+    """只读:GT 与当前语料的指纹一致性(语料变更后是否需重标)。"""
+    import gt_guard
+    return gt_guard.status()
+
+
 def t_register(a):
     _require_confirm(a)
     path = a.get("path", "")
@@ -654,6 +691,9 @@ HANDLERS = {"search_materials": t_search, "get_material": t_get,
             "governance_report": t_governance, "distribution_readiness": t_readiness,
             "agent_feedback": t_feedback, "learning_summary": t_learning,
             "search_eval": t_search_eval,
+            "versions_list": t_versions_list, "version_get": t_version_get,
+            "version_restore": t_version_restore,
+            "gt_guard_status": t_gt_guard_status,
             "assemble_package": t_assemble,
             "deliver_package": t_deliver}
 # __PART2__
@@ -743,6 +783,22 @@ TOOLS = [
     {"name": "search_eval", "description": "只读:按需跑检索质量评估(P@5/R@20/MRR/nDCG + 回归门禁 check_gate);复用 eval_search,mode=auto|lexical|semantic,有 eval_ground_truth.json 则用权威标注",
      "inputSchema": {"type": "object", "properties": {
         "mode": {"type": "string", "enum": ["auto", "lexical", "semantic"]}}}},
+    {"name": "versions_list", "description": "只读:列出素材版本快照(每次元数据变更前的整行快照,可回滚)。不传 id 则列全库最近版本 + 统计",
+     "inputSchema": {"type": "object", "properties": {
+        "id": {"type": "string", "description": "素材 id;省略则列全库"},
+        "limit": {"type": "integer"}}}},
+    {"name": "version_get", "description": "只读:查看某版本的快照内容及其与当前素材状态的字段差异",
+     "inputSchema": {"type": "object", "properties": {
+        "version_id": {"type": "integer"}}, "required": ["version_id"]}},
+    {"name": "version_restore", "description": "写:回滚素材到某版本的写前快照。默认只返回 diff 预览;apply=true 才真正写库,且回滚前状态会再存成一个版本(可反向回滚)。需 confirm=true",
+     "inputSchema": {"type": "object", "properties": {
+        "version_id": {"type": "integer"},
+        "apply": {"type": "boolean", "description": "默认 false=只预览;true=真正回滚"},
+        "actor": {"type": "string"},
+        "confirm": {"type": "boolean", "description": "必须为 true 才允许调用(人工复核护栏)"}},
+        "required": ["version_id", "confirm"]}},
+    {"name": "gt_guard_status", "description": "只读:检查检索/图像 GT 是否与当前语料指纹一致(语料变更后是否需重标 GT)。返回各 GT 的 fresh/stale/legacy 状态与原因",
+     "inputSchema": {"type": "object", "properties": {}}},
     {"name": "assemble_package", "description": "只读:把高层目标落成可交付素材包(多智能体编排 Librarian 拆解检索→Critic 核验→Executor 写 manifest JSON 到 agent_workspace/packages/;绝不改动资产)。用于「组装一个混剪素材包/打包分发素材」等。",
      "inputSchema": {"type": "object", "properties": {
         "goal": {"type": "string", "description": "高层目标/自然语言(中文)"},

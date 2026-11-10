@@ -164,10 +164,15 @@ python cli.py embed --force        # 全量重建;--status 只看状态
 python cli.py search --file q.txt  # 中文查询建议走文件(Windows 终端 GBK 代码页会弄坏命令行中文)
 python cli.py search --stdin       # 或从标准输入读查询
 python gen_ground_truth.py [--force|--dry]  # 按当前语料重标检索 GT(语料感知,永不写空查询/陈旧 id)
+python gt_guard.py --check [--ci]   # GT 与语料指纹一致性(CI 用):过期 GT 退出码 2;**只读绝不改文件**
+python gt_guard.py --dry | --apply | --adopt  # 预览 / 自动重标(备份+原子写+刷新基线)/ 存量迁移
 python eval_search.py --baseline  # 检索质量评估(权威 GT,P@5/R@20/MRR/NDCG@10,lexical↔auto 对比)
 python eval_search.py --mode lexical --gate  # 回归门禁:均值掉出基线(容差 0.02)→ GATE: FAIL 且退出码 1;GT 失配则 GT_STALE 休眠
 python eval_search.py --extra  # 多语言/分面额外检查(语料感知,不进门禁分母)
 python eval_gt_candidates.py  # GT 补全候选(证据驱动,**不改权威 GT**,产出供人工核对的清单)
+python cli.py versions [id]   # 素材版本快照盘点(每次元数据变更前的整行快照)
+python cli.py version <版本id> [--apply]  # 查看/回滚版本(默认 dry-run;回滚本身也留版本,可反向恢复)
+python cli.py versions --prune <id> [--keep N] [--apply]  # 版本治理:只保留最近 N 条
 python cli.py metrics [--days N]  # 指标埋点(从落盘日志聚合,跨进程):调用数/失败率/零命中率/耗时分位
 python cli.py ocr <id> [--force]  # 视频画面 OCR(离线 rapidocr,文本入检索;--all 批量)
 python cli.py facets [--limit N] [--link-clips|--link-parents] [--scrub]   # 补 DAM 面标签 + 回填 parent:/去旧别名
@@ -368,6 +373,21 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 >   历史基线数值保留为下限护栏;
 > - 当前实测:文本 lexical / auto 与图像共 3 个门禁 **GATE PASS**(四项指标均 1.00)。
 > GT 与语料严重失配时门禁判 `GT_STALE (SKIPPED)` 休眠,应重标 GT 而非当回归处理。
+
+> **2026-11-10 补充:GT 语料指纹守卫 + 素材版本追踪**
+> - `eval_ground_truth.meta.json` / `eval_image_gt.meta.json` 是**指纹 sidecar**(不塞进 GT 本体,
+>   否则会被 `gt.items()` 当成一条查询)。记录语料集合指纹、可检索文本指纹、素材数与查询数。
+> - `gt_staleness()` 只看「标注 id 是否还在」,**看不见「旧 id 全在但语料新增/改名/内容变了」**;
+>   `gt_guard.py` 的指纹判定补齐这个盲区。CI(`.github/workflows/agent-tests.yml`) 跑
+>   `--check --ci`:语料变了但 GT 没重标就 **退出码 2 亮红灯**,不再靠门禁静默 SKIP 混过去;
+>   无语料库的 runner 明确 SKIP,避免环境误报。
+> - 自动重标必须显式 `python gt_guard.py --apply`:**旧 GT 先备份**到 `index/gt_backups/`、
+>   原子写(`.tmp` + `os.replace`)、复用 `gen_ground_truth.merged_gt()` 保留仍有效的人工标注、
+>   幂等(fresh 直接跳过)。图像 GT 依赖 CLIP 人工核对,**只裁剪失效 id、不自动新增查询**。
+>   `--dry` 只预览、`--adopt` 只建基线(存量迁移),二者都不改 GT。CI **永远不改仓库里的 GT**。
+> - 素材版本:元数据变更前在 `versions` 表存**写前整行快照**(结构化 JSON,非自由文本审计),
+>   `cli.py version <id> --apply` / MCP `version_restore` 可精确回滚;回滚本身也留一个版本,
+>   因此可反向恢复。回滚默认 dry-run,MCP 还需 `confirm=true` 双重护栏。
 
 **环境变量**
 
