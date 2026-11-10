@@ -161,6 +161,92 @@ def test_apply_keeps_human_labels_backs_up_and_is_idempotent(tmp_path, monkeypat
     print("PASS test_apply_keeps_human_labels_backs_up_and_is_idempotent")
 
 
+def _fake_status_seq(monkeypatch, states):
+    """让 gt_guard.status() 依次返回 states 序列(每调用一次前进一格)。"""
+    calls = {"n": 0}
+
+    def _st():
+        s = states[min(calls["n"], len(states) - 1)]
+        calls["n"] += 1
+        return s
+
+    monkeypatch.setattr(gt_guard, "status", _st)
+    return calls
+
+
+def test_watch_alert_only_on_hard_change(monkeypatch, capsys):
+    states = [
+        {"corpus_hash": "aaa", "text_hash": "t1", "materials": 5, "blocking": False,
+         "targets": {"text": {"state": "fresh", "corpus_hash": "aaa", "text_hash": "t1", "queries": 3}}},
+        {"corpus_hash": "bbb", "text_hash": "t1", "materials": 6, "blocking": True,
+         "targets": {"text": {"state": "stale", "corpus_hash": "bbb", "text_hash": "t1", "queries": 3}}},
+        {"corpus_hash": "bbb", "text_hash": "t1", "materials": 6, "blocking": True,
+         "targets": {"text": {"state": "stale", "corpus_hash": "bbb", "text_hash": "t1", "queries": 3}}},
+    ]
+    _fake_status_seq(monkeypatch, states)
+    monkeypatch.setattr(gt_guard.time, "sleep", lambda *_: None)
+    applied = {"v": False}
+
+    def _main(argv):
+        if argv == ["--apply"]:
+            applied["v"] = True
+        return 0
+
+    monkeypatch.setattr(gt_guard, "main", _main)
+    gt_guard.watch(interval=1, apply=False, max_iter=3)
+    out = capsys.readouterr().out
+    assert "检测到语料变更" in out, out
+    assert not applied["v"], "只读告警模式绝不应调用 --apply"
+
+
+def test_watch_auto_apply_on_hard_change(monkeypatch, capsys):
+    states = [
+        {"corpus_hash": "aaa", "text_hash": "t1", "materials": 5, "blocking": False,
+         "targets": {"text": {"state": "fresh", "corpus_hash": "aaa", "text_hash": "t1", "queries": 3}}},
+        {"corpus_hash": "bbb", "text_hash": "t1", "materials": 6, "blocking": True,
+         "targets": {"text": {"state": "stale", "corpus_hash": "bbb", "text_hash": "t1", "queries": 3}}},
+        {"corpus_hash": "bbb", "text_hash": "t1", "materials": 6, "blocking": True,
+         "targets": {"text": {"state": "stale", "corpus_hash": "bbb", "text_hash": "t1", "queries": 3}}},
+    ]
+    _fake_status_seq(monkeypatch, states)
+    monkeypatch.setattr(gt_guard.time, "sleep", lambda *_: None)
+    applied = {"v": False}
+
+    def _main(argv):
+        if argv == ["--apply"]:
+            applied["v"] = True
+        return 0
+
+    monkeypatch.setattr(gt_guard, "main", _main)
+    gt_guard.watch(interval=1, apply=True, max_iter=3)
+    assert applied["v"], "硬失配 + --apply 应自动调用重标"
+
+
+def test_watch_soft_change_is_warn_only(monkeypatch, capsys):
+    states = [
+        {"corpus_hash": "aaa", "text_hash": "t1", "materials": 5, "blocking": False,
+         "targets": {"text": {"state": "fresh", "corpus_hash": "aaa", "text_hash": "t1", "queries": 3}}},
+        {"corpus_hash": "aaa", "text_hash": "t2", "materials": 5, "blocking": False,
+         "targets": {"text": {"state": "warn", "corpus_hash": "aaa", "text_hash": "t2", "queries": 3}}},
+        {"corpus_hash": "aaa", "text_hash": "t2", "materials": 5, "blocking": False,
+         "targets": {"text": {"state": "warn", "corpus_hash": "aaa", "text_hash": "t2", "queries": 3}}},
+    ]
+    _fake_status_seq(monkeypatch, states)
+    monkeypatch.setattr(gt_guard.time, "sleep", lambda *_: None)
+    applied = {"v": False}
+
+    def _main(argv):
+        if argv == ["--apply"]:
+            applied["v"] = True
+        return 0
+
+    monkeypatch.setattr(gt_guard, "main", _main)
+    gt_guard.watch(interval=1, apply=True, max_iter=3)
+    out = capsys.readouterr().out
+    assert "软失配" in out, out
+    assert not applied["v"], "软失配(autotag 改写)不应触发自动重标"
+
+
 def test_image_gt_only_prunes_dead_ids_never_invents_queries(tmp_path, monkeypatch):
     ms, targets = _setup(tmp_path, monkeypatch,
                          image_gt={"人工图像查询": [_ms()[0]["id"]],

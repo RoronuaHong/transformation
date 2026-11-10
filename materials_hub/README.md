@@ -166,6 +166,7 @@ python cli.py search --stdin       # 或从标准输入读查询
 python gen_ground_truth.py [--force|--dry]  # 按当前语料重标检索 GT(语料感知,永不写空查询/陈旧 id)
 python gt_guard.py --check [--ci]   # GT 与语料指纹一致性(CI 用):过期 GT 退出码 2;**只读绝不改文件**
 python gt_guard.py --dry | --apply | --adopt  # 预览 / 自动重标(备份+原子写+刷新基线)/ 存量迁移
+python gt_guard.py --watch [--interval 60] [--apply]  # 常驻监听:语料变更时提示(或 --apply 自动)重标;每轮只看指纹,不跑检索
 python eval_search.py --baseline  # 检索质量评估(权威 GT,P@5/R@20/MRR/NDCG@10,lexical↔auto 对比)
 python eval_search.py --mode lexical --gate  # 回归门禁:均值掉出基线(容差 0.02)→ GATE: FAIL 且退出码 1;GT 失配则 GT_STALE 休眠
 python eval_search.py --extra  # 多语言/分面额外检查(语料感知,不进门禁分母)
@@ -388,6 +389,9 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 > - 素材版本:元数据变更前在 `versions` 表存**写前整行快照**(结构化 JSON,非自由文本审计),
 >   `cli.py version <id> --apply` / MCP `version_restore` 可精确回滚;回滚本身也留一个版本,
 >   因此可反向恢复。回滚默认 dry-run,MCP 还需 `confirm=true` 双重护栏。
+> - **增量监听**:`python gt_guard.py --watch` 常驻轮询语料指纹(每轮只看指纹,**不跑检索**),
+>   检测到变更就提示 `python gt_guard.py --apply` 重标;加 `--apply` 则在硬失配时自动重标。
+>   默认**只读告警**,绝不自动写文件;适合挂在后台,把「语料变了→GT 失配」从被动 SKIP 变主动提醒。
 
 **环境变量**
 

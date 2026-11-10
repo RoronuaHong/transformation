@@ -22,6 +22,10 @@
     python gt_guard.py --dry             # 预览重标会写入什么(离线快速,不写文件)
     python gt_guard.py --apply           # 真重标:备份 → 原子写 → 刷新指纹基线
     python gt_guard.py --adopt           # 存量迁移:只建立指纹基线,不改任何 GT
+    python gt_guard.py --watch [--interval 60] [--apply]
+        # 常驻监听语料指纹:变化时提示 `python gt_guard.py --apply` 重标;
+        # 加 --apply 则在硬失配时自动重标。每轮只看指纹(廉价,不跑检索),Ctrl-C 退出
+
 
 安全护栏(GT 是人工质量基准,绝不能被静默覆写):
   * 只有显式 `--apply` 才写;CI 只跑 `--check`,**永远不改仓库里的 GT**;
@@ -221,15 +225,74 @@ def _rebaseline(t, gt, ms, ch, th, force=False, verify=True):
             "mode": mode, "note": note}
 
 
+def watch_iter(prev):
+    """一次轮询:返回 (changed, st)。changed 当语料指纹或素材条数相对上一轮变化。
+
+    只比对指纹(廉价、不跑检索),适合常驻监听;即便 corpus 改了,只要指纹(集合 +
+    可检索文本)没变就视为无变化。
+    """
+    st = status()
+    if prev is None:
+        return False, st
+    changed = (st["corpus_hash"] != prev["corpus_hash"]
+               or st["text_hash"] != prev["text_hash"]
+               or st["materials"] != prev["materials"])
+    return changed, st
+
+
+def watch(interval=60, apply=False, max_iter=None, _sleep=time.sleep):
+    """增量监听语料指纹:检测到变化就提示重标(或 --apply 自动重标)。Ctrl-C 退出。
+
+    默认**只读告警**,绝不自动写任何文件;只有 apply=True 才在检测到硬失配时自动跑
+    `main(["--apply"])` 重标(走与人工一致的备份+原子写+刷新基线护栏)。每次轮询只看
+    指纹(廉价),不触发模型推理,可常驻后台。
+    """
+    prev = None
+    it = 0
+    try:
+        while True:
+            if max_iter is not None and it >= max_iter:
+                break
+            it += 1
+            changed, st = watch_iter(prev)
+            if changed:
+                if st["blocking"]:
+                    if apply:
+                        print("[watch] 检测到语料硬失配,自动重标...")
+                        main(["--apply"])
+                    else:
+                        print("[watch] 检测到语料变更(硬失配),请跑: "
+                              "python gt_guard.py --apply")
+                else:
+                    print("[watch] 检测到可检索文本变更(软失配),仅告警,不重标 "
+                          "(重标请显式 `python gt_guard.py --apply`)")
+                prev = st
+            else:
+                prev = st
+            if max_iter is not None and it >= max_iter:
+                break
+            _sleep(interval)
+    except KeyboardInterrupt:
+        print("[watch] 收到中断,退出监听")
+    return 0
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     check = "--check" in argv or not any(
-        f in argv for f in ("--dry", "--apply", "--adopt"))
+        f in argv for f in ("--dry", "--apply", "--adopt", "--watch"))
     ci = "--ci" in argv
     dry = "--dry" in argv
     apply = "--apply" in argv
     adopt = "--adopt" in argv
     force = "--force" in argv
+    do_watch = "--watch" in argv
+    interval = 60
+    if "--interval" in argv:
+        try:
+            interval = int(argv[argv.index("--interval") + 1])
+        except (ValueError, IndexError):
+            pass
     core.init_hub()
     ms = core.all_materials()
     st = status(ms)
@@ -244,6 +307,11 @@ def main(argv=None):
     if ci and not ms:
         print("CI-SKIP: 本环境无语料库(0 条素材),跳过 GT 指纹检查(CI 不误报)")
         return 0
+
+    if do_watch:
+        print("[watch] 启动监听(每 %ds 轮询语料指纹; %s; Ctrl-C 退出)" % (
+            interval, "硬失配时自动重标" if apply else "只读告警"))
+        return watch(interval=interval, apply=apply)
 
     if check:
         if st["blocking"]:
