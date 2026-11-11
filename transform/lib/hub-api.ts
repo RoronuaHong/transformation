@@ -1,4 +1,4 @@
-/** Same-origin proxy to materials_hub Python API (:8000). */
+/** Same-origin proxy to materials_hub Python API (:3402, pm2 vitual-hub-api). */
 export function hubApiBase(): string {
   const env = process.env.NEXT_PUBLIC_HUB_API_URL?.replace(/\/$/, "");
   if (env) return env;
@@ -6,14 +6,14 @@ export function hubApiBase(): string {
 }
 
 /**
- * Uploads must hit hub :8000 directly — Next rewrites blow up on large
+ * Uploads must hit hub :3402 directly — Next rewrites blow up on large
  * multipart bodies (e.g. ~360MB video → bare "Internal Server Error").
  */
 export function hubUploadUrl(): string {
   const env = process.env.NEXT_PUBLIC_HUB_UPLOAD_URL?.replace(/\/$/, "");
   if (env) return env;
   const upstream = (
-    process.env.NEXT_PUBLIC_HUB_UPSTREAM || "http://127.0.0.1:8000"
+    process.env.NEXT_PUBLIC_HUB_UPSTREAM || "http://127.0.0.1:3402"
   ).replace(/\/$/, "");
   return `${upstream}/api/upload`;
 }

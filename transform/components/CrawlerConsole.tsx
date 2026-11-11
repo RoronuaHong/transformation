@@ -1615,7 +1615,7 @@ export default function CrawlerConsole() {
         .drawer-bulk.confirm > span { color: #a5232c; }
         .drawer-bulk strong { color: var(--primary); font-size: 16px; margin: 0 2px; }
         .bulk-spacer { flex: 1 1 auto; }
-        .toast { position: fixed; right: 24px; top: 96px; z-index: 60; display: grid; gap: 10px; }
+        .toast { position: fixed; left: 50%; top: 96px; transform: translateX(-50%); z-index: 60; display: grid; gap: 10px; justify-items: center; pointer-events: none; }
         .toast-item { min-width: 260px; max-width: 420px; padding: 13px 16px; border-radius: 12px; background: #fff;
           box-shadow: var(--shadow); border-left: 4px solid var(--primary); font-size: 13px; color: var(--ink);
           animation: pop 0.2s ease both; }
@@ -1625,7 +1625,7 @@ export default function CrawlerConsole() {
         footer { color: #9aa3ba; font-size: 12px; text-align: center; padding: 0 0 34px; }
 
         @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
-        @keyframes pop { from { opacity: 0; transform: translate(-50%, 10px); } to { opacity: 1; transform: translate(-50%, 0); } }
+        @keyframes pop { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
         @keyframes shimmer { to { background-position-x: -220%; } }
         @keyframes slide { from { transform: translateX(24px); opacity: 0.6; } to { transform: none; opacity: 1; } }
         @keyframes spin { to { transform: rotate(360deg); } }

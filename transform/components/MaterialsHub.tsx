@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
 import { fillCopy, type HubCopy } from "@/lib/copy";
 import {
   chipTagsVisible,
@@ -25,6 +25,7 @@ import {
   hubReadiness,
   hubDeliver,
   hubSetReviewed,
+  hubSetFavorite,
 } from "@/lib/hub-api";
 
 function SecHead({ open, onToggle, children }: { open: boolean; onToggle: () => void; children: ReactNode }) {
@@ -291,12 +292,29 @@ interface HubCardProps {
   onOpen: (m: HubMaterial) => void;
   onDelete: (m: HubMaterial) => void;
   onToggleFavorite?: (m: HubMaterial) => void;
+  selected?: boolean;
+  onToggleSelect?: (m: HubMaterial) => void;
 }
 
-const HubCard = memo(function HubCard({ m, copy, kindLabel, tagLabelMap, locale, pendingIds, onOpen, onDelete, onToggleFavorite }: HubCardProps) {
+const HubCard = memo(function HubCard({ m, copy, kindLabel, tagLabelMap, locale, pendingIds, onOpen, onDelete, onToggleFavorite, selected, onToggleSelect }: HubCardProps) {
   return (
-    <article className="hub-card">
+    <article className={"hub-card" + (selected ? " selected" : "")}>
       <div className="hub-thumb">
+        <button
+          type="button"
+          className={`hub-card-check${selected ? " on" : ""}`}
+          title={copy.select}
+          aria-label={copy.select}
+          aria-pressed={!!selected}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleSelect?.(m);
+          }}
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M3.5 8.5l3 3 6-7" />
+          </svg>
+        </button>
         <button
           type="button"
           className="hub-card-del"
@@ -440,6 +458,12 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
   const [pendingIds, setPendingIds] = useState<Set<string>>(new Set());
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [gridMode, setGridMode] = useState<"" | "2" | "1">("");
+  // 多选:卡片左上勾选框 → 底部批量浮条(删除/收藏/全选/清空)
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  // 拖拽上传:落区高亮
+  const [dragOver, setDragOver] = useState(false);
+  // 批量管理模式(B 站「批量管理」):开启后卡片常显勾选框、点卡片即选中而非打开
+  const [selectMode, setSelectMode] = useState(false);
   const [maxUp, setMaxUp] = useState(HUB_UPLOAD_MAX_BYTES);
   const [detail, setDetail] = useState<HubMaterial | null>(null);
   // removeMaterial 用 useCallback 稳定身份,但需读当前 detail 决定是否清面板——
@@ -1007,6 +1031,54 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
     }
   }, [setDetail, setEditTags, setEditDesc, setRunRec, setUnderstandRec, setReadiness, setExportLang, setExportResult]);
 
+  // 多选 / 批量操作
+  const toggleSelect = useCallback((m: HubMaterial) => {
+    setSelected((prev) => {
+      const n = new Set(prev);
+      if (n.has(m.id)) n.delete(m.id);
+      else n.add(m.id);
+      return n;
+    });
+  }, []);
+  const clearSelect = useCallback(() => setSelected(new Set()), []);
+  const selectAllVisible = useCallback(() => {
+    setSelected(new Set(rows.map((r) => r.id)));
+  }, [rows]);
+  const bulkFavorite = useCallback(async () => {
+    const ids = Array.from(selected);
+    if (!ids.length) return;
+    await Promise.all(ids.map((id) => hubSetFavorite(id, true).catch(() => undefined)));
+    setRows((prev) => prev.map((r) => (selected.has(r.id) ? { ...r, favorite: true } : r)));
+    setToast(copy.favMany);
+    clearSelect();
+  }, [selected, copy, clearSelect]);
+  const bulkDelete = useCallback(async () => {
+    const ids = Array.from(selected);
+    if (!ids.length) return;
+    if (!window.confirm(`${copy.delMany}？(${ids.length})`)) return;
+    await Promise.all(
+      ids.map((id) =>
+        hubFetch("/remove", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id }),
+        }).catch(() => undefined),
+      ),
+    );
+    setToast(fillCopy(copy.deletedMany, { n: String(ids.length) }));
+    clearSelect();
+    await load();
+  }, [selected, copy, clearSelect, load]);
+  const onDropFiles = useCallback(
+    (e: DragEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      setDragOver(false);
+      const files = e.dataTransfer?.files;
+      if (files && files.length) void onUpload(files);
+    },
+    [onUpload],
+  );
+
   return (
     <div className="hub-page">
       <div className="hub-layout">
@@ -1296,6 +1368,18 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
               <button type="button" className="watch-btn" onClick={() => void load()} disabled={busy}>
                 {copy.refresh}
               </button>
+              <button
+                type="button"
+                className={`watch-btn${selectMode ? " on" : ""}`}
+                onClick={() => {
+                  setSelectMode((v) => !v);
+                  if (selectMode) setSelected(new Set());
+                }}
+                aria-pressed={selectMode}
+                title={copy.batch}
+              >
+                {copy.batch}
+              </button>
               <div className="hub-upwrap" ref={upCfgRef}>
                 <button type="button" className="watch-btn hub-upload" onClick={() => fileRef.current?.click()}>
                   {copy.upload}
@@ -1465,44 +1549,70 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
               </button>
             </div>
           </div>
-          {!rows.length ? (
-            <div className="hub-empty" role="status">
-              {busy ? (
-                <>
-                  <span className="hub-spin" aria-hidden />
-                  <p>{copy.loading}</p>
-                </>
-              ) : (
-                <>
-                  <p>{copy.empty}</p>
-                  <p className="muted">{copy.emptyHint}</p>
-                </>
-              )}
-            </div>
-          ) : (
-            <div
-              className={
-                "hub-grid" +
-                (gridMode ? ` cols-${gridMode}` : "") +
-                (busy ? " busy" : "")
-              }
-            >
-              {rows.map((m) => (
-                <HubCard
-                  key={m.id}
-                  m={m}
-                  copy={copy}
-                  kindLabel={kindLabel}
-                  tagLabelMap={tagLabelMap}
-                  locale={locale}
-                  pendingIds={pendingIds}
-                  onOpen={openDetail}
-                  onDelete={removeMaterial}
-                  onToggleFavorite={toggleFav}
-                />
-              ))}
-            </div>
-          )}
+          {(() => {
+            const stageCls = "hub-stage" + (dragOver ? " drag" : "") + (selectMode ? " selmode" : "");
+            const stageProps = {
+              "data-tip": copy.dropUpload,
+              onDragOver: (e: DragEvent<HTMLDivElement>) => {
+                e.preventDefault();
+                setDragOver(true);
+              },
+              onDragLeave: (e: DragEvent<HTMLDivElement>) => {
+                if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false);
+              },
+              onDrop: onDropFiles,
+            };
+            const gridCls =
+              "hub-grid" + (gridMode ? ` cols-${gridMode}` : "") + (busy ? " busy" : "");
+            // 首屏加载:骨架屏(替代转圈),提升感知性能
+            if (busy && !rows.length && !err) {
+              return (
+                <div className={stageCls} {...stageProps}>
+                  <div className={gridCls}>
+                    {Array.from({ length: 12 }).map((_, i) => (
+                      <div className="hub-skel" key={i}>
+                        <div className="hub-skel-thumb" />
+                        <div className="hub-skel-line" />
+                        <div className="hub-skel-line short" />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            }
+            if (!rows.length) {
+              return (
+                <div className={stageCls} {...stageProps}>
+                  <div className="hub-empty" role="status">
+                    <p>{copy.empty}</p>
+                    <p className="muted">{copy.emptyHint}</p>
+                  </div>
+                </div>
+              );
+            }
+            return (
+              <div className={stageCls} {...stageProps}>
+                <div className={gridCls}>
+                  {rows.map((m) => (
+                    <HubCard
+                      key={m.id}
+                      m={m}
+                      copy={copy}
+                      kindLabel={kindLabel}
+                      tagLabelMap={tagLabelMap}
+                      locale={locale}
+                      pendingIds={pendingIds}
+                      selected={selected.has(m.id)}
+                      onOpen={selectMode ? toggleSelect : openDetail}
+                      onDelete={removeMaterial}
+                      onToggleFavorite={toggleFav}
+                      onToggleSelect={toggleSelect}
+                    />
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
 
           <div className="hub-pager">
             <button
@@ -1527,6 +1637,15 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
               {copy.next}
             </button>
           </div>
+          {(selected.size > 0 || selectMode) && (
+            <div className="hub-bulkbar" role="toolbar" aria-label={copy.select}>
+              <span className="n">{selected.size > 0 ? fillCopy(copy.selCount, { n: String(selected.size) }) : copy.selHint}</span>
+              <button type="button" className="watch-btn" onClick={selectAllVisible}>{copy.selectAll}</button>
+              <button type="button" className="watch-btn" onClick={() => void bulkFavorite()}>{copy.favMany}</button>
+              <button type="button" className="watch-btn hub-danger" onClick={() => void bulkDelete()}>{copy.delMany}</button>
+              <button type="button" className="watch-btn" onClick={clearSelect}>{copy.clearSel}</button>
+            </div>
+          )}
         </div>
       </div>
 

@@ -1,6 +1,25 @@
 ﻿$ROOT = Split-Path -Parent $MyInvocation.MyCommand.Path
 function Test-Port($p){ (Get-NetTCPConnection -LocalPort $p -ErrorAction SilentlyContinue) -ne $null }
-if (Test-Port 3000){ Write-Host skip-transform } else { Write-Host start-transform; Start-Process -WindowStyle Hidden -FilePath cmd -WorkingDirectory (Join-Path $ROOT transform) -ArgumentList '/k','npm','run','dev' }
+
+# Vitual Hub (UI :3401 / API :3402) 统一由 pm2 托管，见 ecosystem.config.cjs。
+# 以前这里 Test-Port 3000（其实是 FunUnion web-admin 的端口）导致 transform 永远被 skip；
+# hub 又用 Start-Process 手工拉起游离进程，与 pm2 抢端口、产生重复实例。
+# 现在一律走 pm2：已托管则 restart，否则 start，幂等且不会重复。
+$eco = Join-Path $ROOT ecosystem.config.cjs
+function Ensure-Pm2App($app) {
+  pm2 describe $app 2>$null | Out-Null
+  if ($LASTEXITCODE -eq 0) {
+    # 不带 --update-env：保留 ecosystem 里注入的 VITUAL_HUB_PORT / VITUAL_DIST_DIR 等
+    pm2 restart $app | Out-Null
+    Write-Host "pm2 restart $app"
+  } else {
+    pm2 start $eco --only $app | Out-Null
+    Write-Host "pm2 start $app"
+  }
+}
+Ensure-Pm2App 'vitual-hub-api'
+Ensure-Pm2App 'vitual-hub-web'
+pm2 save | Out-Null
 
 # 启动知识库服务 (Milvus Lite, 本地文件, 无需 Docker)
 $kbVenv = Join-Path $ROOT "kb\.venv\Scripts\python.exe"
@@ -34,17 +53,4 @@ if ($env:VITUAL_START_DECISION -ne '1') {
 } else {
   Write-Host "start-decision (:8911)"
   Start-Process -WindowStyle Hidden -FilePath powershell -ArgumentList '-NoProfile','-File',$decisionLauncher,'-ngl','99','-port','8911'
-}
-
-Start-Sleep -Seconds 3
-# 素材中心后端:后台分离启动(关掉本启动窗口也不会杀进程);日志落盘;端口占用则跳过避免重复实例
-$hubDir = Join-Path $ROOT materials_hub
-$hubLog = Join-Path $hubDir "hub_server.log"
-# 外部引用白名单:登记在素材中心之外的个人资源(桌面/视频/下载)原路径,预览才不会被沙箱拦
-$env:VITUAL_HUB_EXT_ROOTS = 'C:\Users\msi\Desktop;C:\Users\msi\Videos;C:\Users\msi\Downloads'
-if (Test-Port 8000) {
-  Write-Host "skip-hub (端口 8000 已占用)"
-} else {
-  Write-Host "start-hub (detached, log -> $hubLog)"
-  Start-Process -WindowStyle Hidden -FilePath python -WorkingDirectory $hubDir -ArgumentList server.py -RedirectStandardOutput $hubLog -RedirectStandardError $hubLog
 }

@@ -1,8 +1,9 @@
-"""Same-origin gateway: materials_hub (:8000) proxies transform + ops-api.
+"""Same-origin gateway: materials_hub (:3402) proxies transform + ops-api.
 
 Why not \"paste crop as a route\": the clip/workbench UI is the Next.js app
-(transform/), not a standalone HTML page. Hub stays the front door; /zh etc.
-and /ops-api are reverse-proxied so the browser never iframes another origin.
+(transform/), not a standalone HTML page. The browser normally enters via
+transform(:3401), which proxies /hub-api here; this gateway only keeps direct
+:3402 visits working by reverse-proxying /zh and /ops-api back to transform.
 """
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ TRANSFORM_LOCALES = frozenset({
 })
 
 TRANSFORM_ORIGIN = os.environ.get(
-    "VITUAL_TRANSFORM_ORIGIN", "http://127.0.0.1:3000"
+    "VITUAL_TRANSFORM_ORIGIN", "http://127.0.0.1:3401"
 ).rstrip("/")
 OPS_ORIGIN = os.environ.get(
     "VITUAL_API_UPSTREAM", "http://127.0.0.1:8901"
@@ -87,7 +88,7 @@ def forward(handler, origin: str, upstream_path: str) -> None:
         headers[k] = v
     headers["Host"] = parsed.netloc or host
     # Tell Next it is behind the hub gateway (optional consumers).
-    headers["X-Forwarded-Host"] = handler.headers.get("Host", f"127.0.0.1:8000")
+    headers["X-Forwarded-Host"] = handler.headers.get("Host", f"127.0.0.1:3402")
     headers["X-Forwarded-Proto"] = "http"
     headers["X-Vitual-Gateway"] = "materials_hub"
 
@@ -112,7 +113,7 @@ def forward(handler, origin: str, upstream_path: str) -> None:
     except OSError as e:
         msg = (
             f"upstream unavailable ({origin}): {e}\n"
-            f"Start transform: cd transform && npm run dev\n"
+            f"Start transform: pm2 start ecosystem.config.cjs --only vitual-hub-web (:3401)\n"
             f"Start ops API: yarn api (or :8901)\n"
         ).encode()
         try:

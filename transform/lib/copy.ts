@@ -414,6 +414,16 @@ export type HubCopy = {
   favorite: string;
   unfavorite: string;
   favOnly: string;
+  select: string;
+  selCount: string;
+  selectAll: string;
+  clearSel: string;
+  favMany: string;
+  delMany: string;
+  deletedMany: string;
+  dropUpload: string;
+  batch: string;
+  selHint: string;
 };
 
 export type UiCopy = {
@@ -793,6 +803,16 @@ const en: UiCopy = {
     favorite: "Favorite",
     unfavorite: "Unfavorite",
     favOnly: "Favorites only",
+    select: "Select",
+    selCount: "{n} selected",
+    selectAll: "Select page",
+    clearSel: "Clear",
+    favMany: "Favorite selected",
+    delMany: "Delete selected",
+    deletedMany: "Deleted {n}",
+    dropUpload: "Drop files here to upload",
+    batch: "Batch manage",
+    selHint: "Select items to manage",
     copyPath: "Copy path",
     openFile: "Open file",
     typeSize: "Type · size",
@@ -820,7 +840,7 @@ const en: UiCopy = {
     pendingBadge: "Processing",
     tooLarge: "File too large (max 2 GB) — use link ingest or CLI",
     error: "Materials API unavailable",
-    backendHint: "Start materials_hub: python server.py (:8000)",
+    backendHint: "Start hub API: pm2 start ecosystem.config.cjs --only vitual-hub-api",
     hitReason: "Why it matched",
     hitBadgeSpeech: "Speech",
     hitBadgeFrame: "Frame",
@@ -1211,6 +1231,16 @@ const zh: UiCopy = {
     favorite: "收藏",
     unfavorite: "取消收藏",
     favOnly: "仅看收藏",
+    select: "选择",
+    selCount: "已选 {n} 个",
+    selectAll: "全选本页",
+    clearSel: "取消选择",
+    favMany: "收藏所选",
+    delMany: "删除所选",
+    deletedMany: "已删除 {n} 个",
+    dropUpload: "拖拽文件到此处即可上传",
+    batch: "批量管理",
+    selHint: "选择素材进行管理",
     copyPath: "复制路径",
     openFile: "打开文件",
     typeSize: "类型 · 大小",
@@ -1238,7 +1268,7 @@ const zh: UiCopy = {
     pendingBadge: "理解中",
     tooLarge: "文件过大（上限 2GB），请走链接引用或 CLI 入库",
     error: "素材中心 API 不可用",
-    backendHint: "请先启动 materials_hub：python server.py（:8000）",
+    backendHint: "请先启动素材中心：pm2 start ecosystem.config.cjs --only vitual-hub-api",
     hitReason: "命中说明",
     hitBadgeSpeech: "台词",
     hitBadgeFrame: "画面",
@@ -1447,6 +1477,16 @@ const zhHant: UiCopy = {
     favorite: "收藏",
     unfavorite: "取消收藏",
     favOnly: "僅看收藏",
+    select: "選擇",
+    selCount: "已選 {n} 個",
+    selectAll: "全選本頁",
+    clearSel: "取消選擇",
+    favMany: "收藏所選",
+    delMany: "刪除所選",
+    deletedMany: "已刪除 {n} 個",
+    dropUpload: "拖拽檔案至此即可上傳",
+    batch: "批次管理",
+    selHint: "選擇素材進行管理",
     copyPath: "複製路徑",
     openFile: "開啟檔案",
     typeSize: "類型 · 大小",
@@ -1482,7 +1522,7 @@ const zhHant: UiCopy = {
     pendingBadge: "理解中",
     tooLarge: "檔案過大（上限 2GB），請走連結引用或 CLI 入庫",
     error: "素材中心 API 不可用",
-    backendHint: "請先啟動 materials_hub：python server.py（:8000）",
+    backendHint: "請先啟動素材中心：pm2 start ecosystem.config.cjs --only vitual-hub-api",
     hitReason: "命中說明",
     hitBadgeSpeech: "台詞",
     hitBadgeFrame: "畫面",

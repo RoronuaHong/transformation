@@ -302,7 +302,7 @@ def main():
         check("O", "检索门禁 PASS", False, "err: %s" % e)
 
     # ---- O2. 语义(auto)门禁:语义是默认主路径,必须与词法同等受门禁保护 ----
-    # :8000 的后台 auto 链(待处理素材的 describe/visual)会持续占用 ollama,
+    # :3402 的后台 auto 链(待处理素材的 describe/visual)会持续占用 ollama,
     # 本子进程的 embed 请求可能在队列里排队超时——此时若 auto 链确实在跑,
     # 记 SKIP(门禁保障由独立运行 `--mode auto --gate` 承担,本轮已实跑 PASS)。
     # 超时设 600s:auto 模式单次检索要过 翻译/embed/CLIP/重排 四道模型,本机 6GB VRAM
@@ -323,7 +323,7 @@ def main():
         pending_n = -1
         try:
             import urllib.request as _u
-            with _u.urlopen("http://127.0.0.1:8000/api/pending", timeout=10) as _r:
+            with _u.urlopen("http://127.0.0.1:3402/api/pending", timeout=10) as _r:
                 pending_n = len(json.loads(_r.read().decode("utf-8")) or {})
         except Exception:
             pass

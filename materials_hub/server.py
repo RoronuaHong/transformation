@@ -1,6 +1,7 @@
 """Materials Hub — 轻量 Web 服务(零依赖,Python 标准库 http.server)。
 
-运行: python server.py  然后浏览器打开 http://localhost:8000
+运行: python server.py(由 pm2 的 vitual-hub-api 托管;端口见 VITUAL_HUB_PORT,默认 :3402)。
+UI 在 transform(:3401)/zh/hub;本服务只提供 /api/*,经 transform 的 /hub-api 代理。
 提供: 上传 / 列表 / 搜索 / 按 kind 筛选 / 打标签 / 编辑描述 / 预览 / 去重整理。
 """
 import os
@@ -35,7 +36,9 @@ from core import (
 )
 from gateway import proxy_target, forward as gateway_forward
 
-PORT = 8000
+# 端口由 pm2 的 VITUAL_HUB_PORT 注入(见 ecosystem.config.cjs);默认 3402 为 Vitual 专属段。
+# 避开 FunUnion(3000/8000-8005)、admin(3001)、MineTools(5180/8015)、vitual-api(8901)。
+PORT = int(os.environ.get("VITUAL_HUB_PORT") or "3402")
 # 上传大小上限(防整包请求体进内存):默认 2048MB,可用 VITUAL_UPLOAD_MAX_MB 调整。
 # 超限 413 直接拒绝(更合适走链接引用 ingest_external 或 CLI 分批入库)。
 _UPLOAD_MAX_MB = int(os.environ.get("VITUAL_UPLOAD_MAX_MB") or "2048")
@@ -183,7 +186,7 @@ def parse_multipart(raw, boundary):
 
 
 def _cors_headers(handler):
-    """允许本机 Next(:3000) 直传大文件到 hub(:8000),绕过 rewrite 体积上限。"""
+    """允许本机 Next(:3401) 直传大文件到 hub(:3402),绕过 rewrite 体积上限。"""
     origin = (handler.headers.get("Origin") or "").strip()
     if not origin:
         return
@@ -210,7 +213,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, json.dumps(obj, ensure_ascii=False), "application/json; charset=utf-8")
 
     def do_OPTIONS(self):
-        # 预检:浏览器跨域直传 multipart 到 :8000
+        # 预检:浏览器跨域直传 multipart 到 :3402
         self.send_response(204)
         _cors_headers(self)
         self.send_header("Content-Length", "0")
@@ -353,7 +356,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         u = urllib.parse.urlparse(self.path)
         p = u.path
-        # 兼容直连 :8000 的 /hub-api/* 调用(绕过 transform 代理重写时),剥前缀统一走 /api/*
+        # 兼容直连 hub 的 /hub-api/* 调用(绕过 transform 代理重写时),剥前缀统一走 /api/*
         if p.startswith("/hub-api/"):
             p = "/api/" + p[len("/hub-api/"):]
         elif p == "/hub-api":
@@ -643,7 +646,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         u = urllib.parse.urlparse(self.path)
         p = u.path
-        # 兼容直连 :8000 的 /hub-api/* 调用(绕过 transform 代理重写时),剥前缀统一走 /api/*
+        # 兼容直连 hub 的 /hub-api/* 调用(绕过 transform 代理重写时),剥前缀统一走 /api/*
         if p.startswith("/hub-api/"):
             p = "/api/" + p[len("/hub-api/"):]
         elif p == "/hub-api":
@@ -985,7 +988,7 @@ def main():
     srv = ThreadingHTTPServer((HUB_HOST, PORT), Handler)
     auth = " (token required: VITUAL_HUB_TOKEN set)" if HUB_TOKEN else " (open, no token)"
     print(f"Materials Hub API -> http://{HUB_HOST}:{PORT}/api/*{auth}")
-    print(f"  UI moved to transform: http://127.0.0.1:3000/zh/hub  (proxy /hub-api → this server)")
+    print(f"  UI moved to transform: http://127.0.0.1:3401/zh/hub  (proxy /hub-api → this server)")
     # 自愈:主线程任何意外异常都不让进程退出,3s 后重建 server 继续服务
     import sys as _sys, traceback as _tb
     while True:
