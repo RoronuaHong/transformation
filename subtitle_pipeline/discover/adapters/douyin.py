@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -27,6 +28,7 @@ from typing import Any
 
 from ..models import Candidate, TopicConfig
 from ..parseutil import parse_count, parse_duration, trunc
+from .base import REQUEST_CREDENTIALS
 from .xbogus import append_x_bogus
 
 _UA = (
@@ -95,12 +97,40 @@ def _douyin_cookie_file() -> Path | None:
     return None
 
 
+def _douyin_token_cookie() -> str:
+    """A session token supplied via ``DOUYIN_TOKEN`` env (console token field).
+
+    Accepts either a bare ``sessionid`` value or a full ``a=b; c=d`` header blob.
+    Returns a ``name=value; ...`` cookie header fragment, or "".
+    """
+    raw = (
+        REQUEST_CREDENTIALS.get().get("douyin_token")
+        or os.environ.get("DOUYIN_TOKEN")
+        or ""
+    ).strip()
+    if not raw:
+        return ""
+    # A header blob (has separators or is long) is passed through verbatim.
+    if len(raw) > 80 or ";" in raw or (" " in raw and "=" in raw):
+        return raw
+    return f"sessionid_ss={raw}; sessionid={raw}; sid_tt={raw}; uid_tt={raw}"
+
+
 def _douyin_cookie_header() -> str:
-    """Netscape ``cookies.douyin.txt`` → ``a=b; c=d`` header (douyin.com only)."""
+    """Netscape ``cookies.douyin.txt`` → ``a=b; c=d`` header (douyin.com only).
+
+    A token supplied via ``DOUYIN_TOKEN`` is merged in first so the console's
+    token field can authenticate without a cookie file on disk.
+    """
+    pairs: list[str] = []
+    token = _douyin_token_cookie()
+    if token:
+        for kv in token.split(";"):
+            if "=" in kv:
+                pairs.append(kv.strip())
     p = _douyin_cookie_file()
     if p is None:
-        return ""
-    pairs: list[str] = []
+        return "; ".join(pairs)
     try:
         for ln in p.read_text(encoding="utf-8", errors="replace").splitlines():
             if not ln.strip() or ln.lstrip().startswith("#"):
@@ -118,11 +148,13 @@ def _douyin_cookie_header() -> str:
                     if "=" in kv:
                         pairs.append(kv.strip())
     except OSError:
-        return ""
+        return "; ".join(pairs)
     return "; ".join(pairs)
 
 
 def _has_cookies() -> bool:
+    if _douyin_token_cookie():
+        return True  # a supplied token counts as a logged-in session
     h = _douyin_cookie_header()
     return bool(h) and ("ttwid" in h or "sessionid" in h or "sid_tt" in h)
 
@@ -204,6 +236,12 @@ def _direct_signed_get(path: str, payload: dict[str, Any]) -> dict[str, Any] | N
         return None
 
 
+# 全局最小请求间隔：抖音会静默丢弃短时间内过密的请求（连接挂起不返回），
+# 拉开间隔能显著降低触发风控的概率。
+_LAST_REQ_TS = 0.0
+_MIN_REQ_GAP = 3.0
+
+
 def _signed_get(path: str, params: dict[str, Any], *, count: int = 20) -> list[dict[str, Any]]:
     """GET a Douyin web endpoint with an X-Bogus signed query; return aweme dicts.
 
@@ -217,9 +255,21 @@ def _signed_get(path: str, params: dict[str, Any], *, count: int = 20) -> list[d
     for k, v in params.items():
         payload[k] = v
 
+    # 全局最小请求间隔，降低触发抖音静默风控（频繁请求会被静默丢弃连接）
+    global _LAST_REQ_TS
+    _now = time.time()
+    _gap = _MIN_REQ_GAP - (_now - _LAST_REQ_TS)
+    if _gap > 0:
+        time.sleep(_gap)
+    _LAST_REQ_TS = time.time()
+
     from . import douyin_cdp
 
     j = douyin_cdp.cdp_get_json(path, payload)
+    if j is None:
+        # 偶发 CDP 无响应时退避一次重试（优先页面真实签名，不立即回退到已失效的 vendored）
+        time.sleep(2.0)
+        j = douyin_cdp.cdp_get_json(path, payload)
     if j is None:
         j = _direct_signed_get(path, payload)
     if j is None:

@@ -8,6 +8,6 @@ os.environ["VITUAL_RERANK_MODEL"] = "__none__"
 import server
 
 # Run the Materials Hub on an alternate port (8000 is occupied by another app
-# on this machine). Keeps the in-repo /crawler console reachable.
+# on this machine). The crawler console now lives in transform (/[locale]/hub/crawler).
 server.PORT = 8200
 server.main()

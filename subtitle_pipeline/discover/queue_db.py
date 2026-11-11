@@ -314,6 +314,23 @@ class QueueDB:
             )
         )
 
+    def list_video_jobs(self, platform: str, video_id: str) -> list[sqlite3.Row]:
+        """All workflow rows for one (platform, video_id) pair."""
+        return list(
+            self._conn.execute(
+                "SELECT * FROM jobs WHERE platform=? AND video_id=? ORDER BY id ASC",
+                (platform, video_id),
+            )
+        )
+
+    def delete_video_jobs(self, platform: str, video_id: str) -> int:
+        """Remove a video from the queue completely. Returns deleted row count."""
+        cur = self._conn.execute(
+            "DELETE FROM jobs WHERE platform=? AND video_id=?", (platform, video_id)
+        )
+        self._conn.commit()
+        return int(cur.rowcount)
+
     def list_pending(self, *, limit: int = 50) -> list[sqlite3.Row]:
         return list(
             self._conn.execute(

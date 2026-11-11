@@ -6,13 +6,14 @@ are filled from the watch page HTML (JSON-LD), not full format extraction.
 
 from __future__ import annotations
 
+import os
 import re
 import urllib.parse
 from typing import Any
 
 from ..models import Candidate, TopicConfig
 from ..parseutil import parse_count, parse_duration, trunc, unix_from_entry, parse_watch_html
-from .base import Adapter
+from .base import REQUEST_CREDENTIALS, Adapter
 
 
 def youtube_ydl_opts(*, extract_flat: bool = True, playlistend: int | None = None) -> dict[str, Any]:
@@ -35,6 +36,16 @@ def youtube_ydl_opts(*, extract_flat: bool = True, playlistend: int | None = Non
             opts["proxy"] = px
     except Exception as e:
         print(f"[youtube] proxy skip ({type(e).__name__}: {e})")
+    # Console-supplied Data API Key (per-request via env). yt-dlp's web search
+    # doesn't require it, but forwarding it keeps the credential available for
+    # the youtube extractor's player/API paths.
+    key = (
+        REQUEST_CREDENTIALS.get().get("youtube_token")
+        or os.environ.get("YOUTUBE_API_KEY")
+        or ""
+    ).strip()
+    if key:
+        opts["extractor_args"] = {"youtube": {"api_key": [key]}}
     return opts
 
 

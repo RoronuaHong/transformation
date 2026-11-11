@@ -601,7 +601,8 @@ def test_telegram_adapter_parses_and_filters(monkeypatch) -> None:
     from discover.adapters.telegram import TelegramAdapter
 
     monkeypatch.setattr(
-        "discover.adapters.telegram._fetch_channel_html", lambda channel: _SAMPLE_TG_HTML
+        "discover.adapters.telegram._fetch_channel_html",
+        lambda channel, query="", before=None: _SAMPLE_TG_HTML,
     )
     topic = TopicConfig(
         id="adhoc",
@@ -633,4 +634,93 @@ def test_parse_telegram_channel_normalizes() -> None:
     assert parse_telegram_channel("https://t.me/s/durov") == "durov"
     assert parse_telegram_channel("t.me/durov") == "durov"
     assert parse_telegram_channel("not a channel!!") is None
+
+
+def test_telegram_preview_url_and_page_classification() -> None:
+    from discover.adapters.telegram import classify_channel_page, preview_url
+
+    assert preview_url("durov") == "https://t.me/s/durov"
+    assert (
+        preview_url("durov", query="camping", before=418)
+        == "https://t.me/s/durov?q=camping&before=418"
+    )
+    assert classify_channel_page(_SAMPLE_TG_HTML, channel="durov") == "ok"
+    assert (
+        classify_channel_page('<title>Telegram: Launch @caoyuwen8fbot</title>', channel="caoyuwen8fbot")
+        == "no_preview"
+    )
+    assert (
+        classify_channel_page(
+            '<meta property="og:title" content="Telegram: Launch @caoyuwen8fbot">',
+            channel="caoyuwen8fbot",
+        )
+        == "no_preview"
+    )
+    assert (
+        classify_channel_page(
+            '<title>Pavel Durov</title><div class="tgme_channel_info">No posts found</div>',
+            channel="durov",
+        )
+        == "no_match"
+    )
+
+
+def test_telegram_server_side_highlight_skips_local_filter(monkeypatch) -> None:
+    from discover.adapters.telegram import TelegramAdapter
+
+    page = """
+    <div class="tgme_widget_message"><a class="tgme_widget_message_date" href="https://t.me/durov/700"><time datetime="2026-11-04T12:00:00+00:00">Nov 4</time></a><div class="tgme_widget_message_text">Telegram <mark class="highlight">update</mark> notes</div></div>
+    """
+    monkeypatch.setattr(
+        "discover.adapters.telegram._fetch_channel_html",
+        lambda channel, query="", before=None: page,
+    )
+    topic = TopicConfig(
+        id="adhoc",
+        locales_title={"zh": "完全不同的词"},
+        fresh_hours=168,
+        daily_quota_per_platform=5,
+        min_views={"telegram": 0},
+        keywords={"default": ["完全不同的词"], "telegram": ["完全不同的词"]},
+        platforms=["telegram"],
+        seed_channels={"telegram": ["durov"]},
+        sources=["search"],
+    )
+    # Telegram matched server-side (highlight), even though the raw text does
+    # not contain our literal keyword; the candidate must not be dropped.
+    assert len(TelegramAdapter().list_candidates(topic)) == 1
+
+
+def test_telegram_pages_backwards_with_before(monkeypatch) -> None:
+    from discover.adapters.telegram import TelegramAdapter
+
+    calls = []
+
+    def fake(channel, query="", before=None):
+        calls.append((channel, query, before))
+        if before is None:
+            return """
+            <div class="tgme_widget_message"><a class="tgme_widget_message_date" href="https://t.me/durov/102"><time datetime="2026-11-04T12:00:00+00:00">Nov 4</time></a><div class="tgme_widget_message_text">萌宠 合集二</div></div>
+            <div class="tgme_widget_message"><a class="tgme_widget_message_date" href="https://t.me/durov/101"><time datetime="2026-11-03T12:00:00+00:00">Nov 3</time></a><div class="tgme_widget_message_text">萌宠 合集一</div></div>
+            """
+        return """
+        <div class="tgme_widget_message"><a class="tgme_widget_message_date" href="https://t.me/durov/100"><time datetime="2026-11-02T12:00:00+00:00">Nov 2</time></a><div class="tgme_widget_message_text">萌宠 合集零</div></div>
+        """
+
+    monkeypatch.setattr("discover.adapters.telegram._fetch_channel_html", fake)
+    topic = TopicConfig(
+        id="adhoc",
+        locales_title={"zh": "萌宠"},
+        fresh_hours=168,
+        daily_quota_per_platform=5,
+        min_views={"telegram": 0},
+        keywords={"default": ["萌宠"], "telegram": ["萌宠"]},
+        platforms=["telegram"],
+        seed_channels={"telegram": ["durov"]},
+        sources=["search"],
+    )
+    cands = TelegramAdapter().list_candidates(topic)
+    assert len(cands) == 3
+    assert calls[0] == ("durov", "萌宠", None)
+    assert calls[1] == ("durov", "萌宠", 101)
 

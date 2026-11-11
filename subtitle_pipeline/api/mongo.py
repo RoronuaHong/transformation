@@ -51,28 +51,42 @@ class MongoStore:
         now = utc_now()
         original = doc.get("original_url") or doc.get("canonical_url") or doc.get("url")
         canonical = doc.get("canonical_url") or doc.get("url") or original
+        fields = {
+            "original_url": original,
+            "canonical_url": canonical,
+            "url": canonical,
+            "title": doc.get("title"),
+            "author": doc.get("author"),
+            "author_id": doc.get("author_id"),
+            "published_at": doc.get("published_at"),
+            "thumb_url": doc.get("thumb_url"),
+            "views": doc.get("views"),
+            "topic_id": doc.get("topic_id"),
+            "status": doc.get("status"),
+            "source": doc.get("source") or "pipeline",
+        }
+        # The queue is re-synced on every list request. Skip no-op writes so
+        # "入库时间/顺序" stays stable instead of being refreshed every poll.
+        current = self.links.find_one({"platform": platform, "video_id": video_id})
+        if current is not None and all(current.get(k) == v for k, v in fields.items()):
+            return
         self.links.update_one(
             {"platform": platform, "video_id": video_id},
-            {
-                "$set": {
-                    "original_url": original,
-                    "canonical_url": canonical,
-                    "url": canonical,
-                    "title": doc.get("title"),
-                    "author": doc.get("author"),
-                    "author_id": doc.get("author_id"),
-                    "published_at": doc.get("published_at"),
-                    "thumb_url": doc.get("thumb_url"),
-                    "views": doc.get("views"),
-                    "topic_id": doc.get("topic_id"),
-                    "status": doc.get("status"),
-                    "source": doc.get("source") or "pipeline",
-                    "updated_at": now,
-                },
-                "$setOnInsert": {"created_at": now},
-            },
+            {"$set": {**fields, "updated_at": now}, "$setOnInsert": {"created_at": now}},
             upsert=True,
         )
+
+    def set_source_link_status(self, platform: str, video_id: str, status: str) -> bool:
+        """Mirror a queue status change without a full queue → Mongo resync."""
+        res = self.links.update_one(
+            {"platform": platform, "video_id": video_id},
+            {"$set": {"status": status, "updated_at": utc_now()}},
+        )
+        return res.matched_count == 1
+
+    def delete_source_link(self, platform: str, video_id: str) -> bool:
+        res = self.links.delete_one({"platform": platform, "video_id": video_id})
+        return res.deleted_count == 1
 
     def list_links(self, *, limit: int = 100, platform: str | None = None) -> list[dict[str, Any]]:
         q: dict[str, Any] = {}

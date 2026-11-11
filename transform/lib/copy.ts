@@ -66,6 +66,7 @@ export type NavCopy = {
   feed: string;
   ask: string;
   hub: string;
+  crawler: string;
   menu: string;
   themeLight: string;
   themeDark: string;
@@ -491,6 +492,7 @@ const en: UiCopy = {
     feed: "Library",
     ask: "Ask",
     hub: "Materials",
+    crawler: "Collect",
     menu: "Menu",
     themeLight: "Light",
     themeDark: "Dark",
@@ -909,6 +911,7 @@ const zh: UiCopy = {
     feed: "列表",
     ask: "问问一桌",
     hub: "素材中心",
+    crawler: "素材采集",
     menu: "菜单",
     themeLight: "浅色",
     themeDark: "深色",
@@ -1325,6 +1328,7 @@ const zhHant: UiCopy = {
     feed: "列表",
     ask: "問問一桌",
     hub: "素材中心",
+    crawler: "素材採集",
     menu: "選單",
     themeLight: "淺色",
     themeDark: "深色",

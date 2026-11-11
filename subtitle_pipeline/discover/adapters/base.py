@@ -1,8 +1,16 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextvars import ContextVar
 
 from ..models import Candidate, TopicConfig
+
+# Per-search credentials. The crawler console accepts YouTube / Douyin tokens
+# with each request; keeping them in os.environ leaks one operator's token into
+# concurrent searches. Adapters read this first and fall back to process env.
+REQUEST_CREDENTIALS: ContextVar[dict[str, str]] = ContextVar(
+    "request_credentials", default={}
+)
 
 
 class Adapter(ABC):

@@ -19,6 +19,9 @@ export function SiteNav({ locale, nav }: { locale: Locale; nav: NavCopy }) {
   const pathname = usePathname();
   const burgerRef = useRef<HTMLButtonElement>(null);
 
+  const isActive = (href: string, exact = false) =>
+    exact ? pathname === href : pathname === href || pathname.startsWith(href + "/");
+
   useEffect(() => {
     setOpen(false);
   }, [pathname]);
@@ -57,16 +60,35 @@ export function SiteNav({ locale, nav }: { locale: Locale; nav: NavCopy }) {
         className={open ? "nav-links open" : "nav-links"}
         aria-label={nav.brand}
       >
-        <Link href={`/${locale}`} onClick={() => setOpen(false)}>
+        <Link
+          href={`/${locale}`}
+          aria-current={isActive(`/${locale}`, true) ? "page" : undefined}
+          onClick={() => setOpen(false)}
+        >
           {nav.workbench}
         </Link>
-        <Link href={`/${locale}/feed`} onClick={() => setOpen(false)}>
+        <Link
+          href={`/${locale}/feed`}
+          aria-current={isActive(`/${locale}/feed`) ? "page" : undefined}
+          onClick={() => setOpen(false)}
+        >
           {nav.feed}
         </Link>
-        <Link href={`/${locale}/ask`} onClick={() => setOpen(false)}>
+        <Link
+          href={`/${locale}/ask`}
+          aria-current={isActive(`/${locale}/ask`) ? "page" : undefined}
+          onClick={() => setOpen(false)}
+        >
           {nav.ask}
         </Link>
         <HubLink label={nav.hub} />
+        <Link
+          href={`/${locale}/hub/crawler`}
+          aria-current={isActive(`/${locale}/hub/crawler`) ? "page" : undefined}
+          onClick={() => setOpen(false)}
+        >
+          {nav.crawler}
+        </Link>
         <ThemeToggle locale={locale} />
         <LangSwitch locale={locale} />
       </nav>

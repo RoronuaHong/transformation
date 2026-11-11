@@ -1,17 +1,26 @@
-"""Telegram discovery: scrape public channel preview pages (t.me/s/<channel>).
+"""Telegram discovery via public channel web previews (t.me/s/<channel>).
 
-Telegram has no free keyword search, so we scan a set of public channels supplied as
-``seed_channels["telegram"]`` (or, from the crawler page, via ``--telegram-channels``).
-Posts whose text matches the topic keyword are kept. No auth needed for public channels;
-each post becomes a Candidate link (``t.me/<channel>/<id>``). This only collects source
-links — retrieving Telegram media downstream is a separate concern.
+Verified 2026-11-10 against Telegram's logged-out preview surface:
+
+* ``?q=<keyword>`` is Telegram's own server-side in-channel search; hits come
+  back newest-first with ``<mark class="highlight">`` markup.
+* ``?before=<postId>`` pages backwards through matches; post ids are dense,
+  monotonically increasing integers (``data-post="channel/id"``).
+* Only **public channels** expose posts. Bots, private groups, user accounts
+  and preview-disabled channels return a launch/card page with zero posts.
+
+Polite-crawl rules applied here: <=1 request/sec per channel, 429/503 backoff,
+cached dedupe by ``channel/postId``, and an ``og:title`` / markup check that
+distinguishes "not a public channel" from "no keyword matches".
 """
 
 from __future__ import annotations
 
 import html
 import re
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 from typing import Any
@@ -21,9 +30,44 @@ from ..parseutil import parse_count, trunc
 from .base import Adapter
 
 _UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
+
+_MIN_INTERVAL = 1.0
+_MAX_PAGES = 5
+_last_request_at: dict[str, float] = {}
+
+
+class TelegramChannelError(Exception):
+    """Base class for channel-level failures surfaced to the console."""
+
+
+class TelegramFetchError(TelegramChannelError):
+    """Network / anti-bot failure while reading a preview page."""
+
+
+class TelegramNoPreview(TelegramChannelError):
+    """Handle is a bot / private group / preview-disabled channel."""
+
+
+def _throttle(channel: str) -> None:
+    now = time.monotonic()
+    wait = _MIN_INTERVAL - (now - _last_request_at.get(channel, 0.0))
+    if wait > 0:
+        time.sleep(wait)
+    _last_request_at[channel] = time.monotonic()
+
+
+def preview_url(channel: str, *, query: str = "", before: int | None = None) -> str:
+    params: dict[str, str] = {}
+    if query:
+        params["q"] = query
+    if before is not None:
+        params["before"] = str(before)
+    url = f"https://t.me/s/{channel}"
+    return url + ("?" + urllib.parse.urlencode(params) if params else "")
+
 
 # Default to the local v2rayN mixed port (http CONNECT works for https t.me).
 # Falls back to env HTTP(S)_PROXY, then direct — mirrors the YouTube adapter.
@@ -116,8 +160,38 @@ def _parse_messages(html_text: str) -> list[dict[str, Any]]:
     return out
 
 
-def _fetch_channel_html(channel: str) -> str:
-    url = f"https://t.me/s/{channel}"
+def classify_channel_page(html_text: str, *, channel: str) -> str:
+    """Return 'ok' | 'no_match' | 'no_preview' for a preview response."""
+    if "tgme_widget_message_date" in html_text or "data-post=" in html_text:
+        return "ok"
+    titles = re.findall(r"<title>(.*?)</title>", html_text, re.I | re.S)
+    titles += re.findall(
+        r'<meta\s+property="og:title"\s+content="([^"]*)"', html_text, re.I
+    )
+    joined = " ".join(html.unescape(t).lower() for t in titles)
+    # Bot / deep-link launch pages expose no posts at all.
+    if (
+        "launch @" in joined
+        or "telegram: launch" in joined
+        or ("telegram:" in joined and "@" + channel.lower() in joined)
+    ):
+        return "no_preview"
+    low = html_text.lower()
+    if (
+        "no posts" in low
+        or "nothing found" in low
+        or "tgme_channel_info" in low
+        or "tgme_page_title" in low
+        or "subscribers" in low
+    ):
+        return "no_match"
+    return "no_preview"
+
+
+def _fetch_channel_html(
+    channel: str, *, query: str = "", before: int | None = None
+) -> str:
+    url = preview_url(channel, query=query, before=before)
     req = urllib.request.Request(
         url,
         headers={
@@ -126,12 +200,29 @@ def _fetch_channel_html(channel: str) -> str:
             "Referer": "https://t.me/",
         },
     )
-    try:
-        with _build_opener().open(req, timeout=20) as resp:
-            return resp.read().decode("utf-8", errors="replace")
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
-        print(f"[telegram] 拉取失败 {channel}: {type(e).__name__}: {e}")
-        return ""
+    last: Exception | None = None
+    for attempt in range(3):
+        _throttle(channel)
+        try:
+            with _build_opener().open(req, timeout=12) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as e:
+            last = e
+            if e.code in (429, 502, 503) and attempt < 2:
+                time.sleep(1.5 * (2**attempt))
+                continue
+            raise TelegramFetchError(
+                f"Telegram：读取 t.me/s/{channel} 失败（HTTP {e.code}），请稍后重试或检查网络/代理"
+            ) from e
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            last = e
+            if attempt < 2:
+                time.sleep(1.5 * (2**attempt))
+                continue
+            raise TelegramFetchError(
+                f"Telegram：无法访问 t.me/s/{channel}（{type(e).__name__}: {e}）"
+            ) from e
+    raise TelegramFetchError(f"Telegram：读取 t.me/s/{channel} 失败（{last}）")
 
 
 class TelegramAdapter(Adapter):
@@ -150,32 +241,73 @@ class TelegramAdapter(Adapter):
             print("[telegram] 未提供频道(seed_channels.telegram 或关键词作频道名)，跳过")
             return []
 
-        keys = [k.lower() for k in (topic.keywords_for("telegram") or [])]
+        keys = [k.lower() for k in (topic.keywords_for("telegram") or []) if k]
+        query = (topic.keywords_for("telegram") or [""])[0]
+        quota = max(1, int(topic.daily_quota_per_platform or 10))
         seen: set[str] = set()
         out: list[Candidate] = []
+        invalid: list[str] = []
+
         for ch in channels:
-            for m in _parse_messages(_fetch_channel_html(ch)):
-                if keys and not any(k in (m["text"] or "").lower() for k in keys):
-                    continue
-                cid = f"{m['channel']}/{m['post_id']}"
-                if cid in seen:
-                    continue
-                seen.add(cid)
-                out.append(
-                    Candidate(
-                        platform="telegram",
-                        video_id=cid,
-                        url=m["url"],
-                        original_url=m["url"],
-                        title=trunc(m["text"] or cid, 200) or cid,
-                        topic_id=topic.id,
-                        author=m["channel"],
-                        author_id=m["channel"],
-                        published_at=m["ts"],
-                        views=m["views"],
-                        description=trunc(m["text"]),
-                        raw={"source": "telegram", "channel": m["channel"]},
+            cursor: int | None = None
+            pages = 0
+            while pages < _MAX_PAGES and len(out) < quota:
+                page = _fetch_channel_html(ch, query=query, before=cursor)
+                state = classify_channel_page(page, channel=ch)
+                if state == "no_preview":
+                    invalid.append(ch)
+                    break
+                msgs = _parse_messages(page)
+                if not msgs:
+                    break
+                ids: list[int] = []
+                added = 0
+                # Telegram's ?q= search is server-side (hits are wrapped in
+                # <mark class="highlight">). Trust its matching instead of
+                # re-filtering locally, which drops stemmed/highlighted hits.
+                server_side = bool(query) and "highlight" in page
+                for m in msgs:
+                    pid = str(m.get("post_id") or "")
+                    if pid.isdigit():
+                        ids.append(int(pid))
+                    cid = f"{m['channel']}/{m['post_id']}"
+                    if cid in seen:
+                        continue
+                    if not server_side and keys and not any(
+                        k in (m["text"] or "").lower() for k in keys
+                    ):
+                        continue
+                    seen.add(cid)
+                    out.append(
+                        Candidate(
+                            platform="telegram",
+                            video_id=cid,
+                            url=m["url"],
+                            original_url=m["url"],
+                            title=trunc(m["text"] or cid, 200) or cid,
+                            topic_id=topic.id,
+                            author=m["channel"],
+                            author_id=m["channel"],
+                            published_at=m["ts"],
+                            views=m["views"],
+                            description=trunc(m["text"]),
+                            raw={"source": "telegram", "channel": m["channel"], "query": query},
+                        )
                     )
-                )
-        print(f"[telegram] channel(s)={channels} kept={len(out)}")
+                    added += 1
+                    if len(out) >= quota:
+                        break
+                lowest = min(ids) if ids else None
+                if added == 0 or lowest is None or (cursor is not None and lowest >= cursor):
+                    break
+                cursor = lowest
+                pages += 1
+            print(f"[telegram] channel={ch} q={query!r} pages={pages} kept={len(out)}")
+
+        if not out and invalid:
+            raise TelegramNoPreview(
+                "Telegram：@"
+                + ", @".join(invalid)
+                + " 不是公开频道（bot / 私有频道 / 未开启预览时 t.me/s 没有帖子），请换成公开频道 @handle"
+            )
         return out

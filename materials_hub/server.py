@@ -360,8 +360,6 @@ class Handler(BaseHTTPRequestHandler):
             p = "/api"
         if p in ("/", "/index.html"):
             return self._serve_static("index.html", "text/html; charset=utf-8")
-        if p in ("/crawler", "/crawler/"):
-            return self._serve_static("crawler.html", "text/html; charset=utf-8")
         if p.startswith("/static/"):
             return self._serve_static(p[len("/static/"):])
         if p in ("/api/list", "/api/materials", "/api/search"):

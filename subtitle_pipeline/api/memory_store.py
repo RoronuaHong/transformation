@@ -29,26 +29,35 @@ class MemoryStore(MongoStore):
         key = (doc["platform"], doc["video_id"])
         original = doc.get("original_url") or doc.get("canonical_url") or doc.get("url")
         now = utc_now()
-        prev = self._links.get(key) or {"created_at": now}
-        prev.update(
-            {
-                "platform": doc["platform"],
-                "video_id": doc["video_id"],
-                "original_url": original,
-                "canonical_url": doc.get("canonical_url") or original,
-                "title": doc.get("title"),
-                "author": doc.get("author"),
-                "author_id": doc.get("author_id"),
-                "published_at": doc.get("published_at"),
-                "thumb_url": doc.get("thumb_url"),
-                "views": doc.get("views"),
-                "topic_id": doc.get("topic_id"),
-                "status": doc.get("status"),
-                "source": doc.get("source") or "pipeline",
-                "updated_at": now,
-            }
-        )
-        self._links[key] = prev
+        fields = {
+            "platform": doc["platform"],
+            "video_id": doc["video_id"],
+            "original_url": original,
+            "canonical_url": doc.get("canonical_url") or original,
+            "title": doc.get("title"),
+            "author": doc.get("author"),
+            "author_id": doc.get("author_id"),
+            "published_at": doc.get("published_at"),
+            "thumb_url": doc.get("thumb_url"),
+            "views": doc.get("views"),
+            "topic_id": doc.get("topic_id"),
+            "status": doc.get("status"),
+            "source": doc.get("source") or "pipeline",
+        }
+        prev = self._links.get(key)
+        if prev is not None and all(prev.get(k) == v for k, v in fields.items()):
+            return
+        self._links[key] = {**(prev or {"created_at": now}), **fields, "updated_at": now}
+
+    def set_source_link_status(self, platform: str, video_id: str, status: str) -> bool:
+        row = self._links.get((platform, video_id))
+        if row is None:
+            return False
+        row.update({"status": status, "updated_at": utc_now()})
+        return True
+
+    def delete_source_link(self, platform: str, video_id: str) -> bool:
+        return self._links.pop((platform, video_id), None) is not None
 
     def list_links(self, *, limit: int = 100, platform: str | None = None) -> list[dict]:
         rows = list(self._links.values())

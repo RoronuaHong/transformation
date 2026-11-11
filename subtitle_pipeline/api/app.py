@@ -7,7 +7,7 @@ import os
 import urllib.request
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -154,6 +154,46 @@ class CrawlerCrawlBody(BaseModel):
         default="",
         description="telegram 平台专用：逗号分隔的频道 @handle（无免费关键词搜索，按频道扫最近帖子并匹配关键词）",
     )
+
+
+class CrawlerSearchBody(BaseModel):
+    keyword: str = Field(..., min_length=1, max_length=200, description="搜索关键词")
+    platforms: list[str] = Field(
+        default_factory=lambda: ["bilibili", "douyin", "youtube", "telegram"]
+    )
+    quota: int = Field(default=12, ge=1, le=30, description="每平台返回的候选条数")
+    telegram_channels: str = Field(default="", description="Telegram 公开频道 @handle，逗号分隔")
+    youtube_token: str = Field(default="", description="YouTube Data API Key（选填，随请求带上）")
+    douyin_token: str = Field(default="", description="抖音登录态 Token（sessionid 或整段 Cookie，等价登录态）")
+
+
+class CrawlerImportItem(BaseModel):
+    platform: str
+    video_id: str
+    url: str
+    original_url: str | None = None
+    title: str | None = None
+    author: str | None = None
+    author_id: str | None = None
+    thumb_url: str | None = None
+    views: int | None = None
+    published_at: float | None = None
+
+
+class CrawlerImportBody(BaseModel):
+    items: list[CrawlerImportItem] = Field(default_factory=list)
+    keyword: str = ""
+
+
+class CrawlerLinkRef(BaseModel):
+    platform: str = Field(..., min_length=1, max_length=40)
+    video_id: str = Field(..., min_length=1, max_length=200)
+
+
+class CrawlerLinkActionBody(BaseModel):
+    action: Literal["pause", "resume", "reprocess", "delete"]
+    items: list[CrawlerLinkRef] = Field(default_factory=list, max_length=50)
+    limit: int = Field(default=100, ge=1, le=200)
 
 
 class DouyinCookiesBody(BaseModel):
@@ -358,6 +398,100 @@ def admin_links(limit: int = 100) -> dict:
     return {"items": store().list_links(limit=limit)}
 
 
+@app.get("/admin/crawler/capabilities", dependencies=[Depends(require_admin)])
+def admin_crawler_capabilities() -> dict:
+    """Per-platform readiness for the crawler console (login / channel needs)."""
+    from discover.preview import capabilities
+
+    return capabilities()
+
+
+@app.post("/admin/crawler/search", dependencies=[Depends(require_admin)])
+def admin_crawler_search(body: CrawlerSearchBody) -> dict:
+    """Keyword preview across the four platforms. Candidates only, no DB writes."""
+    from discover.preview import PLATFORMS, normalize_keyword, preview_search
+
+    plats = [p for p in PLATFORMS if p in body.platforms]
+    if not plats:
+        raise HTTPException(status_code=400, detail="请至少选择一个平台")
+    keyword = normalize_keyword(body.keyword)
+    if not keyword:
+        raise HTTPException(status_code=400, detail="关键词不能为空")
+    return preview_search(
+        keyword,
+        plats,
+        quota=body.quota,
+        telegram_channels=body.telegram_channels,
+        youtube_token=body.youtube_token,
+        douyin_token=body.douyin_token,
+    )
+
+
+@app.post("/admin/crawler/import", dependencies=[Depends(require_admin)])
+def admin_crawler_import(body: CrawlerImportBody) -> dict:
+    """Enqueue exactly the items the operator selected in the console."""
+    from discover.models import Candidate
+    from discover.preview import PLATFORMS
+    from discover.queue_db import QueueDB
+
+    db = QueueDB()
+    added = existing = 0
+    failed: list[dict] = []
+    succeeded: list[str] = []
+    try:
+        for it in body.items:
+            ident = f"{it.platform}:{it.video_id}"
+            if (
+                it.platform not in PLATFORMS
+                or not it.video_id.strip()
+                or not it.url.startswith(("http://", "https://"))
+            ):
+                failed.append({"id": ident, "error": "invalid item"})
+                continue
+            c = Candidate(
+                platform=it.platform,
+                video_id=it.video_id.strip(),
+                url=it.url,
+                original_url=it.original_url or it.url,
+                title=it.title or it.video_id,
+                topic_id="crawler:manual",
+                author=it.author,
+                author_id=it.author_id,
+                thumb_url=it.thumb_url,
+                views=it.views,
+                published_at=it.published_at,
+                query=body.keyword or None,
+                score=9999.0,
+            )
+            try:
+                result = db.enqueue(c, priority="high")
+            except Exception as e:  # noqa: BLE001 - report per-item failure
+                failed.append({"id": ident, "error": f"{type(e).__name__}: {e}"})
+                continue
+            if result == "inserted":
+                added += 1
+            else:
+                existing += 1
+            succeeded.append(ident)
+    finally:
+        db.close()
+
+    synced = 0
+    sync_error = ""
+    try:
+        synced = sync_links_from_queue(store(), source="crawler")
+    except Exception as e:  # noqa: BLE001 - queue is still written even if mirror fails
+        sync_error = f"{type(e).__name__}: {e}"
+    return {
+        "added": added,
+        "existing": existing,
+        "failed": failed,
+        "succeeded": succeeded,
+        "synced": synced,
+        "sync_error": sync_error,
+    }
+
+
 @app.post("/admin/crawler/crawl", dependencies=[Depends(require_admin)])
 def admin_crawler_crawl(
     body: CrawlerCrawlBody, background: BackgroundTasks, settings: Settings = Depends(get_settings)
@@ -379,6 +513,81 @@ def admin_crawler_crawl(
 def admin_crawler_links(limit: int = 100, platform: str | None = None) -> dict:
     sync_links_from_queue(store(), source="sync")
     return {"items": store().list_links(limit=limit, platform=platform)}
+
+
+def _rollup_video_status(rows: list) -> str:
+    """One video can have several workflow rows; show the most active status."""
+    sts = {str(r["status"] or "") for r in rows}
+    for s in ("processing", "pending", "cancelled", "failed", "dead", "done", "published"):
+        if s in sts:
+            return s
+    return "unknown"
+
+
+@app.post("/admin/crawler/links/action", dependencies=[Depends(require_admin)])
+def admin_crawler_links_action(body: CrawlerLinkActionBody) -> dict:
+    """Pause / resume / reprocess / delete entries shown in the crawler drawer.
+
+    SQLite ``jobs`` is the source of truth and Mongo ``source_links`` only mirrors
+    it. Both are written here, otherwise the next sync would resurrect a deleted
+    item or revert a status change. Each item is independent: one failure does not
+    roll back the rest.
+    """
+    from discover.queue_db import QueueDB
+
+    st = store()
+    db = QueueDB()
+    succeeded: list[str] = []
+    skipped: list[dict[str, str]] = []
+    failed: list[dict[str, str]] = []
+    allowed_by_action = {
+        "pause": ("pending",),
+        "resume": ("cancelled", "failed", "dead"),
+        "reprocess": ("done", "published"),
+    }
+    try:
+        for ref in body.items:
+            ident = f"{ref.platform}:{ref.video_id}"
+            try:
+                rows = db.list_video_jobs(ref.platform, ref.video_id)
+                if body.action == "delete":
+                    n = db.delete_video_jobs(ref.platform, ref.video_id)
+                    removed = st.delete_source_link(ref.platform, ref.video_id)
+                    if not n and not removed:
+                        skipped.append({"id": ident, "reason": "条目不存在"})
+                        continue
+                    succeeded.append(ident)
+                    continue
+
+                if not rows:
+                    skipped.append({"id": ident, "reason": "队列中已无该条目"})
+                    continue
+                allowed = allowed_by_action[body.action]
+                targets = [r for r in rows if str(r["status"] or "") in allowed]
+                if not targets:
+                    skipped.append({"id": ident, "reason": "当前状态不支持该操作"})
+                    continue
+                for row in targets:
+                    jid = int(row["id"])
+                    if body.action == "pause":
+                        db.cancel_job(jid, reason="采集台暂停")
+                    else:
+                        db.requeue_job(jid, allow_done=body.action == "reprocess")
+                status = _rollup_video_status(db.list_video_jobs(ref.platform, ref.video_id))
+                st.set_source_link_status(ref.platform, ref.video_id, status)
+                succeeded.append(ident)
+            except Exception as e:  # noqa: BLE001 - keep the remaining items going
+                failed.append({"id": ident, "error": f"{type(e).__name__}: {e}"})
+    finally:
+        db.close()
+    return {
+        "ok": not failed,
+        "action": body.action,
+        "succeeded": succeeded,
+        "skipped": skipped,
+        "failed": failed,
+        "items": st.list_links(limit=body.limit),
+    }
 
 
 @app.get("/admin/crawler/schedule", dependencies=[Depends(require_admin)])
