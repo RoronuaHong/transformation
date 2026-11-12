@@ -15,6 +15,8 @@
 |---|---|---|
 | `compare_3x.mp4` | 合成样片三路对比 | 底部白字幕条 + 中部棋盘格马赛克；三栏 `OpenCV` / `CodeFormer(→OpenCV)` / `LaMa` |
 | `compare_3x_real.mp4` | 真实马赛克样片三路对比 | 来自抖音真实片段，检出马赛克框 `x=48,y=528,w=96,h=48`（竖屏底部小打码） |
+| `compare_lama_vs_telea.mp4` | 去字幕 LaMa vs TELEA 填充对比 | BV1erPNzeEUE source，同一 OCR 掩码仅切换填充引擎；1496×448 / 180 帧 / 3.3MB |
+| `dhsub_lama.mp4` / `dhsub_telea.mp4` | 各自全分辨率单版去字幕结果 | 供单独查看（LaMa / TELEA 填充） |
 
 `compare_3x_real.mp4` 属性：1936×388 / 30fps / 304 帧（约 10s）/ 5.7MB。
 
@@ -52,7 +54,25 @@
 
 底层调用：`visual_cleanup.encode_cleanup_pass(src, out, regions, do_hardsub=False, do_mosaic=True, mosaic_engine=ENGINE, mask_from=src)`；马赛克框由 `detect_mosaic_boxes`（宽松）或 `_collect_mosaic_regions`（严格、要求跨帧稳定）检测。
 
+## LaMa vs TELEA 去字幕填充对比（隔离涂抹实验）
+
+> 记录：2026-11-12（续）
+> 背景：BV1erPNzeEUE 系列无马赛克，但底部有字幕带/UI；用户最初担心的「LaMa on UI chrome 涂糊」实际体现在**去字幕修复的填充引擎**上。此实验隔离 LaMa 与 TELEA 在字幕带/UI 上的涂抹差异。
+
+- 方法：对 `downloads/batch/bilibili_BV1erPNzeEUE/media/source.mp4` 调 `dehardsub_ocr_telea.run()`，**同一套 OCR 掩码**（180 帧 ≈6s、109 个字幕框被遮），仅切换 `inpaint_method`：
+  - 左 `lama`：神经内容识别填充（`inpaint_lama`）
+  - 右 `telea`：扩散填充（`cv2.INPAINT_TELEA`）
+- 产物（同目录 `instances/demosaic_test/`，gitignore）：
+  - `compare_lama_vs_telea.mp4`：1496×448 / 180 帧 / 3.3MB，全帧并排（左 LaMa / 右 TELEA）
+  - `dhsub_lama.mp4` / `dhsub_telea.mp4`：各自全分辨率单版去字幕结果
+- 看什么：
+  - **LaMa 栏**：描边字/笔画处是否出现**黑色鬼影**（`dehardsub_ocr_telea.py` 注释已标注：细字形洞在描边字上的邻居是描边本身 → LaMa 会把笔画填成黑色，实测鬼影）；字幕下 UI 是否被过度平滑成糊状。
+  - **TELEA 栏**：繁忙纹理（UI/食物/背景）背后字幕是否被**羽化成糊斑晕开**。
+- 状态：**待人工肉眼判定**，未改任何代码/默认行为。据此可能决定去字幕默认 `inpaint_method` 是否从 `lama` 调回 `telea`（或反之）。
+- 复现：`instances/demosaic_test/gen_lama_vs_telea.py`（重跑两遍去字幕，较慢）；仅拼接用 `gen_lama_vs_telea_cmp.py`（读已生成单版，快）。
+
 ## 待决项（不阻塞默认路由）
 
-1. 是否提供 `codeformer.onnx` 权重（人脸去马赛克），或正式标记 CodeFormer 为 deprecated。
+1. ~~是否标记 CodeFormer 为 deprecated~~ **已完成**（commit `f02f1fb`：模块文档加 DEPRECATED 横幅 + 显式 `prefer="codeformer"` 发 `DeprecationWarning`）。是否提供 `codeformer.onnx` 权重仍待定（补齐前对人脸外马赛克无效）。
 2. 如你能提供「马赛克压在 UI/字幕上」的真实片段，可重生成更有代表性的 `compare_3x_real.mp4` 再定夺涂抹风险。
+3. **LaMa vs TELEA 去字幕填充**：看完 `compare_lama_vs_telea.mp4` 后，决定是否调整去字幕默认 `inpaint_method`（当前 `dehardsub_ocr_telea.run()` 默认 `lama`）。仅记录、未改代码。
