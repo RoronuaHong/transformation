@@ -1,5 +1,10 @@
 """去马赛克后端。
 
+⚠️ DEPRECATED（2026-11-12）：codeformer 引擎在补齐权重前等同 OpenCV，且只对
+人脸有效（非人脸会「脑补」），对人脸外马赛克无效。去马赛克默认走 LaMa
+（visual_cleanup 默认 demosaic_engine=lama）。本模块仅保留作人脸可选路径，
+新代码请勿再选用 codeformer；显式 `prefer="codeformer"` 会触发 DeprecationWarning。
+
 引擎分工（由 visual_cleanup / media_ops 选择）：
   - demosaic_engine=lama（默认，通用）：整段视频把马赛克框当 LaMa 洞，
     适合身体/屏幕/文字/任意像素块，不限人脸。权重：models/lama_fp32.onnx
@@ -14,6 +19,7 @@
 """
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -129,6 +135,13 @@ def restore_mosaic_crop(
             if want == "lama":
                 return cv_fallback(roi, mask, radius), bg
 
+    if want == "codeformer":
+        warnings.warn(
+            "demosaic engine 'codeformer' is deprecated: only helps faces and degrades "
+            "to OpenCV without codeformer.onnx. Prefer 'lama' (default).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     if want in ("auto", "codeformer"):
         h, w = roi.shape[:2]
         aspect = (w / max(1, h)) if h else 99.0
