@@ -39,6 +39,8 @@ from langs import (
 )
 from multipass_asr import (
     VAD_PARAMS_DEFAULT,
+    _ASR_MODEL_LOCK,
+    _log_asr_memory,
     llm_correct_segments,
     load_hotwords,
     nearest_text,
@@ -293,49 +295,52 @@ def release_cuda() -> None:
 def transcribe(wav: Path, model_size: str, device: str, language: str) -> tuple[list[dict], str]:
     from faster_whisper import WhisperModel
 
-    model_id = resolve_whisper_id(model_size)
-    compute = pick_compute_type(device, model_id)
-    asr_lang = whisper_lang(language)
-    print(f"[whisper] loading {model_id} device={device} compute={compute}")
-    model = WhisperModel(model_id, device=device, compute_type=compute)
-    try:
-        # Best practice (faster-whisper / Silero VAD): pin language, beam≥5,
-        # trim short silences, reset context to reduce ZH hallucination loops.
-        kwargs = dict(
-            vad_filter=True,
-            vad_parameters=dict(VAD_PARAMS_DEFAULT),
-            beam_size=5,
-            best_of=5,
-            temperature=0.0,
-            condition_on_previous_text=False,
-            compression_ratio_threshold=2.4,
-            log_prob_threshold=-1.0,
-            no_speech_threshold=0.6,
-        )
-        if asr_lang:
-            kwargs["language"] = asr_lang
-        segments_iter, info = model.transcribe(str(wav), **kwargs)
-        detected = (getattr(info, "language", None) or "en").strip() or "en"
-        print(
-            f"[whisper] model={model_id} language={detected} "
-            f"prob={info.language_probability:.2f}"
-        )
-        out = []
-        for s in segments_iter:
-            text = (s.text or "").strip()
-            if not text:
-                continue
-            # Drop near-silence / low-confidence phantoms (whisper-guard style).
-            no_speech = float(getattr(s, "no_speech_prob", 0.0) or 0.0)
-            avg_lp = float(getattr(s, "avg_logprob", 0.0) or 0.0)
-            if no_speech > 0.8 and avg_lp < -1.5:
-                continue
-            out.append({"start": float(s.start), "end": float(s.end), "text": text})
-        return out, detected
-    finally:
-        del model
-        release_cuda()
-        print("[whisper] released GPU memory")
+    with _ASR_MODEL_LOCK:
+        model_id = resolve_whisper_id(model_size)
+        compute = pick_compute_type(device, model_id)
+        asr_lang = whisper_lang(language)
+        _log_asr_memory(model_id)
+        print(f"[whisper] loading {model_id} device={device} compute={compute}")
+        model = WhisperModel(model_id, device=device, compute_type=compute)
+        try:
+            # Best practice (faster-whisper / Silero VAD): pin language, beam≥5,
+            # trim short silences, reset context to reduce ZH hallucination loops.
+            kwargs = dict(
+                vad_filter=True,
+                vad_parameters=dict(VAD_PARAMS_DEFAULT),
+                beam_size=5,
+                best_of=5,
+                temperature=0.0,
+                condition_on_previous_text=False,
+                compression_ratio_threshold=2.4,
+                log_prob_threshold=-1.0,
+                no_speech_threshold=0.6,
+            )
+            if asr_lang:
+                kwargs["language"] = asr_lang
+            segments_iter, info = model.transcribe(str(wav), **kwargs)
+            detected = (getattr(info, "language", None) or "en").strip() or "en"
+            print(
+                f"[whisper] model={model_id} language={detected} "
+                f"prob={info.language_probability:.2f}"
+            )
+            out = []
+            for s in segments_iter:
+                text = (s.text or "").strip()
+                if not text:
+                    continue
+                # Drop near-silence / low-confidence phantoms (whisper-guard style).
+                no_speech = float(getattr(s, "no_speech_prob", 0.0) or 0.0)
+                avg_lp = float(getattr(s, "avg_logprob", 0.0) or 0.0)
+                if no_speech > 0.8 and avg_lp < -1.5:
+                    continue
+                out.append({"start": float(s.start), "end": float(s.end), "text": text})
+            result = (out, detected)
+        finally:
+            del model
+            release_cuda()
+            print("[whisper] released GPU memory")
+        return result
 
 
 def ollama_chat(

@@ -109,6 +109,29 @@ ALIASES: dict[str, str] = {
 }
 
 PACKS: dict[str, tuple[str, ...]] = {
+    # FunUnion 短视频字幕：审核通过自动生成的 20 语包（站本体 + 全球广覆盖 + 东南亚/中东 + 欧洲补全）
+    "fununion20": (
+        "zh",
+        "zh-Hant",
+        "en",
+        "ja",
+        "ko",
+        "es",
+        "pt",
+        "fr",
+        "de",
+        "ru",
+        "ar",
+        "hi",
+        "id",
+        "vi",
+        "th",
+        "tr",
+        "it",
+        "nl",
+        "ms",
+        "pl",
+    ),
     # Site pack (16). Keep in sync with transform/lib/locales.ts (nav order differs).
     "site": (
         "zh",

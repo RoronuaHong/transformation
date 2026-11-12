@@ -11,6 +11,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 import time
 import urllib.request
 import wave
@@ -378,6 +379,56 @@ VAD_PARAMS_DEFAULT = {
 }
 
 
+# Global lock: serialize Whisper model load+transcribe so at most one model is
+# resident in RAM/VRAM at any time. Prevents N× OOM (mkl_malloc abort) when
+# multiple ASR jobs run concurrently (e.g. batch workers, or future parallelism).
+# Single sequential runs are unaffected — the lock is uncontended.
+_ASR_MODEL_LOCK = threading.Lock()
+
+
+def _available_ram_gb() -> float | None:
+    """Best-effort available physical RAM in GB (Windows via ctypes); None if undetected."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", wintypes.DWORD),
+                ("dwMemoryLoad", wintypes.DWORD),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        st = _MEMORYSTATUSEX()
+        st.dwLength = ctypes.sizeof(st)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+            return st.ullAvailPhys / (1024 ** 3)
+    except Exception:
+        return None
+    return None
+
+
+def _log_asr_memory(model_id: str) -> None:
+    """Log available RAM before loading a Whisper model; warn if too low for it."""
+    avail = _available_ram_gb()
+    if avail is None:
+        return
+    # large-v3 in int8 needs ~10GB; flag below a safety margin.
+    warn_gb = 9.0
+    print(f"[whisper-mp] available RAM={avail:.1f}GB before loading {model_id}")
+    if avail < warn_gb:
+        print(
+            f"[whisper-mp] WARNING: low RAM ({avail:.1f}GB) for {model_id}; "
+            f"risk of OOM / mkl_malloc crash. Free memory or use a smaller model."
+        )
+
+
 def transcribe_multipass(
     wav: Path,
     model_id: str,
@@ -391,16 +442,22 @@ def transcribe_multipass(
     """Return (merged segments, raw passes dict)."""
     from faster_whisper import WhisperModel
 
+    _log_asr_memory(model_id)
     print(f"[whisper-mp] loading {model_id} device={device} compute={compute}")
     os.environ.setdefault("OMP_NUM_THREADS", "4")
     os.environ.setdefault("MKL_NUM_THREADS", "4")
-    model = WhisperModel(
-        model_id,
-        device=device,
-        compute_type=compute,
-        cpu_threads=4,
-        num_workers=1,
-    )
+    _ASR_MODEL_LOCK.acquire()
+    try:
+        model = WhisperModel(
+            model_id,
+            device=device,
+            compute_type=compute,
+            cpu_threads=4,
+            num_workers=1,
+        )
+    except Exception:
+        _ASR_MODEL_LOCK.release()
+        raise
     try:
         pass_a, lang_a = _run_one_pass(
             model,
@@ -429,7 +486,7 @@ def transcribe_multipass(
             "no_speech_threshold": 0.6,
         }
         if hotwords:
-            # Vocabulary seed only (not instructions) — faster-whisper best practice.
+            # Vocabulary seed only (not instructions) - faster-whisper best practice.
             b_kw["initial_prompt"] = hotwords.strip()[:224]
             b_kw["hotwords"] = hotwords.strip()[:64]
         pass_b, _lang_b = _run_one_pass(model, wav, "B_hotwords", language, **b_kw)
@@ -461,6 +518,7 @@ def transcribe_multipass(
         if release_cuda:
             release_cuda()
         print("[whisper-mp] released model memory")
+        _ASR_MODEL_LOCK.release()
 
     return merged, raw
 

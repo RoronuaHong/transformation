@@ -420,9 +420,12 @@ def run(source, out, *,
         cur = tmp_p
         tmps.append(cur)
 
-    subprocess.run([ff, "-y", "-i", str(cur), "-an", "-c:v", "libx264", "-crf", "18",
-                   "-pix_fmt", "yuv420p", str(out)], check=True,
-                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # 回填源音轨（此前 -an 会丢声音；-map 1:a:0? 在源无音轨时自动跳过）
+    subprocess.run([ff, "-y", "-i", str(cur), "-i", str(source),
+                    "-map", "0:v:0", "-map", "1:a:0?",
+                    "-c:v", "libx264", "-crf", "18",
+                    "-pix_fmt", "yuv420p", str(out)], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for t in tmps:
         Path(t).unlink(missing_ok=True)
     stats = {"engine": "ocr_telea", "frames": len(boxes),

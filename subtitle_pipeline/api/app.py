@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import urllib.request
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -845,6 +847,44 @@ def try_probe(body: TryProbeBody) -> dict:
 
     urls = [u.strip() for u in body.urls if (u or "").strip()]
     return probe_urls(urls, pasted_cookies=body.sessionid)
+
+
+class EvalBody(BaseModel):
+    gold: str = "eval/gold/subtitle_gold_zh.jsonl"
+    langs: list[str] = Field(default_factory=list)
+    model: str = "translategemma:4b"
+    judge: str = "gemma4:e2b"
+    baseline: str = ""
+
+
+@app.post("/api/try/eval", dependencies=[Depends(require_admin)])
+def api_eval(body: EvalBody, background: BackgroundTasks) -> dict:
+    """触发字幕翻译评测（COMET/XCOMET + chrF + LLM-judge），结果写 eval_report.json。"""
+    import subprocess
+
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    script = root / "eval" / "run_eval.py"
+    cmd = [sys.executable, str(script), "--gold", body.gold, "--model", body.model, "--judge", body.judge]
+    if body.langs:
+        cmd += ["--langs", *body.langs]
+    if body.baseline:
+        cmd += ["--baseline", body.baseline]
+    background.add_task(subprocess.run, cmd, cwd=str(root), check=False)
+    return {"accepted": True, "action": "eval", "cmd": " ".join(cmd)}
+
+
+@app.get("/api/try/eval", dependencies=[Depends(require_admin)])
+def api_eval_get() -> dict:
+    """取最近一次评测报告。"""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    path = root / "eval_report.json"
+    if not path.exists():
+        return {"ready": False}
+    return {"ready": True, "report": json.loads(path.read_text(encoding="utf-8"))}
 
 
 class PublishBindBody(BaseModel):
