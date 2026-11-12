@@ -68,11 +68,11 @@
 - 看什么：
   - **LaMa 栏**：描边字/笔画处是否出现**黑色鬼影**（`dehardsub_ocr_telea.py` 注释已标注：细字形洞在描边字上的邻居是描边本身 → LaMa 会把笔画填成黑色，实测鬼影）；字幕下 UI 是否被过度平滑成糊状。
   - **TELEA 栏**：繁忙纹理（UI/食物/背景）背后字幕是否被**羽化成糊斑晕开**。
-- 状态：**待人工肉眼判定**，未改任何代码/默认行为。据此可能决定去字幕默认 `inpaint_method` 是否从 `lama` 调回 `telea`（或反之）。
+- 状态：**人工肉眼判定完成（2026-11-12）——左 LaMa 效果优于右 TELEA**。LaMa 在字幕带/UI 上未见明显黑色鬼影或过度平滑糊斑；TELEA 在繁忙纹理背景上羽化更糊。故去字幕默认 `inpaint_method` 保持 `lama`（本就默认，**无需改代码**）。
 - 复现：`instances/demosaic_test/gen_lama_vs_telea.py`（重跑两遍去字幕，较慢）；仅拼接用 `gen_lama_vs_telea_cmp.py`（读已生成单版，快）。
 
 ## 待决项（不阻塞默认路由）
 
 1. ~~是否标记 CodeFormer 为 deprecated~~ **已完成**（commit `f02f1fb`：模块文档加 DEPRECATED 横幅 + 显式 `prefer="codeformer"` 发 `DeprecationWarning`）。是否提供 `codeformer.onnx` 权重仍待定（补齐前对人脸外马赛克无效）。
 2. 如你能提供「马赛克压在 UI/字幕上」的真实片段，可重生成更有代表性的 `compare_3x_real.mp4` 再定夺涂抹风险。
-3. **LaMa vs TELEA 去字幕填充**：看完 `compare_lama_vs_telea.mp4` 后，决定是否调整去字幕默认 `inpaint_method`（当前 `dehardsub_ocr_telea.run()` 默认 `lama`）。仅记录、未改代码。
+3. ~~LaMa vs TELEA 去字幕填充~~ **已判定（2026-11-12）**：人工确认 LaMa（左）优于 TELEA（右），去字幕默认 `inpaint_method` 保持 `lama`，**未改代码**。
