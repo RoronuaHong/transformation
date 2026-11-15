@@ -174,13 +174,13 @@ def canonical_name(name, kind="", tags="", mid="", description=""):
         if pat in low:
             zh = z
             break
-    if not zh and kind == "subs":
+    if not zh and "type:subs" in (tags or ""):
         zh = "字幕"                  # 字幕文件名往往只是语种码,补一个具体类目
     parts = [zh] if zh else []
 
     # 2) 语种(字幕类最关键;其他类有 lang 标签也补上)
     lang = _tag_val(tags, "lang")
-    if not lang and kind == "subs":
+    if not lang and "type:subs" in (tags or ""):
         lang = stem_n          # 字幕文件名本身往往就是语种码(zh/en/ja…)
     if lang:
         # stem 已把 "-" 归一成 "_",故查表时要还原成 "-" 才能命中 zh-hant 这类键
@@ -199,7 +199,7 @@ def unique_name(name, mid=""):
     return "%s_%s%s" % (os.path.splitext(name)[0], (mid or "")[:4], os.path.splitext(name)[1])
 
 
-def stage_zh(name, kind=""):
+def stage_zh(name, kind="", tags=""):
     """返回名字里匹配到的**具体**处理阶段中文词;无则返回 ''。
 
     供描述性元数据复用同一套受控映射(保证"名字里写什么、描述里就说什么",口径一致)。
@@ -210,7 +210,7 @@ def stage_zh(name, kind=""):
     for pat, z in _STAGE_RULES:
         if pat in low:
             return z
-    return "字幕" if kind == "subs" else ""
+    return "字幕" if "type:subs" in (tags or "") else ""
 
 
 def plan_renames(materials):

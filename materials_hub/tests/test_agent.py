@@ -286,7 +286,7 @@ def test_attached_video_skill_workflow_finishes():
 
     def fake_search(q, kind="", tag="", limit=None, offset=0, mode="auto"):
         if tag == "parent:" + mid:
-            return [dict(_mat("silenteeeeee"), kind="silent")]
+            return [dict(_mat("silenteeeeee"), kind="videos", tags="sp,has_audio:0,role:silent-picture")]
         return []
 
     _reset(chat_models=lambda: ["fake"], get_material=fake_get,
@@ -711,7 +711,7 @@ def test_skill_covers_is_deterministic():
     """缺封面是固定技能,不消耗规划/循环 LLM。"""
     orig = core.list_missing_covers
     core.list_missing_covers = lambda kind="", skip_failed=True, limit=50: [
-        {"id": "aabbccddeeff", "kind": kind or "silent", "name": "a.mp4", "tags": ""}
+        {"id": "aabbccddeeff", "kind": kind or "videos", "name": "a.mp4", "tags": ""}
     ]
     try:
         _reset(chat_models=lambda: ["fake"])

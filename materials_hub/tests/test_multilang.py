@@ -35,15 +35,15 @@ def _mk(mid, kind, name, tags="", ext=".mp4"):
 
 
 def test_normalize_lang_tag():
-    # 16 受控代码原样保留(含 zh-Hant 连字符)
-    for c in core.SITE_LANGS:
+    # 20 受控代码原样保留(含 zh-Hant 连字符)
+    for c in core.HUB_LANGS:
         assert core.normalize_lang_tag(c) == c
     # 标准别名收口(下划线/大小写归一)
     assert core.normalize_lang_tag("zh-cn") == "zh"
     assert core.normalize_lang_tag("ZH-HANT") == "zh-Hant"
     assert core.normalize_lang_tag("pt_BR") == "pt"
     assert core.normalize_lang_tag("zh_hant") == "zh-Hant"
-    # 模型自由发挥一律不认(步骤 3:lang: 只认站点 16 码)
+    # 模型自由发挥一律不认(步骤 3:lang: 只认字幕包 20 码)
     assert core.normalize_lang_tag("chinese") is None
     assert core.normalize_lang_tag("日本語") is None
     assert core.normalize_lang_tag("japanese") is None
@@ -66,8 +66,8 @@ def test_skill_match_english_via_bridge():
 
 def test_backfill_and_lang_ja():
     _mk("v10000000001", "videos", "master.mp4", tags="job:J1")
-    _mk("s1000000000a", "subs", "sub_ja.srt", tags="job:J1,type:subs", ext=".srt")
-    _mk("s1000000000b", "subs", "sub_zh.srt", tags="job:J1,type:subs", ext=".srt")
+    _mk("s1000000000a", "docs", "sub_ja.srt", tags="job:J1,type:subs", ext=".srt")
+    _mk("s1000000000b", "docs", "sub_zh.srt", tags="job:J1,type:subs", ext=".srt")
     r = core.backfill_lang_tags()
     assert r["updated"] == 2
     # lang:ja 单独可搜到(步骤 1:日文译文是独立字幕)
@@ -75,7 +75,7 @@ def test_backfill_and_lang_ja():
     # 母版只挂一条源语(简体优先),日文言进 other_langs(步骤 1)
     rr = core.attach_job_transcripts(mids=["v10000000001"])
     import sys
-    subs = [m for m in core.all_materials() if m.get("kind") == "subs"]
+    subs = [m for m in core.all_materials() if m.get("kind") == "docs" and "type:subs" in (m.get("tags") or "")]
     for m in subs:
         p = m.get("external_path") or ""
         if os.path.isfile(p):
@@ -90,7 +90,7 @@ def test_backfill_and_lang_ja():
 
 def test_run_understand_records_roundtrip():
     vid = _mk("v20000000001", "videos", "m2.mp4", tags="job:J2")
-    _mk("s2000000000a", "subs", "sub_zh.srt", tags="job:J2,type:subs", ext=".srt")
+    _mk("s2000000000a", "docs", "sub_zh.srt", tags="job:J2,type:subs", ext=".srt")
     rr = core.write_run_record(vid)
     assert rr["id"] == vid and rr["runnable"] is True
     assert core.read_run_record(vid) is not None
@@ -104,14 +104,14 @@ def test_run_understand_records_roundtrip():
 
 def test_ops_summary_counts():
     _mk("v30000000001", "videos", "m3.mp4", tags="job:J3")
-    _mk("s3000000000a", "subs", "ja.srt", tags="job:J3,type:subs", ext=".srt")
+    _mk("s3000000000a", "docs", "ja.srt", tags="job:J3,type:subs", ext=".srt")
     core.backfill_lang_tags()
     o = core.ops_summary()
     for k in ("total_materials", "visual_bilingual", "source_attached",
               "per_lang_subs", "bad_files", "exports", "feedback_total",
               "check_english_query_chicken_wings_top", "check_lang_ja_subs"):
         assert k in o
-    assert set(o["per_lang_subs"].keys()) == set(core.SITE_LANGS)
+    assert set(o["per_lang_subs"].keys()) == set(core.HUB_LANGS)
     assert o["per_lang_subs"]["ja"] >= 1
     assert o["check_lang_ja_subs"] >= 1
 
@@ -119,8 +119,8 @@ def test_ops_summary_counts():
 def test_job_lang_readiness():
     """步骤 7:缺某一种译文只是「说明」,不把整个任务判死。"""
     _mk("v50000000001", "videos", "m5.mp4", tags="job:J5")
-    _mk("s5000000000a", "subs", "zh.srt", tags="job:J5,type:subs", ext=".srt")
-    _mk("s5000000000b", "subs", "en.srt", tags="job:J5,type:subs", ext=".srt")
+    _mk("s5000000000a", "docs", "zh.srt", tags="job:J5,type:subs", ext=".srt")
+    _mk("s5000000000b", "docs", "en.srt", tags="job:J5,type:subs", ext=".srt")
     core.backfill_lang_tags()
     # 已有的语种:present=True,不 blocking
     ok = core.job_lang_readiness("J5", "zh")
@@ -151,7 +151,7 @@ def test_deliver_package_copy_and_dryrun():
     """步骤 6:非视频素材按原样复制交付;confirm=False 只给计划不写文件。"""
     import shutil as _sh
 
-    mid = _mk("v60000000002", "subs", "m8.srt", tags="job:J8,lang:zh")
+    mid = _mk("v60000000002", "docs", "m8.srt", tags="job:J8,lang:zh")
     # dry-run 不写文件
     plan = core.deliver_package(ids=[mid], confirm=False)
     assert plan["dry_run"] is True
@@ -200,6 +200,55 @@ def test_feedback_rejection_is_recorded():
     assert "户内对话" in core.feedback_vetoed_queries()
     # 仅显式 add_veto 才进入实时否决集;普通日志 reject 不会误伤组装
     assert "户内对话" not in core.list_vetoes()
+
+
+def test_lang_packs_single_source():
+    """四份语言词表必须与 langs.PACKS 一致,防止 20 语包再次漂移。"""
+    import re
+
+    workspace = os.path.dirname(core.HUB)
+    sys.path.insert(0, os.path.join(workspace, "subtitle_pipeline"))
+    import langs
+
+    hub = set(core.HUB_LANGS)
+    assert langs.DEFAULT_PACK == "fununion20"
+    assert len(hub) == 20
+    assert hub == set(langs.PACKS[langs.DEFAULT_PACK])
+    assert "it" in hub and "nl" in hub and "ms" in hub and "pl" in hub
+
+    import bridge_subtitle
+    assert set(bridge_subtitle.LANGS) == hub
+    assert core.normalize_lang_tag("it") == "it"
+
+    with open(os.path.join(workspace, "transform", "lib", "locales.ts"),
+              encoding="utf-8") as fh:
+        ts = fh.read()
+
+    def ts_array(name):
+        m = re.search(r"export const %s = \[(.*?)\] as const" % name, ts, re.S)
+        assert m, name
+        return set(re.findall(r'"([^"]+)"', m.group(1)))
+
+    assert ts_array("subtitleLangs") == hub
+    assert ts_array("locales") == set(langs.PACKS["site"])
+
+
+def test_media_json_not_marked_as_translation():
+    """media/ 下元数据 JSON 不是译文;sidecar 不入库;字符串标签不被逐字符拆开。"""
+    import bridge_subtitle
+
+    assert bridge_subtitle.is_pipeline_sidecar("x/downloads/batch/j/media/fetch_meta.json")
+    assert bridge_subtitle.is_pipeline_sidecar("x/downloads/batch/j/media/translate_qa_it.json")
+    # 笔记/文档本地化校对报告同样是流水线 sidecar，不得入库刷屏。
+    assert bridge_subtitle.is_pipeline_sidecar("x/downloads/batch/j/media/notes_qa_it.json")
+    assert not bridge_subtitle.is_pipeline_sidecar("x/downloads/batch/j/subs/it.srt")
+    assert "type:translate" not in core.media_facet_tags(
+        "fetch_meta.json", "docs", "type:media")
+    assert "type:translate" in core.media_facet_tags(
+        "translate_qa_it.json", "docs", "type:media")
+    assert core._merge_tag_csv("sp", "has_audio:0") == "sp,has_audio:0"
+    assert bridge_subtitle.detect_lang("it.srt") == "it"
+    assert bridge_subtitle.detect_lang("translate_qa_zh-Hant.json") == "zh-Hant"
 
 
 if __name__ == "__main__":

@@ -30,7 +30,7 @@ def _setup_tmp():
     core.INDEX_DB = os.path.join(tmp, "hub.db")
     for d in (core.MATERIALS, core.OCR_DIR, core.SHOT_DIR, core.PHASH_DIR, core.THUMBS):
         os.makedirs(d, exist_ok=True)
-    for k in ("videos", "silent", "audio", "images", "docs", "subs"):
+    for k in ("videos", "audio", "images", "docs"):
         os.makedirs(os.path.join(core.MATERIALS, k), exist_ok=True)
     core._init_db()
     return tmp
@@ -63,8 +63,15 @@ def test_media_facet_master_vs_clip():
     )
     assert "role:clip" in clip and "type:clip" in clip, clip
     assert "role:master" not in clip, clip
-    silent = core.media_facet_tags(r"D:/hub/materials/silent/a_silent.mp4", "silent")
-    assert "role:silent-picture" in silent and "has_audio:0" in silent, silent
+    # 静音画面:视频容器无音轨 → has_audio:0(role:silent-picture 由 split 组件写入,非 media_facet_tags)
+    real_probe = core.probe_has_audio
+    core.probe_has_audio = lambda p: False  # 模拟「确实无音轨」;fail-open 仅对缺失文件返回 True
+    try:
+        silent = core.media_facet_tags(r"D:/hub/materials/silent/a_silent.mp4", "videos")
+        assert "has_audio:0" in silent and "role:master" in silent, silent
+        assert "role:silent-picture" not in silent, silent
+    finally:
+        core.probe_has_audio = real_probe
     print("PASS test_media_facet_master_vs_clip")
 
 
@@ -106,8 +113,8 @@ def test_tag_ui_meta_and_scrub_from():
     tmp = _setup_tmp()
     try:
         _add("pmaster11111", "videos", "m.mp4", "role:master,job:j1")
-        _add("pchild222222", "silent", "m_silent.mp4",
-             "role:silent-picture,parent:pmaster11111,from:pmaster11111,sp")
+        _add("pchild222222", "videos", "m_silent.mp4",
+             "role:silent-picture,parent:pmaster11111,from:pmaster11111,sp,has_audio:0")
         r = core.scrub_deprecated_from_tags()
         assert r["cleaned"] == 1, r
         tags = core.get_material("pchild222222")["tags"]
@@ -172,7 +179,7 @@ def test_coerce_and_component_parents():
         assert "role:clip" in c2 and "role:master" not in c2, c2
         _add("masterdddddd", "videos", "BV_demo.mp4",
              "sp,job:jcomp,bilibili,type:media,role:master")
-        _add("silenteeeeee", "silent", "BV_demo_silent.mp4",
+        _add("silenteeeeee", "videos", "BV_demo_silent.mp4",
              "role:silent-picture,has_audio:0")
         _add("audiofffffff", "audio", "BV_demo_track.wav",
              "role:audio-stem,has_audio:1")

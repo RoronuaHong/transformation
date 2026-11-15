@@ -83,7 +83,7 @@ def hard_gates(mid):
     kids = rel.get("related") or []
     kinds = {k.get("kind") for k in kids}
     gates["related_children"] = bool(kids) and (
-        "silent" in kinds or "audio" in kinds or any(
+        "videos" in kinds or "audio" in kinds or any(
             "parent:" + mid in (k.get("tags") or "") for k in kids
         )
     )

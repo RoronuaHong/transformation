@@ -45,10 +45,10 @@ def test_attach_zh_and_search_video():
     core._sync_material_vector = lambda mid: None
     try:
         sdir = os.path.join(tmp, "subs")
-        _add("suben", "subs", "字幕_英文_en.srt", "job:j1",
+        _add("suben", "docs", "字幕_英文_en.srt", "job:j1,type:subs",
              os.path.join(sdir, "en.srt"),
              "1\n00:00:01,000 --> 00:00:02,000\nenglish only line\n")
-        _add("subzh", "subs", "字幕_中文_zh.srt", "job:j1",
+        _add("subzh", "docs", "字幕_中文_zh.srt", "job:j1,type:subs",
              os.path.join(sdir, "zh.srt"),
              "1\n00:00:01,000 --> 00:00:02,000\n红烧鸡翅出锅了\n")
         _add("vid1", "videos", "source.mp4", "job:j1,role:master",

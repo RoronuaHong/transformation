@@ -76,6 +76,9 @@ def _iter_pack_files(work_dir: Path) -> list[tuple[str, Path]]:
     if media.is_dir():
         for name in PACK_MEDIA_FILES:
             add(media / name, f"media/{name}")
+        # 翻译校对质量报告随 Job Pack 一起打包（Hub 只按文件名识别，不入库）。
+        for p in sorted(media.glob("translate_qa_*.json")) + sorted(media.glob("notes_qa_*.json")):
+            add(p, f"media/{p.name}")
         for sub in PACK_MEDIA_DIRS:
             d = media / sub
             if not d.is_dir():

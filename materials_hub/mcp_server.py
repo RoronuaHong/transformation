@@ -288,7 +288,7 @@ def t_related(a):
 
 
 def t_missing_covers(a):
-    """只读:列出无封面的 videos/silent(可滤 kind)。Agent「补封面」技能第一步。"""
+    """只读:列出无封面的 videos(含静音画面,可滤 kind=videos)。Agent「补封面」技能第一步。"""
     return core.list_missing_covers(
         kind=str(a.get("kind") or ""),
         skip_failed=a.get("skip_failed", True) is not False,
@@ -350,9 +350,9 @@ def t_imgembed(a):
 _PROMPTS = [
     {
         "name": "fill_missing_thumbs",
-        "description": "找出无封面的 silent/videos 并规划批量补封面(只读盘点→写需 confirm)",
+        "description": "找出无封面的 videos(含静音画面)并规划批量补封面(只读盘点→写需 confirm)",
         "arguments": [
-            {"name": "kind", "description": "silent | videos | 空=两者", "required": False},
+            {"name": "kind", "description": "videos | 空=全部 videos(含静音)", "required": False},
         ],
     },
     {
@@ -382,7 +382,7 @@ def _prompt_get(name, arguments=None):
     arguments = arguments or {}
     if name == "fill_missing_thumbs":
         kind = (arguments.get("kind") or "").strip()
-        kind_hint = kind or "silent 优先,再 videos"
+        kind_hint = kind or "videos 优先(含静音画面)"
         text = (
             "你是素材中心运维 Agent。任务:补齐缺失封面。\n"
             "1. 只读调用 list_missing_covers(kind=%r) 列出无封面条目。\n"
@@ -403,7 +403,7 @@ def _prompt_get(name, arguments=None):
             "你是素材中心运维 Agent。任务:体检 job=%s。\n"
             "1. 调用 job_checkup(job_id=%r)(确定性,勿臆造)。\n"
             "2. 也可读 Resource hub://job/%s 对照材料清单。\n"
-            "3. 总结:kinds 是否含 videos/silent/audio/subs/notes;"
+            "3. 总结:kinds 是否含 videos(含静音)/audio/docs/notes;"
             "master_ids / clip_ids / component_ids;"
             "missing_thumbs / missing_shots(仅母版) / clips_missing_parent / "
             "broken_ids / asr_ids。\n"
@@ -426,7 +426,7 @@ def _prompt_get(name, arguments=None):
             "用镜头 start/end 作为逻辑切片(一份实体,不落盘)。\n"
             "3. 仅当用户明确要「导出文件 / 已有 range_*.mp4」时,"
             "再 search tag=role:clip(或 type:clip),并汇报 parent:/t_start:/t_end:。\n"
-            "4. silent/audio 是声画组件(role:silent-picture / role:audio-stem),"
+            "4. 静音画面(has_audio:0)/音频 是声画组件(role:silent-picture / role:audio-stem),"
             "不是剪辑切片;用 parent: 连回母版。\n"
             "5. 只读汇报;禁止编造 id。"
         ) % (scope, q or "(无)")
@@ -699,7 +699,7 @@ HANDLERS = {"search_materials": t_search, "get_material": t_get,
 # __PART2__
 _SCHEMA_OBJ = {"type": "object", "properties": {
     "q": {"type": "string", "description": "关键词或中文自然语言问句"},
-    "kind": {"type": "string", "enum": ["images", "videos", "silent", "docs", "audio", "subs", "anim", "raw", "project", "vector", "model3d", "font", "other"]},
+    "kind": {"type": "string", "enum": ["images", "videos", "docs", "audio", "project", "vector", "model3d", "font", "other"]},
     "tag": {"type": "string"},
     "mode": {"type": "string", "enum": ["auto", "lexical", "semantic"]},
     "limit": {"type": "integer"}}}
@@ -753,7 +753,7 @@ TOOLS = [
     {"name": "find_similar", "description": "只读:画面级近重复检测(dHash 感知哈希,汉明距离≤max_dist;与 sha256 精确去重互补)",
      "inputSchema": {"type": "object", "properties": {
          "id": {"type": "string"}, "max_dist": {"type": "integer"}}, "required": ["id"]}},
-    {"name": "list_missing_covers", "description": "只读:列出无封面的 videos/silent(可滤 kind=silent|videos);补封面技能第一步",
+    {"name": "list_missing_covers", "description": "只读:列出无封面的 videos(含静音画面,可滤 kind=videos);补封面技能第一步",
      "inputSchema": {"type": "object", "properties": {
          "kind": {"type": "string"}, "limit": {"type": "integer"},
          "skip_failed": {"type": "boolean"}}}},
@@ -802,7 +802,7 @@ TOOLS = [
     {"name": "assemble_package", "description": "只读:把高层目标落成可交付素材包(多智能体编排 Librarian 拆解检索→Critic 核验→Executor 写 manifest JSON 到 agent_workspace/packages/;绝不改动资产)。用于「组装一个混剪素材包/打包分发素材」等。",
      "inputSchema": {"type": "object", "properties": {
         "goal": {"type": "string", "description": "高层目标/自然语言(中文)"},
-        "kind": {"type": "string", "enum": ["images", "videos", "silent", "docs", "audio", "subs", "anim", "raw", "project", "vector", "model3d", "font", "other"]},
+        "kind": {"type": "string", "enum": ["images", "videos", "docs", "audio", "project", "vector", "model3d", "font", "other"]},
         "scope": {"type": "string", "enum": ["all", "master", "clips"]},
         "limit": {"type": "integer"},
         "queries": {"type": "array", "items": {"type": "string"}}},

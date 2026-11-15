@@ -28,8 +28,8 @@ class TrySubmitUrlsInput(BaseModel):
     urls: list[str] = Field(..., min_length=1, description="Video URLs (YouTube, Bilibili, Douyin, etc.)")
     topic: str = Field(default="general", description="Topic slug for routing/export")
     langs: str | list[str] | None = Field(
-        default="site",
-        description='Target locales: "site" (16 langs), comma string, or list like ["zh","en"]',
+        default=None,
+        description='Target langs: None = default 20-lang pack, "site" (16), comma string, or list like ["zh","en"]',
     )
     want_translate: bool = Field(default=True, description="Run subtitle translation")
     want_notes: bool = Field(default=True, description="Run structured notes (WF-02)")
@@ -315,7 +315,7 @@ async def vitual_admin_runs(
 async def vitual_try_submit_upload(
     file_path: str = Field(..., min_length=1, description="Absolute or relative path to local video file"),
     topic: str = Field(default="general", description="Topic slug"),
-    langs: str | None = Field(default="site", description='Target langs: "site" or JSON list string'),
+    langs: str | None = Field(default=None, description='Target langs: None = default 20-lang pack, "site" (16), or JSON list string'),
     frames: str = Field(default="auto", description="auto | none | gif | jpg"),
     gif_sec: float = Field(default=4.0, ge=1.0, le=20.0),
 ) -> str:
@@ -347,7 +347,7 @@ async def vitual_try_submit_upload(
 async def vitual_try_submit_uploads(
     file_paths: list[str] = Field(..., min_length=1, description="Local video paths (batch)"),
     topic: str = Field(default="general", description="Topic slug"),
-    langs: str | None = Field(default="site", description='Target langs: "site" or JSON list string'),
+    langs: str | None = Field(default=None, description='Target langs: None = default 20-lang pack, "site" (16), or JSON list string'),
     frames: str = Field(default="auto", description="auto | none | gif | jpg"),
     gif_sec: float = Field(default=4.0, ge=1.0, le=20.0),
     want_translate: bool = Field(default=True),

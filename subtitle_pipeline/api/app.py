@@ -264,8 +264,9 @@ def _discover_enabled() -> bool:
 
 def _job_batch(settings: Settings, *, fast: bool, limit: int = 1, requeue: bool = True) -> dict:
     from discover.run_batch import main as batch_main
+    from langs import DEFAULT_PACK
 
-    argv = ["--langs", "site", "--limit", str(limit)]
+    argv = ["--langs", DEFAULT_PACK, "--limit", str(limit)]
     if fast:
         argv += ["--no-multipass", "--device", "cpu"]
     if requeue:
@@ -785,7 +786,7 @@ class TryUrlBody(BaseModel):
     )
     langs: list[str] | str | None = Field(
         default=None,
-        description="Target locales (site pack). Omit or empty = all site langs.",
+        description="Target locales. Omit or empty = default fununion20 pack (20 langs); \"site\" = legacy 16.",
     )
     want_translate: bool = Field(default=True, description="Run subtitle translation")
     want_notes: bool = Field(default=True, description="Run structured notes")
@@ -868,7 +869,9 @@ def api_eval(body: EvalBody, background: BackgroundTasks) -> dict:
     script = root / "eval" / "run_eval.py"
     cmd = [sys.executable, str(script), "--gold", body.gold, "--model", body.model, "--judge", body.judge]
     if body.langs:
-        cmd += ["--langs", *body.langs]
+        # langs 允许传字符串;直接 *str 会把 "site" 拆成 s,i,t,e 四个参数。
+        langs = [body.langs] if isinstance(body.langs, str) else list(body.langs)
+        cmd += ["--langs", *langs]
     if body.baseline:
         cmd += ["--baseline", body.baseline]
     background.add_task(subprocess.run, cmd, cwd=str(root), check=False)

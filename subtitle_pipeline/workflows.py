@@ -369,9 +369,13 @@ def workflow_products(work_dir: Path, workflow: str) -> list[dict[str, Any]]:
             }
         )
 
+    media = job_media_dir(root)
     if wf == WORKFLOW_TRANSLATE:
         for tag, p in sorted(list_locale_srts(root).items()):
             _add(p, kind=f"srt:{tag}")
+        # 多模型校对质量报告（Judge 分/决策/待复核明细），随产物一起登记。
+        for p in sorted(media.glob("translate_qa_*.json")):
+            _add(p, kind="qa:translate")
     elif wf == WORKFLOW_NOTES:
         notes = root / "notes"
         if notes.is_dir():
@@ -379,6 +383,8 @@ def workflow_products(work_dir: Path, workflow: str) -> list[dict[str, Any]]:
                 _add(p, kind=f"notes:{p.parent.name}")
             for p in sorted(notes.glob("*/summary.md")):
                 _add(p, kind=f"notes_md:{p.parent.name}")
+        for p in sorted(media.glob("notes_qa_*.json")):
+            _add(p, kind="qa:notes")
     elif wf == WORKFLOW_CLIPS:
         for p in sorted((job_media_dir(root) / "clips").glob("range_*.mp4")):
             _add(p, kind="clip")

@@ -94,6 +94,14 @@ def _builtin_local() -> dict[str, Any]:
                 "model": "translategemma:4b",
                 "base_url": host,
             },
+            # Independent "second opinion" model for proofreading. Must differ
+            # from `translate` so consensus actually catches translation errors.
+            "verify": {
+                "provider": "ollama",
+                "model": "gemma4:e2b",
+                "base_url": host,
+                "temperature": 0.1,
+            },
         }
     }
 
@@ -133,8 +141,16 @@ def resolve_profile(
             f"unknown llm profile {name!r}; available: {sorted(profiles)}"
         )
     block = profiles[name] or {}
-    roles = {
-        "chat": parse_role(block.get("chat"), fallback_model="gemma4:e2b"),
-        "translate": parse_role(block.get("translate"), fallback_model="translategemma:4b"),
-    }
+    chat = parse_role(block.get("chat"), fallback_model="gemma4:e2b")
+    translate = parse_role(block.get("translate"), fallback_model="translategemma:4b")
+    # Proofreading role: an explicit `verify:` block wins; otherwise inherit the
+    # chat role (already a different model family from `translate` in the local
+    # profile). Keeping it in the profile makes the second-opinion model a single
+    # source of truth instead of a hardcoded OllamaClient in llm/verify.py.
+    verify = (
+        parse_role(block["verify"], fallback_model="gemma4:e2b")
+        if block.get("verify")
+        else chat
+    )
+    roles = {"chat": chat, "translate": translate, "verify": verify}
     return name, roles

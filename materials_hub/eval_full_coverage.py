@@ -67,7 +67,7 @@ def main():
 
     # ---- B. 组织与分类(kind) ----
     b_ok = (core.classify("a.mp4") == "videos" and core.classify("b.png") == "images"
-            and core.classify("c.srt") == "subs" and core.classify("d.wav") == "audio")
+            and core.classify("c.srt") == "docs" and core.classify("d.wav") == "audio")
     check("B", "classify 按扩展名分 8 类", b_ok,
           "mp4=%s png=%s srt=%s wav=%s" % (core.classify("a.mp4"), core.classify("b.png"),
                                             core.classify("c.srt"), core.classify("d.wav")))
@@ -127,7 +127,7 @@ def main():
     n_ocr = len([f for f in os.listdir(ocr_dir)]) if os.path.isdir(ocr_dir) else 0
     con = core._con()
     n_img = con.execute("SELECT COUNT(*) FROM image_embeddings").fetchone()[0]
-    n_vis = con.execute("SELECT COUNT(*) FROM materials WHERE kind IN ('images','videos','silent','anim')").fetchone()[0]
+    n_vis = con.execute("SELECT COUNT(*) FROM materials WHERE kind IN ('images','videos')").fetchone()[0]
     check("E", "视觉向量(CLIP/SigLIP2)已建库", n_img > 0,
           "image_embeddings=%d/%d (cov=%.3f)" % (n_img, n_vis, n_img / n_vis if n_vis else 0))
     check("E", "增强 API 齐备(ocr_material/near_duplicate_report/build_image_embeddings)",
@@ -475,8 +475,8 @@ def main():
     cv = core._con()
     try:
         cv.execute("DELETE FROM materials WHERE id=?", (v_tmp,)); cv.commit()
-        core.add_material(id=v_tmp, kind="subs", name="verify_sub.srt", rel_path="verify_sub.srt",
-                          ext="srt", size=0, sha256=v_tmp, tags="user-resource", source="verify",
+        core.add_material(id=v_tmp, kind="docs", name="verify_sub.srt", rel_path="verify_sub.srt",
+                          ext="srt", size=0, sha256=v_tmp, tags="user-resource,type:subs", source="verify",
                           orig_name="verify_sub.srt", description="", created_at="2026-11-08")
         cr = core.classify_material(v_tmp)
         check("V", "分类:非画面素材安全跳过(skip_nonvisual,不污染)", cr.get("status") == "skip_nonvisual"

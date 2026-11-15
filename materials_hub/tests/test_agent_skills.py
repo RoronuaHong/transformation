@@ -28,7 +28,7 @@ def _setup_tmp():
     core.INDEX_DB = os.path.join(tmp, "hub.db")
     for d in (core.MATERIALS, core.OCR_DIR, core.SHOT_DIR, core.PHASH_DIR, core.THUMBS):
         os.makedirs(d, exist_ok=True)
-    for k in ("videos", "silent", "audio", "images", "docs", "subs"):
+    for k in ("videos", "audio", "images", "docs"):
         os.makedirs(os.path.join(core.MATERIALS, k), exist_ok=True)
     core._init_db()
     return tmp
@@ -58,7 +58,7 @@ def test_list_missing_covers_filters_kind():
     tmp = _setup_tmp()
     try:
         _add("v1aaaaaaaaaa", "videos", "a.mp4", "sp,job:j1")
-        _add("s1bbbbbbbbbb", "silent", "b_silent.mp4", "sp,job:j1,demux")
+        _add("s1bbbbbbbbbb", "videos", "b_silent.mp4", "sp,job:j1,demux,has_audio:0,role:silent-picture")
         # 给 videos 造封面,silent 仍缺
         os.makedirs(core.THUMBS, exist_ok=True)
         with open(core.thumb_path("v1aaaaaaaaaa"), "wb") as f:
@@ -67,7 +67,7 @@ def test_list_missing_covers_filters_kind():
         ids = {x["id"] for x in all_miss}
         assert "s1bbbbbbbbbb" in ids, ids
         assert "v1aaaaaaaaaa" not in ids, ids
-        only_s = core.list_missing_covers(kind="silent")
+        only_s = core.list_missing_covers(kind="videos")
         assert [x["id"] for x in only_s] == ["s1bbbbbbbbbb"], only_s
         print("PASS test_list_missing_covers_filters_kind")
     finally:
@@ -96,7 +96,7 @@ def test_job_checkup_kinds_and_gaps():
 def test_split_new_videos_skips_non_video(monkey=None):
     tmp = _setup_tmp()
     try:
-        _add("s3ffffffffff", "silent", "d_silent.mp4", "sp")
+        _add("s3ffffffffff", "audio", "d_silent.mp3", "sp")
         calls = []
 
         def fake_split(mid, force=False):
@@ -119,18 +119,18 @@ def test_split_new_videos_skips_non_video(monkey=None):
 def test_mcp_prompts_and_tools():
     tmp = _setup_tmp()
     try:
-        _add("s4hhhhhhhhhh", "silent", "f_silent.mp4", "sp,job:j2")
+        _add("s4hhhhhhhhhh", "videos", "f_silent.mp4", "sp,job:j2,has_audio:0,role:silent-picture")
         pl = mcp_server._prompts_list()
         names = {p["name"] for p in pl}
         assert "fill_missing_thumbs" in names and "job_checkup" in names, names
         assert "segment_first" in names, names
-        pg = mcp_server._prompt_get("fill_missing_thumbs", {"kind": "silent"})
+        pg = mcp_server._prompt_get("fill_missing_thumbs", {"kind": "videos"})
         assert "list_missing_covers" in pg["messages"][0]["content"]["text"]
         pg2 = mcp_server._prompt_get("job_checkup", {"job_id": "j2"})
         assert "j2" in pg2["messages"][0]["content"]["text"]
         pg3 = mcp_server._prompt_get("segment_first", {"query": "x"})
         assert "get_shots" in pg3["messages"][0]["content"]["text"]
-        miss = mcp_server.t_missing_covers({"kind": "silent"})
+        miss = mcp_server.t_missing_covers({"kind": "videos"})
         assert any(x["id"] == "s4hhhhhhhhhh" for x in miss), miss
         chk = mcp_server.t_job_checkup({"job_id": "j2"})
         assert chk["count"] >= 1, chk
@@ -149,7 +149,7 @@ def test_maintain_includes_missing_covers():
     tmp = _setup_tmp()
     try:
         import agent
-        _add("s5iiiiiiiiii", "silent", "g_silent.mp4", "sp")
+        _add("s5iiiiiiiiii", "videos", "g_silent.mp4", "sp,has_audio:0,role:silent-picture")
         # redirect agent's core is same module
         r = agent._sub_maintain()
         assert "missing_covers" in r, r

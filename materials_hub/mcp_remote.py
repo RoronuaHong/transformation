@@ -77,8 +77,8 @@ INVALID_PARAMS = -32602
 INTERNAL = -32603
 HUMAN_DECLINED = -32000
 
-KIND_OPTIONS = ["images", "videos", "silent", "docs", "audio", "subs", "anim",
-                "raw", "project", "vector", "model3d", "font", "other"]
+KIND_OPTIONS = ["images", "videos", "docs", "audio", "project", "vector",
+               "model3d", "font", "other"]
 
 INSTRUCTIONS = (
     "素材中心（Materials Hub）MCP 网关：检索 / 理解 / 治理一个本地多模态素材库"
@@ -281,8 +281,8 @@ async def find_similar(ctx: Context, id: str, max_dist: int = 10) -> dict:
 
 
 @mcp.tool(name="list_missing_covers", title="无封面素材清单",
-          annotations=_ann("列出无封面的 videos/silent"),
-          description="只读：列出无封面的 videos/silent（可滤 kind=silent|videos）。")
+          annotations=_ann("列出无封面的 videos（含静音画面）"),
+          description="只读：列出无封面的 videos（含静音画面 has_audio:0；可滤 kind=videos）。")
 async def list_missing_covers(ctx: Context, kind: str = "", limit: int = 50,
                               skip_failed: bool = True) -> dict:
     rows = await _run(core.list_missing_covers, kind, skip_failed, int(limit))
@@ -687,7 +687,7 @@ def prompt_job_checkup(job_id: str) -> str:
         "你是素材中心运维 Agent。任务：体检 job=%s。\n"
         "1. 调用 job_checkup(job_id=%r)(确定性,勿臆造)。\n"
         "2. 也可读 Resource hub://job/%s 对照材料清单。\n"
-        "3. 总结：kinds 是否含 videos/silent/audio/subs/notes；master/clip/component ids；"
+        "3. 总结：kinds 是否含 videos(含静音 has_audio:0)/audio/docs(type:subs)/notes；master/clip/component ids；"
         "missing_thumbs / missing_shots / clips_missing_parent / broken_ids / asr_ids。\n"
         "4. 只读汇报；写修复需用户 confirm。" % (job_id, job_id, job_id))
 

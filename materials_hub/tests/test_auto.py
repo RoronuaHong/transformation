@@ -208,7 +208,7 @@ def test_auto_process_all_pending_and_limit():
 def test_search_auto_reads_subtitle_body():
     """字幕正文不在 description 里。自动检索仍应命中 .srt 原文,词法模式保持只看元数据。"""
     _setup(reset=True)
-    _mk_material("s1", kind="subs", name="demo.srt")
+    _mk_material("s1", kind="docs", name="demo.srt")
     m = core.get_material("s1")
     with open(m["external_path"], "w", encoding="utf-8") as f:
         f.write("1\n00:00:01,000 --> 00:00:03,000\n红烧鸡翅出锅了\n")

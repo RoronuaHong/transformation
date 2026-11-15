@@ -291,12 +291,19 @@ export type HubCopy = {
   all: string;
   kindImages: string;
   kindVideos: string;
-  kindSilent: string;
   kindDocs: string;
   kindAudio: string;
-  kindSubs: string;
-  kindAnim: string;
-  kindRaw: string;
+  fSilent: string;
+  fGif: string;
+  fRaw: string;
+  fSubs: string;
+  fTranslate: string;
+  fPdf: string;
+  fDoc: string;
+  fText: string;
+  fSheet: string;
+  fSlide: string;
+  fData: string;
   kindProject: string;
   kindVector: string;
   kindModel3d: string;
@@ -370,6 +377,7 @@ export type HubCopy = {
   prev: string;
   next: string;
   pageOf: string;
+  loadMore: string;
   modeAuto: string;
   modeLex: string;
   modeSem: string;
@@ -382,6 +390,10 @@ export type HubCopy = {
   deleted: string;
   uploadSummary: string;
   asideFilter: string;
+  asideCollapse: string;
+  asideExpand: string;
+  more: string;
+  searchMode: string;
   gridAuto: string;
   gridTwo: string;
   gridOne: string;
@@ -411,6 +423,43 @@ export type HubCopy = {
   exportConfirm: string;
   exportDownload: string;
   exportResult: string;
+  subsTitle: string;
+  subsLang: string;
+  subsCues: string;
+  subsDuration: string;
+  subsFilter: string;
+  subsCopyText: string;
+  subsDownload: string;
+  subsLinkedVideo: string;
+  subsSeekHint: string;
+  subsLoadErr: string;
+  copied: string;
+  pvTitle: string;
+  pvLoading: string;
+  pvError: string;
+  pvEmpty: string;
+  pvEncoding: string;
+  pvChars: string;
+  pvLines: string;
+  pvWrap: string;
+  pvMore: string;
+  pvTruncated: string;
+  pvTableHint: string;
+  pvHexTitle: string;
+  pvPdfFallback: string;
+  pvFontSample: string;
+  pvMediaErr: string;
+  pvOpenHint: string;
+  pvReasonSvg: string;
+  pvReasonImage: string;
+  pvReasonMedia: string;
+  pvReasonOffice: string;
+  pvReasonLegacyOffice: string;
+  pvReasonRtf: string;
+  pvReasonActive: string;
+  pvReasonSniffed: string;
+  pvReasonNoRenderer: string;
+  pvReasonParseErr: string;
   favorite: string;
   unfavorite: string;
   favOnly: string;
@@ -424,6 +473,43 @@ export type HubCopy = {
   dropUpload: string;
   batch: string;
   selHint: string;
+  collMode: string;
+  collModeHint: string;
+  collTitle: string;
+  collCount: string;
+  collExpand: string;
+  collCollapse: string;
+  collFilterJob: string;
+  collSelectAll: string;
+  collDeselectAll: string;
+  collSubsPack: string;
+  collAlbumTitle: string;
+  addToAlbum: string;
+  addToAlbumHint: string;
+  albumNew: string;
+  albumNamePh: string;
+  albumCreate: string;
+  albumAdded: string;
+  albumEmpty: string;
+  albumMine: string;
+  albumRename: string;
+  albumRenamePh: string;
+  albumRenamed: string;
+  albumDelete: string;
+  albumDeleteConfirm: string;
+  albumDeleted: string;
+  jobDissolve: string;
+  jobDissolveConfirm: string;
+  leaveColl: string;
+  leaveCollConfirm: string;
+  leftColl: string;
+  collManage: string;
+  moveMany: string;
+  moveManyHint: string;
+  moveForm: string;
+  movedMany: string;
+  bulkWorking: string;
+  exitSelect: string;
 };
 
 export type UiCopy = {
@@ -676,7 +762,7 @@ const en: UiCopy = {
     packZipDownload: "Download Job Pack (.zip)",
     packageSection: "Package",
     packageCourse: "Course pack",
-    packageCourseHint: "Subtitles + structured notes (16 langs)",
+    packageCourseHint: "Subtitles + structured notes (20 langs)",
     packageRemix: "Remix pack",
     packageRemixHint: "Unburn → clips from notes → 9:16 remix",
     packageAdvanced: "Advanced",
@@ -724,17 +810,24 @@ const en: UiCopy = {
   hub: {
     kicker: "Materials",
     headline: "Materials hub",
-    lede: "Browse pipeline outputs — videos, silent clips, audio tracks, captions, notes — in one catalog.",
+    lede: "Browse pipeline outputs — videos (incl. muted), audio tracks, captions, notes — in one catalog.",
     searchPh: "Search name, tags, or what’s in the frame…",
     all: "All",
     kindImages: "Images",
     kindVideos: "Videos",
-    kindSilent: "Silent",
     kindDocs: "Docs",
     kindAudio: "Audio tracks",
-    kindSubs: "Captions",
-    kindAnim: "GIFs",
-    kindRaw: "Camera RAW",
+    fSilent: "Silent",
+    fGif: "GIFs",
+    fRaw: "Camera RAW",
+    fSubs: "Captions",
+    fTranslate: "Translations",
+    fPdf: "PDF",
+    fDoc: "Word docs",
+    fText: "Notes",
+    fSheet: "Spreadsheets",
+    fSlide: "Slides",
+    fData: "Data/Code",
     kindProject: "Projects",
     kindVector: "Vectors",
     kindModel3d: "3D",
@@ -820,7 +913,8 @@ const en: UiCopy = {
     missing: "File missing",
     prev: "Prev",
     next: "Next",
-    pageOf: "{p} / {n} · {t} items",
+    pageOf: "{p} of {t} loaded",
+    loadMore: "Load more",
     modeAuto: "Search: auto",
     modeLex: "Search: lexical",
     modeSem: "Search: semantic",
@@ -833,6 +927,10 @@ const en: UiCopy = {
     deleted: "Deleted",
     uploadSummary: "Added {a}, duplicates {d}, failed {f}",
     asideFilter: "Filters",
+    asideCollapse: "Collapse filters",
+    asideExpand: "Expand filters",
+    more: "More",
+    searchMode: "Search mode",
     gridAuto: "Auto columns",
     gridTwo: "2 columns",
     gridOne: "1 column",
@@ -862,6 +960,80 @@ const en: UiCopy = {
     exportConfirm: "Confirm export",
     exportDownload: "Download",
     exportResult: "Result",
+    subsTitle: "Subtitle preview",
+    subsLang: "Language",
+    subsCues: "cues",
+    subsDuration: "Duration",
+    subsFilter: "Search subtitle text…",
+    subsCopyText: "Copy text",
+    subsDownload: "Download subtitle",
+    subsLinkedVideo: "Linked video",
+    subsSeekHint: "Click a line to seek the linked video",
+    subsLoadErr: "Failed to load subtitle",
+    copied: "Copied",
+    pvTitle: "Content preview",
+    pvLoading: "Reading preview…",
+    pvError: "Could not read this file",
+    pvEmpty: "File is empty",
+    pvEncoding: "Encoding",
+    pvChars: "chars",
+    pvLines: "lines",
+    pvWrap: "Wrap lines",
+    pvMore: "Load more text",
+    pvTruncated: "Showing the first {n} characters",
+    pvTableHint: "First {r} rows × {c} columns",
+    pvHexTitle: "File header (hex)",
+    pvPdfFallback: "If the PDF does not appear above, open it in a new tab",
+    pvFontSample: "Font specimen",
+    pvMediaErr: "This browser cannot decode the file",
+    pvOpenHint: "Open it with the matching desktop app, or use “Open file” below.",
+    pvReasonSvg: "SVG is rendered as a static image; scripts never run.",
+    pvReasonImage: "RAW / HEIC / TIFF cannot be displayed by browsers. Generate a thumbnail or use a photo app.",
+    pvReasonMedia: "This container or codec may not play in browsers. Transcode to MP4 (H.264) / WebM or MP3 / WAV.",
+    pvReasonOffice: "Extracted text and cells only — original layout is not preserved.",
+    pvReasonLegacyOffice: "Legacy binary Office files cannot be parsed here. Re-save as .docx / .xlsx / .pptx.",
+    pvReasonRtf: "RTF is shown as approximate plain text; formatting is dropped.",
+    pvReasonActive: "Potentially active content: source text only, nothing is executed.",
+    pvReasonSniffed: "Unknown extension; preview based on content sniffing.",
+    pvReasonNoRenderer: "No browser renderer for this format; the file header is shown below.",
+    pvReasonParseErr: "Preview parsing failed; showing the file header instead.",
+    collMode: "Collections",
+    collModeHint: "Group a video's source and its multilingual subtitle pack together",
+    collTitle: "Video set",
+    collCount: "{n} items",
+    collExpand: "Expand",
+    collCollapse: "Collapse",
+    collFilterJob: "Only this set",
+    collSelectAll: "Select set",
+    collDeselectAll: "Deselect set",
+    collSubsPack: "Subtitles / translations",
+    collAlbumTitle: "Album",
+    addToAlbum: "Add to album",
+    addToAlbumHint: "Add to a video set (job) or your album — or create an album below",
+    albumNew: "New album",
+    albumNamePh: "Album name",
+    albumCreate: "Create & add",
+    albumAdded: "Added to album",
+    albumEmpty: "No albums yet — create one below",
+    albumMine: "My albums",
+    albumRename: "Rename",
+    albumRenamePh: "New album name",
+    albumRenamed: "Album renamed",
+    albumDelete: "Delete album",
+    albumDeleteConfirm: "Dissolve album “{name}”? Files stay; only the grouping is removed.",
+    albumDeleted: "Album dissolved",
+    jobDissolve: "Dissolve set",
+    jobDissolveConfirm: "Dissolve video set “{name}”? Files stay; job: tags are cleared from members.",
+    leaveColl: "Remove from set",
+    leaveCollConfirm: "Remove {n} item(s) from this set?",
+    leftColl: "Removed from set",
+    collManage: "Manage",
+    moveMany: "Move",
+    moveManyHint: "Set content form for selected items",
+    moveForm: "Content form",
+    movedMany: "Moved {n}",
+    bulkWorking: "Working…",
+    exitSelect: "Done",
   },
 };
 
@@ -1105,7 +1277,7 @@ const zh: UiCopy = {
     packZipDownload: "下载 Job Pack（.zip）",
     packageSection: "套餐",
     packageCourse: "跟课包",
-    packageCourseHint: "16 语字幕 + 结构化笔记",
+    packageCourseHint: "20 语字幕 + 结构化笔记",
     packageRemix: "二创包",
     packageRemixHint: "去硬字幕 → 要点切片 → 9:16 成片",
     packageAdvanced: "高级",
@@ -1157,12 +1329,19 @@ const zh: UiCopy = {
     all: "全部",
     kindImages: "图片",
     kindVideos: "视频",
-    kindSilent: "无声",
     kindDocs: "文档",
     kindAudio: "音轨",
-    kindSubs: "字幕",
-    kindAnim: "动图",
-    kindRaw: "原片",
+    fSilent: "静音",
+    fGif: "动图",
+    fRaw: "相机原片",
+    fSubs: "字幕",
+    fTranslate: "翻译",
+    fPdf: "PDF",
+    fDoc: "文稿",
+    fText: "笔记",
+    fSheet: "表格",
+    fSlide: "演示",
+    fData: "数据/代码",
     kindProject: "工程",
     kindVector: "矢量",
     kindModel3d: "三维",
@@ -1248,7 +1427,8 @@ const zh: UiCopy = {
     missing: "原文件缺失",
     prev: "上一页",
     next: "下一页",
-    pageOf: "{p} / {n} 页 · 共 {t} 条",
+    pageOf: "已加载 {p} / 共 {t} 条",
+    loadMore: "加载更多",
     modeAuto: "检索：自动",
     modeLex: "检索：词法",
     modeSem: "检索：语义",
@@ -1261,6 +1441,10 @@ const zh: UiCopy = {
     deleted: "已删除",
     uploadSummary: "入库 {a} · 重复 {d} · 失败 {f}",
     asideFilter: "筛选",
+    asideCollapse: "收起筛选",
+    asideExpand: "展开筛选",
+    more: "更多",
+    searchMode: "检索方式",
     gridAuto: "自适应列数",
     gridTwo: "一行 2 个",
     gridOne: "一行 1 个",
@@ -1290,6 +1474,80 @@ const zh: UiCopy = {
     exportConfirm: "确认导出",
     exportDownload: "下载",
     exportResult: "结果",
+    subsTitle: "字幕预览",
+    subsLang: "语言",
+    subsCues: "条",
+    subsDuration: "时长",
+    subsFilter: "搜索字幕文本…",
+    subsCopyText: "复制文本",
+    subsDownload: "下载字幕",
+    subsLinkedVideo: "关联视频",
+    subsSeekHint: "点击字幕跳转到关联视频时间点",
+    subsLoadErr: "字幕加载失败",
+    copied: "已复制",
+    pvTitle: "内容预览",
+    pvLoading: "正在读取预览…",
+    pvError: "预览读取失败",
+    pvEmpty: "文件为空",
+    pvEncoding: "编码",
+    pvChars: "字符",
+    pvLines: "行",
+    pvWrap: "自动换行",
+    pvMore: "继续加载",
+    pvTruncated: "已显示前 {n} 字符",
+    pvTableHint: "仅展示前 {r} 行 × {c} 列",
+    pvHexTitle: "文件头（十六进制）",
+    pvPdfFallback: "若上方未显示 PDF，请在新标签页打开",
+    pvFontSample: "字体试样",
+    pvMediaErr: "浏览器无法解码该文件",
+    pvOpenHint: "请用对应软件打开，或点下方「打开文件」",
+    pvReasonSvg: "SVG 以静态图片渲染，脚本不执行",
+    pvReasonImage: "相机原片 / HEIC / TIFF 浏览器无法直接显示，可先生成缩略图或用看图软件打开",
+    pvReasonMedia: "此容器 / 编码浏览器不一定支持，建议转码为 MP4(H.264) / WebM 或 MP3 / WAV",
+    pvReasonOffice: "仅提取文本与单元格，不保留原始排版",
+    pvReasonLegacyOffice: "旧版 Office 二进制格式无法解析，另存为 .docx / .xlsx / .pptx 后可预览",
+    pvReasonRtf: "RTF 仅做纯文本近似提取，排版不保留",
+    pvReasonActive: "此类文件可能含脚本，仅以纯文本展示源码，不会执行",
+    pvReasonSniffed: "扩展名未知，按内容嗅探判定为文本",
+    pvReasonNoRenderer: "此格式没有浏览器内置渲染器，下方展示文件头字节",
+    pvReasonParseErr: "预览解析失败，已降级为文件头视图",
+    collMode: "合集",
+    collModeHint: "同一视频的源片与多语字幕折成一个合集",
+    collTitle: "视频合集",
+    collCount: "{n} 项",
+    collExpand: "展开",
+    collCollapse: "收起",
+    collFilterJob: "只看此合集",
+    collSelectAll: "全选此合集",
+    collDeselectAll: "取消全选",
+    collSubsPack: "字幕/翻译",
+    collAlbumTitle: "合集",
+    addToAlbum: "加入合集",
+    addToAlbumHint: "可选流水线视频合集或我的合集；也可在下方新建",
+    albumNew: "新建合集",
+    albumNamePh: "合集名称",
+    albumCreate: "创建并加入",
+    albumAdded: "已加入合集",
+    albumEmpty: "还没有合集 — 在下方新建",
+    albumMine: "我的合集",
+    albumRename: "重命名",
+    albumRenamePh: "新合集名称",
+    albumRenamed: "已重命名合集",
+    albumDelete: "删除合集",
+    albumDeleteConfirm: "解散合集「{name}」？素材文件保留，只去掉分组。",
+    albumDeleted: "已解散合集",
+    jobDissolve: "解散合集",
+    jobDissolveConfirm: "解散视频合集「{name}」？文件保留，仅清除成员上的 job: 归属。",
+    leaveColl: "移出合集",
+    leaveCollConfirm: "将 {n} 个素材移出当前合集？",
+    leftColl: "已移出合集",
+    collManage: "管理",
+    moveMany: "移动",
+    moveManyHint: "为所选素材设置内容形式",
+    moveForm: "内容形式",
+    movedMany: "已移动 {n} 个",
+    bulkWorking: "处理中…",
+    exitSelect: "完成",
   },
 };
 
@@ -1418,15 +1676,56 @@ const zhHant: UiCopy = {
   },
   hub: {
     ...zh.hub,
+    collMode: "合集",
+    collModeHint: "同一影片的源片與多語字幕折成一個合集",
+    collTitle: "影片合集",
+    collCount: "{n} 項",
+    collExpand: "展開",
+    collCollapse: "收起",
+    collFilterJob: "只看此合集",
+    collSelectAll: "全選此合集",
+    collDeselectAll: "取消全選",
+    collSubsPack: "字幕/翻譯",
+    collAlbumTitle: "合集",
+    addToAlbum: "加入合集",
+    addToAlbumHint: "可選流水線影片合集或我的合集；也可在下方新建",
+    albumNew: "新建合集",
+    albumNamePh: "合集名稱",
+    albumCreate: "建立並加入",
+    albumAdded: "已加入合集",
+    albumEmpty: "還沒有合集 — 在下方新建",
+    albumMine: "我的合集",
+    albumRename: "重新命名",
+    albumRenamePh: "新合集名稱",
+    albumRenamed: "已重新命名合集",
+    albumDelete: "刪除合集",
+    albumDeleteConfirm: "解散合集「{name}」？素材檔保留，只去掉分組。",
+    albumDeleted: "已解散合集",
+    jobDissolve: "解散合集",
+    jobDissolveConfirm: "解散影片合集「{name}」？檔案保留，僅清除成員上的 job: 歸屬。",
+    leaveColl: "移出合集",
+    leaveCollConfirm: "將 {n} 個素材移出目前合集？",
+    leftColl: "已移出合集",
+    collManage: "管理",
+    moveMany: "移動",
+    moveManyHint: "為所選素材設定內容形式",
+    moveForm: "內容形式",
+    movedMany: "已移動 {n} 個",
+    bulkWorking: "處理中…",
+    exitSelect: "完成",
     kicker: "素材",
     headline: "素材中心",
-    lede: "流水線產物與上傳檔案統一編目：有聲影片、無聲畫面、音軌、字幕、筆記。",
+    lede: "流水線產物與上傳檔案統一編目：影片、靜音畫面、音軌、字幕、筆記。",
     searchPh: "搜尋檔名、標籤，或畫面裡的東西…",
     kindVideos: "影片",
-    kindSilent: "無聲",
     kindAudio: "音軌",
-    kindAnim: "動圖",
-    kindRaw: "原片",
+    fSilent: "靜音",
+    fGif: "動圖",
+    fRaw: "相機原片",
+    fSubs: "字幕",
+    fTranslate: "翻譯",
+    fText: "筆記",
+    fData: "資料/程式",
     kindProject: "工程",
     kindVector: "向量",
     kindModel3d: "三維",
@@ -1494,7 +1793,8 @@ const zhHant: UiCopy = {
     missing: "原檔缺失",
     prev: "上一頁",
     next: "下一頁",
-    pageOf: "{p} / {n} 頁 · 共 {t} 筆",
+    pageOf: "已載入 {p} / 共 {t} 筆",
+    loadMore: "載入更多",
     modeAuto: "檢索：自動",
     modeLex: "檢索：詞法",
     modeSem: "檢索：語意",
@@ -1507,6 +1807,10 @@ const zhHant: UiCopy = {
     deleted: "已刪除",
     uploadSummary: "入庫 {a} · 重複 {d} · 失敗 {f}",
     asideFilter: "篩選",
+    asideCollapse: "收起篩選",
+    asideExpand: "展開篩選",
+    more: "更多",
+    searchMode: "檢索方式",
     mediaType: "媒體類型",
     uploadDefaults: "上傳預設分類",
     uploadDefaultsHint: "只對之後上傳的檔案生效,不會篩選下方列表。",
@@ -1544,6 +1848,43 @@ const zhHant: UiCopy = {
     exportConfirm: "確認匯出",
     exportDownload: "下載",
     exportResult: "結果",
+    subsTitle: "字幕預覽",
+    subsLang: "語言",
+    subsCues: "條",
+    subsDuration: "時長",
+    subsFilter: "搜尋字幕文字…",
+    subsCopyText: "複製文字",
+    subsDownload: "下載字幕",
+    subsLinkedVideo: "關聯視頻",
+    subsSeekHint: "點擊字幕跳轉到關聯視頻時間點",
+    subsLoadErr: "字幕載入失敗",
+    copied: "已複製",
+    pvTitle: "內容預覽",
+    pvLoading: "正在讀取預覽…",
+    pvError: "預覽讀取失敗",
+    pvEmpty: "檔案為空",
+    pvEncoding: "編碼",
+    pvChars: "字元",
+    pvLines: "行",
+    pvWrap: "自動換行",
+    pvMore: "繼續載入",
+    pvTruncated: "已顯示前 {n} 字元",
+    pvTableHint: "僅展示前 {r} 行 × {c} 欄",
+    pvHexTitle: "檔案頭（十六進位）",
+    pvPdfFallback: "若上方未顯示 PDF，請在新分頁開啟",
+    pvFontSample: "字體試樣",
+    pvMediaErr: "瀏覽器無法解碼此檔案",
+    pvOpenHint: "請用對應軟體開啟，或點下方「開啟檔案」",
+    pvReasonSvg: "SVG 以靜態圖片呈現，指令碼不執行",
+    pvReasonImage: "相機原片 / HEIC / TIFF 瀏覽器無法直接顯示，可先產生縮圖或用看圖軟體開啟",
+    pvReasonMedia: "此容器 / 編碼瀏覽器不一定支援，建議轉碼為 MP4(H.264) / WebM 或 MP3 / WAV",
+    pvReasonOffice: "僅擷取文字與儲存格，不保留原始排版",
+    pvReasonLegacyOffice: "舊版 Office 二進位格式無法解析，另存為 .docx / .xlsx / .pptx 後可預覽",
+    pvReasonRtf: "RTF 僅做純文字近似擷取，排版不保留",
+    pvReasonActive: "此類檔案可能含指令碼，僅以純文字展示原始碼，不會執行",
+    pvReasonSniffed: "副檔名未知，按內容嗅探判定為文字",
+    pvReasonNoRenderer: "此格式沒有瀏覽器內建轉譯器，下方展示檔案頭位元組",
+    pvReasonParseErr: "預覽解析失敗，已降級為檔案頭檢視",
   },
 };
 

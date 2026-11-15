@@ -123,7 +123,7 @@ python server.py        # 启动面板,打开 http://localhost:8000
 - **类型下拉**:按 `kind` 筛选(图片/视频/文档/音频/其他)。
 - **上传**:点「上传」或把文件**拖拽**到页面 → 落到 `ingest/` 并整理入库。逐文件反馈「入库 a · 重复 d · 失败 f」;处理中的素材卡片带「理解中」徽章(auto 链完成后自动消失)。单文件上限 **2048MB**(`VITUAL_UPLOAD_MAX_MB` 可调,超限走链接引用或 CLI);可执行/脚本扩展名(exe/dll/bat/cmd/msi/scr/com/ps1/vbs/sh)拒收;上传条目自动打 `upload` 来源标签,可与流水线条目区分筛选。
 - **标签 / 描述**:每张卡片可编辑,点「保存」写回索引。
-- **预览**:图片直接显示缩略图;视频内嵌播放器 + 封面;音频 / 文档显示占位。
+- **预览**:图片 / 视频 / 音频 / PDF 用浏览器原生渲染;文本、源码、字幕、CSV、JSON、Office(docx/xlsx/pptx/epub)按内容预览;相机原片 / MKV / AVI / 旧版 Office / 工程文件等给出明确的降级说明 + 文件头十六进制视图,不再只显示扩展名占位。
 - **删除**:删内部素材会移入 `trash/`(不破坏原工程);删外部引用只删索引。
 - **整理 / 扫描**:「整理 ingest/」处理待整理队列;「扫描 materials/」补录全树。
 - **分页**:页面底部「上一页 / 下一页 + 24·48·96 / 全部」;筛选或搜索变化自动回到第 1 页,并显示「第 X / Y 页 · 共 N 条」。
@@ -266,7 +266,8 @@ core.health()                       # 健康快照(总量/种类/重复/引用/�
 | GET | `/api/broken` | 失效外部引用明细(原文件已不存在) |
 | GET | `/api/dupes` | 重复文件组 |
 | GET | `/api/tags` | 全部标签 + 计数(面板标签下拉) |
-| GET | `/api/file/<id>` | 预览原文(外部引用读 `external_path`,支持 HTTP Range 流式) |
+| GET | `/api/file/<id>` | 预览原文(外部引用读 `external_path`,支持 HTTP Range 流式;按扩展名白名单给准确 MIME + inline/attachment + `nosniff`,HTML/SVG/JS 顶层导航强制纯文本下载) |
+| GET | `/api/preview/<id>?offset=&limit=` | 内容预览 JSON(只读、有界读取):`mode` + 解码文本 / 表格行 / Office 提取段落 / 文件头 hex;编码自动探测 UTF-8 BOM、UTF-16、GB18030、Big5 |
 | GET | `/api/thumb/<id>` | 视频封面 jpg(命中缓存直接返回,否则现场抽帧;失败返回 404 + 原因) |
 | GET | `/api/export?fmt=json\|csv` | 导出全部编目(带下载文件名;CSV 含 BOM) |
 | POST | `/api/upload` | 上传(表单 multipart),返回逐文件 `{results:[{name,status,id,reason}]}`;超限 413 |
@@ -433,8 +434,12 @@ python bridge_subtitle.py --watch --thumbs --embed --prune   # 一条命令全�
 **健康检查**:`GET /api/health` 返回 `ok`(引用是否完整)、总量与种类分布、重复数、索引体积、封面进度,可直接接监控轮询。
 
 ## 预览与缩略图策略
-- **图片**:直接返回,前端缩略图展示。
-- **视频 / 音频**:`/api/file/<id>` 支持 **HTTP Range**,浏览器内嵌播放器可拖拽进度、边下边播(大文件也不整块读内存)。
+- **图片**:直接返回,前端缩略图展示;相机原片 / HEIC / TIFF 浏览器无法解码时给出原因与降级视图。
+- **视频 / 音频**:`/api/file/<id>` 支持 **HTTP Range**,浏览器内嵌播放器可拖拽进度、边下边播(大文件也不整块读内存);不支持的容器/编码(MKV / AVI / HEVC)有 `onError` 降级与转码建议。
+- **PDF**:`Content-Type: application/pdf` + `inline`,交给浏览器内置查看器(其自身已沙箱化可执行内容),并额外给新标签页外链;不给 iframe 加 `sandbox`(MDN 明确会挡住内置查看器)。
+- **文档**:`/api/preview/<id>` 有界读取并按格式返回 `mode`:纯文本/源码/字幕(分页 + 自动编码探测)、CSV/TSV 与 xlsx(表格)、docx/pptx/epub(提取文本段落)、RTF(近似纯文本);不可信 HTML/SVG/JS **只展示源码**,绝不当 HTML 或脚本渲染。
+- **二进制 / 无渲染器格式**:明确说明「需要哪个软件 / 建议转成什么格式」,并展示文件头十六进制视图。
+- **安全头**(对齐 OWASP File Upload Cheat Sheet、ASVS 5.0 V3.2.1、MDN):所有响应带 `X-Content-Type-Options: nosniff`;用户文件用扩展名白名单定 MIME;可内联的才 `inline`,其余 `attachment` + RFC 5987 文件名;HTML/SVG/JS/XML 顶层导航强制 `text/plain` + `attachment` + CSP `sandbox`,SVG 仅在 `Sec-Fetch-Dest: image`(`<img>` 子资源)作为静态图渲染;素材私有内容只走 `Cache-Control: private`。
 - **外部引用**(subtitle_pipeline 大视频)预览同样走 Range,不复制文件。
 
 ### 视频封面(双模式自动降级)

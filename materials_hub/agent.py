@@ -64,7 +64,7 @@ _LOOP_HARD = 3               # → 硬停转(强制 recover+finish),不再问 LL
 _LOOP_WINDOW = 16
 _TASK_ID_RE = re.compile(r"(?:id[=:]\s*)?([0-9a-f]{12})\b")
 _ATTACHED_VIDEO_RE = re.compile(
-    r"id=([0-9a-f]{12})\s+kind=(videos|silent)\b", re.I)
+    r"id=([0-9a-f]{12})\s+kind=(videos)\b", re.I)
 _VIDEO_SKILL_HINT = re.compile(
     r"裁剪|镜头|时间轴|分析|方案|分类|母版|get_shots|related|全面测试|水平|上传",
     re.I)
@@ -730,8 +730,10 @@ def _observe(state, ws, obj):
 
 
 # ---------------------------------------------------------------- 工具表(支柱 3/4)
-_VALID_KINDS = {"images", "videos", "silent", "docs", "audio", "subs", "anim",
-                "raw", "project", "vector", "model3d", "font", "other"}
+# 规范媒体类型(对齐 DAM/图库最佳实践):图/视频/音/文档/矢量/3D/工程/字体。
+# 原片/GIF/字幕/静音 不再是独立 kind,而是 images/docs/videos 的子分面(type:raw/type:gif/type:subs/has_audio:0)。
+_VALID_KINDS = {"images", "videos", "docs", "audio",
+                "project", "vector", "model3d", "font", "other"}
 
 
 def _tool_search(a):
@@ -760,7 +762,7 @@ def _tool_search(a):
                             % (kind or "-", tag or "-", note)}
     if rows:
         return rows
-    extra = (";注意 kind=%s 不是合法值(合法:images/videos/silent/docs/audio/subs/anim/raw/project/vector/model3d/font/other)"
+    extra = (";注意 kind=%s 不是合法值(合法:images/videos/docs/audio/project/vector/model3d/font/other)"
              % bad_kind) if bad_kind else ""
     return {"results": [], "count": 0,
             "hint": "0 hits。请换更短的关键词重试:素材文件名片段(如 BV 号)、"
@@ -1086,7 +1088,7 @@ def _format_crop_plan(mid, mat, shots, related, crops):
                     % (c["label"], c["start"], c["end"], c["duration"], c["scene_index"])
                 )
         lines.append("说明: 以上为逻辑切片时间轴,不是物理 clip 文件;"
-                     "silent/audio 为声画组件。导出时再搜 role:clip。")
+                     "静音画面(has_audio:0)/音频 为声画组件。导出时再搜 role:clip。")
     elif shots and shots.get("error"):
         lines.append("镜头索引缺失: %s — 可先对母版建 shots 再裁。"
                      % shots.get("error"))
@@ -1249,7 +1251,7 @@ def _build_tools(allow_write, ctx=None):
             lambda a: core.list_missing_covers(
                 kind=str(a.get("kind") or ""),
                 limit=int(a.get("limit") or 50)),
-            "列出无封面的 videos/silent;args: kind?, limit?"),
+            "列出无封面的 videos(含静音画面);args: kind?, limit?"),
         "job_checkup": (
             lambda a: core.job_checkup(str(a.get("job_id") or a.get("job") or "")),
             "某 job 资产体检(kinds/封面/镜头/asr/失效);args: job_id"),
@@ -1346,7 +1348,8 @@ def _sub_maintain():
     h = core.health()
     broken = core.broken_externals()
     missing = core.list_missing_covers(limit=20)
-    silent_miss = [x for x in missing if x.get("kind") == "silent"]
+    silent_miss = [x for x in missing if x.get("kind") == "videos"
+                    and "has_audio:0" in (x.get("tags") or "")]
     nd = core.near_duplicate_report(max_dist=10, limit_pairs=20)
     return {"health_ok": h.get("ok"), "total": h.get("total"),
             "kinds": h.get("kinds"), "duplicates": h.get("duplicates"),
@@ -1655,7 +1658,7 @@ def _run_deliver_skill(state, ws, ctx, call):
     if lang:
         try:
             for m in core.search("", tag="lang:" + lang, limit=200):
-                if m.get("kind") == "subs" and m["id"] not in ids:
+                if m.get("kind") == "docs" and "type:subs" in (m.get("tags") or "") and m["id"] not in ids:
                     ids.append(m["id"])
         except Exception:                         # noqa: BLE001
             pass
@@ -1789,7 +1792,7 @@ finish 的 args 为 {"summary":"中文总结","ids":["本任务检索结果中�
    search_materials 0 命中时会自动做同义词扩展、再放宽为浏览模式(fallback:"browse");拿到浏览结果请自行筛选相关条目,不要当作精确匹配,也不要反复用同一长句重试。
 3. 库巡检/失效引用/无封面盘点用 maintain(确定性,零幻觉);补封面细节用 list_missing_covers;job 资产用 job_checkup。
 4. 找片段/裁剪设计:先 get_material(一次)→related(children)→get_shots;用 scenes[].start/end 给裁剪区间后 finish。
-   仅用户要导出文件时才搜 role:clip。silent/audio 是声画组件不是剪辑切片。
+   仅用户要导出文件时才搜 role:clip。静音画面(has_audio:0)/音频 是声画组件不是剪辑切片。
 5. 每完成一条待办就在 mark_done 里列出其 id;全部完成后必须 finish。
 6. 写操作默认不可用;若工具表中没有写工具,不要尝试写入。
    有 update_tags 时为**合并语义**(只增不删;job:/role:/type: 等系统面标签永不动);
@@ -1807,7 +1810,7 @@ finish 的 args 为 {"summary":"中文总结","ids":["本任务检索结果中�
 
 
 _IMAGE_ATTACH_RE = re.compile(
-    r"id=([0-9a-f]{12})\s+kind=(images|anim)\b", re.I)
+    r"id=([0-9a-f]{12})\s+kind=(images)\b", re.I)
 _JOB_ATTACH_RE = re.compile(r"job[:：\s]+([A-Za-z0-9_\-]{4,})", re.I)
 
 
@@ -2079,7 +2082,7 @@ def _match_named_skill_on(t):
 
 def _named_skill_todos(skill):
     labels = {
-        "covers": ["列出无封面(silent 优先)", "汇总"],
+        "covers": ["列出无封面(videos 含静音优先)", "汇总"],
         "dupes": ["全库近重复报告", "汇总"],
         "maintain": ["确定性巡检", "汇总"],
         "image": ["以图搜图", "汇总"],
@@ -2160,14 +2163,14 @@ def _run_named_skill(state, ws, tools, ctx, skill):
         return obs
 
     if skill == "covers":
-        silent = call("list_missing_covers", {"kind": "silent", "limit": 20}, 1)
-        videos = call("list_missing_covers", {"kind": "videos", "limit": 20}, 1)
-        srows = silent if isinstance(silent, list) else []
-        vrows = videos if isinstance(videos, list) else []
-        lines = ["[Skill A 缺封面] silent %d · videos %d" % (len(srows), len(vrows))]
-        lines += _fmt_rows(srows + vrows)
-        if not srows and not vrows:
-            lines.append("当前没有缺封面的 silent/videos。")
+        vids = call("list_missing_covers", {"kind": "videos", "limit": 40}, 1)
+        vrows = vids if isinstance(vids, list) else []
+        srows = [x for x in vrows if "has_audio:0" in (x.get("tags") or "")]
+        lines = ["[Skill A 缺封面] videos(含静音) %d · 其中静音 %d"
+                 % (len(vrows), len(srows))]
+        lines += _fmt_rows(vrows)
+        if not vrows:
+            lines.append("当前没有缺封面的 videos。")
         else:
             lines.append("补封面需显式确认后再 auto_process,本次只盘点。")
         return "\n".join(lines)

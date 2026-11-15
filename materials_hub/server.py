@@ -17,8 +17,8 @@ import obs                      # 可观测:结构化日志 + 指标埋点(§8 G
 
 from core import (
     init_hub, HUB, MATERIALS, get_material, all_materials, search, add_favorite, remove_favorite,
-    count_materials, ingest_file, ingest_dir, scan_materials,
-    update_description, remove_material, duplicates, sanitize_name,
+    count_materials, ingest_file, ingest_dir, scan_materials, hub_generation,
+    update_description, update_tags, remove_material, duplicates, sanitize_name,
     distinct_tags, tags_for_ui, make_thumb, thumb_path, thumbs_status, purge_thumbs,
     missing_thumbnail_ids, thumb_failure_reason, health, broken_externals,
     prune_broken_externals, external_stats,     build_embeddings, embed_status, chat_models,
@@ -26,7 +26,10 @@ from core import (
     auto_process_all, pending_processing, pending_map,
     split_all_videos_to_silent, split_video_to_silent_and_audio,
     reclassify_video_audio_kinds, apply_media_facet_tags, link_relation_parents,
-    merge_material_tags, is_system_facet_tag,
+    migrate_legacy_kinds, kind_subfacets,
+    merge_material_tags, is_system_facet_tag, set_material_classify,
+    leave_collection, rename_album, dissolve_collection, materials_with_tag,
+    register_album, listed_albums,
     read_run_record, read_understand_record, set_reviewed, distribution_readiness,
     deliver_package,
 )
@@ -35,6 +38,7 @@ from core import (
     TOPICS, TOPICS_EN, USAGES, USAGES_EN, ALL_FORMS, form_group, FORM_SUBGROUP_LABELS, FORM_SUBGROUP_LABELS_EN, FORM_OPTIONS, FORM_OPTIONS_EN, FORM_DESCENDANTS, TOPIC_TAXONOMY, TOPIC_GROUP_EN, TOPIC_DESCENDANTS,
 )
 from gateway import proxy_target, forward as gateway_forward
+import file_preview as _pv
 
 # 端口由 pm2 的 VITUAL_HUB_PORT 注入(见 ecosystem.config.cjs);默认 3402 为 Vitual 专属段。
 # 避开 FunUnion(3000/8000-8005)、admin(3001)、MineTools(5180/8015)、vitual-api(8901)。
@@ -69,12 +73,41 @@ def _safe_resolve(base, rel):
         return target
     return None
 
+
+def _material_path(mid):
+    """按索引找真实文件;内部路径防 ../ 穿越,外部引用必须在允许根内。
+    返回 (fp, material, error_code),error_code 为 None 表示成功。"""
+    m = get_material(mid)
+    if not m:
+        return None, None, 404
+    if m.get("location") == "external":
+        fp = m.get("external_path") or ""
+        if not fp or not external_path_allowed(fp):
+            return None, m, 403
+    else:
+        fp = _safe_resolve(HUB, m.get("rel_path") or "")
+        if not fp:
+            return None, m, 403
+    if not os.path.isfile(fp):
+        return None, m, 404
+    return fp, m, None
+
+
+def _file_response(fp, dest=""):
+    """按扩展名白名单给出安全响应头(见 file_preview.py 的安全说明)。"""
+    ext = os.path.splitext(fp)[1]
+    return _pv.response_headers(fp, ext, dest)
+
+
 # 批量生成封面的后台任务状态(抽帧耗时,放后台线程 + 前端轮询进度)
 _THUMB_JOB = {"running": False, "total": 0, "done": 0, "made": 0, "error": ""}
 # 语义索引构建任务状态(同样放后台,避免长请求把浏览器挂住)
 _EMBED_JOB = {"running": False, "total": 0, "done": 0, "embedded": 0, "error": ""}
 # Deep Agent 任务状态(7B 本地模型一次任务要跑几分钟,必须后台线程+轮询)
 _AGENT_JOB = {"running": False, "task": "", "task_id": "", "status": "", "error": ""}
+# /api/stats 聚合(全表扫描 + 重复统计 + ollama 探测)很重,面板又周期性轮询 → 加 TTL 缓存。
+# 代际(HUB_GENERATION)变化时立即失效,保证删/增后统计即时正确,而非陈旧至多 TTL 秒。
+_STATS_CACHE = {"gen": -1, "ts": 0.0, "ttl": 15.0, "data": None}
 
 # 上传/入库/扫描后自动处理队列(事件驱动,免去手动点按钮)
 _AUTOPROC_JOB = {"running": False, "processed": 0, "error": "", "kicked_by": ""}
@@ -98,7 +131,7 @@ def enqueue_autoproc(autotag=False, kicked_by=""):
         return
     if not any(pending_processing(m["id"]).values()
                for m in all_materials()
-               if m.get("kind") in ("videos", "silent", "images")):
+               if m.get("kind") in ("videos", "images")):
         return
     _AUTOPROC_JOB["running"] = True
     _AUTOPROC_JOB["error"] = ""
@@ -205,6 +238,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        # 所有响应禁止 MIME 嗅探:JSON/纯文本不会被浏览器当成 HTML 执行(MDN / ASVS 5.0)
+        self.send_header("X-Content-Type-Options", "nosniff")
         _cors_headers(self)
         self.end_headers()
         self.wfile.write(body)
@@ -229,14 +264,27 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype or mimetypes.guess_type(fp)[0] or "application/octet-stream")
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Cache-Control", "no-cache")
         _cors_headers(self)
         self.end_headers()
         self.wfile.write(data)
 
-    def _serve_file(self, fp, ctype, head_only=False):
-        """发送文件,支持 HTTP Range(大视频可拖拽/边下边播);流式写出避免整文件进内存。"""
+    def _serve_file(self, fp, ctype, head_only=False, disposition=None, csp=None):
+        """发送文件,支持 HTTP Range(大视频可拖拽/边下边播);流式写出避免整文件进内存。
+        带 ETag + 304(文件未变时浏览器复用缓存,省去重复大文件传输)。
+        安全头: nosniff / CSP sandbox / Content-Disposition 见 file_preview.response_headers。"""
         size = os.path.getsize(fp)
+        etag = '"%d-%d"' % (size, int(os.path.getmtime(fp)))
+        # 未带 Range 且 ETag 命中 → 304,直接复用浏览器缓存(省大文件重传)
+        if not self.headers.get("Range") and self.headers.get("If-None-Match") == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "private, max-age=3600")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            _cors_headers(self)
+            self.end_headers()
+            return
         start, end, code = 0, size - 1, 200
         rng = self.headers.get("Range", "")
         if rng.startswith("bytes="):
@@ -256,6 +304,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_response(416)
                     self.send_header("Content-Range", "bytes */%d" % size)
                     self.send_header("Content-Length", "0")
+                    self.send_header("X-Content-Type-Options", "nosniff")
                     _cors_headers(self)
                     self.end_headers()
                     return
@@ -265,10 +314,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Content-Length", str(length))
+        self.send_header("ETag", etag)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        if disposition:
+            self.send_header("Content-Disposition", disposition)
+        if csp:
+            self.send_header("Content-Security-Policy", csp)
         if code == 206:
             self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
-        # 媒体短缓存:利于拖拽 seek 复用已缓冲段,又避免永久脏缓存
-        self.send_header("Cache-Control", "public, max-age=3600")
+        # 素材可能含凭据/私有内容:只允许浏览器私有缓存,禁止共享代理缓存
+        self.send_header("Cache-Control", "private, max-age=3600")
         _cors_headers(self)
         self.end_headers()
         if head_only:
@@ -298,36 +354,12 @@ class Handler(BaseHTTPRequestHandler):
         p = u.path
         if p.startswith("/api/file/"):
             mid = p[len("/api/file/"):]
-            m = get_material(mid)
-            if not m:
-                return self._send(404, b"not found")
-            if m.get("location") == "external":
-                fp = m["external_path"]
-                if not external_path_allowed(fp):
-                    return self._send(403, b"forbidden")
-            else:
-                fp = _safe_resolve(HUB, m["rel_path"])
-                if not fp:
-                    return self._send(403, b"forbidden")
-            if not os.path.exists(fp):
-                return self._send(404, b"missing")
-            mt = mimetypes.guess_type(fp)[0]
-            ctype = {
-                "images": mt or "image/*",
-                "videos": mt or "video/*",
-                "silent": mt or "video/*",
-                "anim": mt or "image/gif",
-                "audio": mt or "audio/*",
-                "font": mt or "font/ttf",
-                "model3d": mt or "model/gltf-binary",
-                "raw": mt or "application/octet-stream",
-                "project": mt or "application/octet-stream",
-                "vector": mt or "application/octet-stream",
-                "docs": "application/octet-stream",
-                "subs": "application/octet-stream",
-                "other": "application/octet-stream",
-            }.get(m["kind"], mt or "application/octet-stream")
-            return self._serve_file(fp, ctype, head_only=True)
+            fp, _, err = _material_path(mid)
+            if err:
+                return self._send(err, b"forbidden" if err == 403 else b"not found")
+            ctype, disp, csp = _file_response(fp, self.headers.get("Sec-Fetch-Dest", ""))
+            return self._serve_file(fp, ctype, head_only=True,
+                                    disposition=disp, csp=csp)
         if p.startswith("/api/thumb/"):
             mid = p[len("/api/thumb/"):]
             fp = thumb_path(mid)
@@ -377,13 +409,17 @@ class Handler(BaseHTTPRequestHandler):
             fav_only = q.get("favorites_only", [""])[0] in ("1", "true", "on")
             limit = int(lim) if lim.isdigit() else None   # 不传 limit = 不分页
             offset = int(off) if off.isdigit() else 0
+            # 受控词表分面(内容形式/题材/用途):服务端在分页前过滤,大库不再拉全表
+            form = q.get("form", [""])[0]
+            topic = q.get("topic", [""])[0]
+            usage = q.get("usage", [""])[0]
             rows = search(kw, kind, tag, limit=limit, offset=offset, mode=mode,
                           sort=sort if sort in ("newest", "oldest", "name", "size") else "",
-                          favorites_only=fav_only)
+                          favorites_only=fav_only, form=form, topic=topic, usage=usage)
             for m in rows:
                 # 标注封面是否已就绪(视频抽帧 / 图片·动画 PIL 缩略图),
                 # 前端据此(m.thumb)决定请求 /api/thumb 还是原文件,图片即走小图加载。
-                if m["kind"] in ("videos", "silent", "images", "anim"):
+                if m["kind"] in ("videos", "images"):
                     tp = thumb_path(m["id"])
                     m["thumb"] = os.path.exists(tp) and os.path.getsize(tp) > 0
                 # 外部引用标注原文件是否还在(缺失则卡片提示,不再发起必然 404 的请求)
@@ -398,12 +434,20 @@ class Handler(BaseHTTPRequestHandler):
                                                          q.get("kind", [""])[0],
                                                          q.get("tag", [""])[0],
                                                          q.get("mode", ["auto"])[0],
-                                                         favorites_only=fav_only)})
+                                                         favorites_only=fav_only,
+                                                         form=q.get("form", [""])[0],
+                                                         topic=q.get("topic", [""])[0],
+                                                         usage=q.get("usage", [""])[0])})
         if p == "/api/stats":
+            _now = time.time()
+            if (_STATS_CACHE["data"] is not None
+                    and _STATS_CACHE["gen"] == hub_generation()
+                    and _now - _STATS_CACHE["ts"] < _STATS_CACHE["ttl"]):
+                return self._json(_STATS_CACHE["data"])
             ms = all_materials()
-            # 始终返回完整 KINDS 分类体系(含 0 计数):让前端筛选器展示全部
-            # 素材分类(raw/project/vector/model3d/font 等),而非仅数据里出现的类。
-            kinds = {k: 0 for k in list(KINDS) + ["other"]}
+            # 主路径 kind 常显(即使 0);矢量/三维/工程/字体/其他仅有库存时回传,避免空 tab。
+            _CORE_KINDS = ("images", "videos", "audio", "docs")
+            kinds = {k: 0 for k in _CORE_KINDS}
             # 内容形式分布:按 leaf id 计数(深层才有意义);前端按 form_descendants 聚合到上层。
             forms = {}
             topics = {}
@@ -423,16 +467,29 @@ class Handler(BaseHTTPRequestHandler):
                     u = u.strip()
                     if u:
                         usages[u] = usages.get(u, 0) + 1
-            # 自动处理链待处理数(videos/silent/images 中还有缺项的素材条数)
-            pending = sum(1 for m in ms
-                          if m.get("kind") in ("videos", "silent", "images")
-                          and any(pending_processing(m["id"]).values()))
-            return self._json({"total": len(ms), "dupes": len(duplicates()), "kinds": kinds,
+            # 冷门 kind 计数为 0 时不回传(主路径除外)
+            kinds = {k: n for k, n in kinds.items() if n > 0 or k in _CORE_KINDS}
+            # 自动处理链待处理数。复用已载入的 ms:旧实现每条再 get_material 一次(N+1),
+            # 大库下等于 N 次额外建连+查询;现走 pending_map(ms) 单次内存扫描。
+            pending = len(pending_map(ms))
+            # 文档子分面:字幕/翻译/笔记/数据常显;办公类仅 n>0
+            _CORE_DOC_SF = {"type:subs", "type:translate", "type:text", "type:data"}
+            subfacets = kind_subfacets(ms)
+            if "docs" in subfacets:
+                subfacets["docs"] = {
+                    t: n for t, n in subfacets["docs"].items()
+                    if n > 0 or t in _CORE_DOC_SF
+                }
+            _STATS_CACHE["data"] = {"total": len(ms), "dupes": len(duplicates()), "kinds": kinds,
                                "forms": forms, "topics": topics, "usages": usages,
                                "thumbs": thumbs_status(), "thumb_job": dict(_THUMB_JOB),
-                               "external": external_stats(),
+                               "external": external_stats(ms),
                                "embed": {**embed_status(), "job": dict(_EMBED_JOB)},
-                               "auto": {"pending": pending}})
+                               "subfacets": subfacets,
+                               "auto": {"pending": pending}}
+            _STATS_CACHE["gen"] = hub_generation()
+            _STATS_CACHE["ts"] = _now
+            return self._json(_STATS_CACHE["data"])
 
         if p == "/api/taxonomy":
             # 内容形式多层级树 + 题材/用途标签,供前端筛选器与上传表单渲染(单一真相源)。
@@ -604,38 +661,32 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
+        if p.startswith("/api/preview/"):
+            # 内容预览:只给应用内 fetch(),拒绝地址栏直接导航(ASVS 5.0 V3.2.1)。
+            # 浏览器不带 Fetch Metadata 时(curl/老浏览器)仍允许,由 nosniff + JSON MIME 兜底。
+            dest = self.headers.get("Sec-Fetch-Dest", "")
+            if dest == "document" and self.headers.get("Sec-Fetch-Mode", "") == "navigate":
+                return self._send(403, b"direct navigation forbidden")
+            mid = p[len("/api/preview/"):]
+            fp, m, err = _material_path(mid)
+            if err:
+                return self._send(err, b"forbidden" if err == 403 else b"not found")
+            qs = urllib.parse.parse_qs(u.query)
+            try:
+                off = max(0, int(qs.get("offset", ["0"])[0]))
+                lim = max(256, int(qs.get("limit", [str(_pv.MAX_CHARS)])[0]))
+            except ValueError:
+                off, lim = 0, _pv.MAX_CHARS
+            return self._json(_pv.build_preview(
+                fp, ext=m.get("ext") or "", kind=m.get("kind") or "",
+                name=m.get("name") or "", offset=off, limit=lim))
         if p.startswith("/api/file/"):
             mid = p[len("/api/file/"):]
-            m = get_material(mid)
-            if not m:
-                return self._send(404, b"not found")
-            if m.get("location") == "external":
-                fp = m["external_path"]
-                if not external_path_allowed(fp):
-                    return self._send(403, b"forbidden")
-            else:
-                fp = _safe_resolve(HUB, m["rel_path"])
-                if not fp:
-                    return self._send(403, b"forbidden")
-            if not os.path.exists(fp):
-                return self._send(404, b"missing")
-            mt = mimetypes.guess_type(fp)[0]
-            ctype = {
-                "images": mt or "image/*",
-                "videos": mt or "video/*",
-                "silent": mt or "video/*",
-                "anim": mt or "image/gif",
-                "audio": mt or "audio/*",
-                "font": mt or "font/ttf",
-                "model3d": mt or "model/gltf-binary",
-                "raw": mt or "application/octet-stream",
-                "project": mt or "application/octet-stream",
-                "vector": mt or "application/octet-stream",
-                "docs": "application/octet-stream",
-                "subs": "application/octet-stream",
-                "other": "application/octet-stream",
-            }.get(m["kind"], mt or "application/octet-stream")
-            return self._serve_file(fp, ctype)
+            fp, _, err = _material_path(mid)
+            if err:
+                return self._send(err, b"forbidden" if err == 403 else b"not found")
+            ctype, disp, csp = _file_response(fp, self.headers.get("Sec-Fetch-Dest", ""))
+            return self._serve_file(fp, ctype, disposition=disp, csp=csp)
         return self._send(404, b"not found")
 
     def do_POST(self):
@@ -724,6 +775,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(r)
         if p == "/api/reclassify-media":
             return self._json({
+                "migrate": migrate_legacy_kinds(),
                 "reclassify": reclassify_video_audio_kinds(),
                 "facets": apply_media_facet_tags(),
                 "link_parents": link_relation_parents(),
@@ -810,7 +862,7 @@ class Handler(BaseHTTPRequestHandler):
                 if job_tag:
                     subs = search("", tag="%s,lang:%s" % (job_tag, lang), limit=20)
                     for s in subs:
-                        if s.get("kind") == "subs" and s["id"] not in ids:
+                        if m.get("kind") == "docs" and "type:subs" in (m.get("tags") or "") and s["id"] not in ids:
                             ids.append(s["id"])
             res = deliver_package(
                 ids=ids, confirm=bool(body.get("confirm")),
@@ -914,6 +966,114 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/remove":
             remove_material(body.get("id"))
             return self._json({"ok": True})
+        if p == "/api/bulk":
+            # DAM 批量操作:加入合集(add_tags)/移出标签/收藏/删除/移动(改 form)。
+            # 统一入口避免前端 N 次串行;单条失败不阻断其余,errors 列表回显。
+            action = str(body.get("action") or "").strip().lower()
+            ids = [str(x).strip() for x in (body.get("ids") or []) if str(x).strip()]
+            if not ids:
+                return self._json({"ok": False, "error": "ids required"}, 400)
+            if action not in ("favorite", "unfavorite", "remove", "add_tags",
+                              "remove_tags", "set_form", "join_coll", "leave_coll"):
+                return self._json({"ok": False, "error": "unknown action"}, 400)
+            ok_n, errors = 0, []
+            for mid in ids:
+                try:
+                    if action == "favorite":
+                        if not get_material(mid):
+                            raise ValueError("not found")
+                        add_favorite(mid)
+                    elif action == "unfavorite":
+                        if not get_material(mid):
+                            raise ValueError("not found")
+                        remove_favorite(mid)
+                    elif action == "remove":
+                        remove_material(mid)
+                    elif action == "add_tags":
+                        r = merge_material_tags(mid, tags=str(body.get("tags") or ""))
+                        if not r.get("ok"):
+                            raise ValueError(r.get("error") or "add_tags failed")
+                    elif action == "remove_tags":
+                        r = merge_material_tags(
+                            mid, remove=str(body.get("tags") or body.get("remove") or ""))
+                        if not r.get("ok"):
+                            raise ValueError(r.get("error") or "remove_tags failed")
+                    elif action == "set_form":
+                        r = set_material_classify(mid, form=str(body.get("form") or ""))
+                        if not r.get("ok"):
+                            raise ValueError(r.get("error") or "set_form failed")
+                    elif action == "join_coll":
+                        # 加入合集:album: 走普通合并;job: 是流水线视频合集,
+                        # merge 护栏禁止删旧 job:,故这里显式改写 job 归属(策展意图)。
+                        coll = str(body.get("tags") or "").strip()
+                        if not coll:
+                            raise ValueError("tags required")
+                        if coll.startswith("album:"):
+                            register_album(coll)
+                            r = merge_material_tags(mid, tags=coll)
+                            if not r.get("ok"):
+                                raise ValueError(r.get("error") or "join album failed")
+                        elif coll.startswith("job:"):
+                            m = get_material(mid)
+                            if not m:
+                                raise ValueError("not found")
+                            cur = [t.strip() for t in (m.get("tags") or "").split(",")
+                                   if t.strip() and not t.strip().startswith("job:")]
+                            if coll not in cur:
+                                cur.append(coll)
+                            r = update_tags(mid, ",".join(cur), purge_ai_tags=False)
+                            if not r.get("ok"):
+                                raise ValueError(r.get("error") or "join job failed")
+                        else:
+                            raise ValueError("tags must be album: or job:")
+                    elif action == "leave_coll":
+                        r = leave_collection(mid, str(body.get("tags") or ""))
+                        if not r.get("ok"):
+                            raise ValueError(r.get("error") or "leave_coll failed")
+                    ok_n += 1
+                except Exception as e:
+                    errors.append({"id": mid, "error": str(e)})
+            return self._json({
+                "ok": ok_n > 0 and not errors,
+                "done": ok_n,
+                "total": len(ids),
+                "errors": errors[:20],
+                "action": action,
+            })
+        if p == "/api/coll":
+            # 合集 CRUD(不删文件):create/list/rename/delete(解散)/members。
+            # 空合集靠 albums.json 登记;解散只摘标签,绝不删素材文件。
+            action = str(body.get("action") or "").strip().lower()
+            if action == "list":
+                return self._json({"ok": True, "albums": listed_albums()})
+            if action == "create":
+                name = str(body.get("name") or "").strip().replace(",", " ")[:40]
+                if not name:
+                    return self._json({"ok": False, "error": "name required"}, 400)
+                tag = register_album("album:" + name)
+                if not tag:
+                    return self._json({"ok": False, "error": "invalid album name"}, 400)
+                return self._json({
+                    "ok": True, "tag": tag, "title": name,
+                    "count": len(materials_with_tag(tag)),
+                })
+            if action == "rename":
+                r = rename_album(body.get("from") or body.get("tag"),
+                                 body.get("to") or ("album:" + str(body.get("name") or "").strip()))
+                code = 200 if r.get("ok") else 400
+                return self._json(r, code)
+            if action in ("delete", "dissolve"):
+                r = dissolve_collection(body.get("tag") or body.get("tags") or "")
+                code = 200 if r.get("ok") else 400
+                return self._json(r, code)
+            if action == "members":
+                tag = str(body.get("tag") or body.get("tags") or "").strip()
+                rows = materials_with_tag(tag)
+                return self._json({
+                    "ok": True, "tag": tag, "total": len(rows),
+                    "ids": [m["id"] for m in rows],
+                })
+            return self._json({"ok": False, "error": "unknown action"}, 400)
         if p == "/api/prune":
             # 清理失效外部引用的索引(源文件已消失);只删索引,不动磁盘
             bad = prune_broken_externals()

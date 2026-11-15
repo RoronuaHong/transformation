@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -17,6 +19,8 @@ import urllib.request
 import wave
 from collections import Counter
 from pathlib import Path
+
+from translation_integrity import is_hard_pollution, sanitize_hotwords
 
 DEFAULT_RULE_FIXES: list[tuple[str, str]] = [
     ("跑路了 油辣 跑路了", "跑路了兄弟 跑路了"),
@@ -59,6 +63,11 @@ DEFAULT_RULE_FIXES: list[tuple[str, str]] = [
     ("大大提升企业指数", "大大提升幸福指数"),
     ("效率直超留学线", "效率直超流水线"),
     ("是为了好宰", "是为了好摘"),
+    # martial-arts / short-drama near-misses
+    ("绝无耳心", "绝无二心"),
+    ("绝无二新", "绝无二心"),
+    ("微风八面", "威风八面"),
+    ("所向批评", "所向披靡"),
     ("人尽其难", "人尽其才"),
     ("而经常切朋友的辣椒", "而经常切到手的辣椒"),
 ]
@@ -91,6 +100,12 @@ BAD_TOKENS = (
     "不穿位",
     "离结",
     "岗位",
+    # Bilibili / YouTube outro & hard-sub credit hallucinations
+    "明镜与点点",
+    "请不吝点赞",
+    "中文字幕志愿者",
+    "词曲",
+    "订阅订阅",
 )
 
 REPEAT_MIN = 3  # same normalized text ≥ N → chorus / meme → re-listen
@@ -128,6 +143,13 @@ def nearest_text(segs: list[dict], start: float, end: float) -> str:
 
 def pick_text(a: str, b: str, c: str) -> str:
     a, b, c = a.strip(), b.strip(), c.strip()
+    # 热词污染（BV id / try: 占位标题）不得进入 A/B/C 投票，也不能作为 LLM 校对参考。
+    if is_hard_pollution(b):
+        b = ""
+    if is_hard_pollution(c):
+        c = ""
+    if is_hard_pollution(a):
+        return rule_fix(c or b or "")
     if not a:
         return rule_fix(c or b)
     cand = a
@@ -154,12 +176,13 @@ def fill_c_gaps(pass_a: list[dict], pass_c: list[dict], merged: list[dict]) -> l
         ov = 0.0
         for a in pass_a:
             ov = max(ov, overlap(s["start"], s["end"], a["start"], a["end"]))
-        if ov / dur < 0.25 and (s.get("text") or "").strip():
+        text = rule_fix(s.get("text") or "")
+        if ov / dur < 0.25 and text and not any(x in text for x in BAD_TOKENS):
             inserts.append(
                 {
                     "start": float(s["start"]),
                     "end": float(s["end"]),
-                    "text": rule_fix(s["text"]),
+                    "text": text,
                 }
             )
     if not inserts:
@@ -190,6 +213,10 @@ def merge_passes(
         a = s["text"]
         b = nearest_text(pass_b, s["start"], s["end"])
         c = nearest_text(pass_c, s["start"], s["end"])
+        if is_hard_pollution(b):
+            b = ""
+        if is_hard_pollution(c):
+            c = ""
         text = pick_text(a, b, c)
         if not text:
             continue
@@ -218,6 +245,8 @@ def mark_suspicious(
     out = []
     for s in segs:
         reasons: list[str] = []
+        if is_hard_pollution(s.get("text")):
+            reasons.append("hard_pollution")
         key = norm_key(s["text"])
         a = s.get("a") or nearest_text(pass_a, s["start"], s["end"])
         b = s.get("b") or nearest_text(pass_b, s["start"], s["end"])
@@ -328,6 +357,15 @@ def apply_relisten(
             if len(norm_key(new_text)) > max(len(norm_key(old)) * 2, len(norm_key(old)) + 8):
                 print(f"  [relisten] reject long {new_text!r} (keep {old!r})")
                 continue
+            # Reject outro / credit / watermark hallucinations
+            if any(x in new_text for x in BAD_TOKENS) and not any(
+                x in old for x in BAD_TOKENS
+            ):
+                print(f"  [relisten] reject bad-token {new_text!r} (keep {old!r})")
+                continue
+            if is_hard_pollution(new_text):
+                print(f"  [relisten] reject id/placeholder {new_text!r} (keep {old!r})")
+                continue
             if norm_key(new_text) == norm_key(old):
                 print(f"  [relisten] unchanged {old!r}")
                 continue
@@ -341,6 +379,31 @@ def apply_relisten(
     return segs
 
 
+def refine_bounds_from_words(seg) -> tuple[float, float]:
+    """用 word 级时间戳裁掉段级 VAD 静音填充（speech_pad_ms=400 造成早/迟）。
+
+    返回 (start, end)：取段内首/末词边界，并夹紧在段边界附近（word 偶发越界）。
+    无词时间戳时回退段级时间。这是 WhisperX 思路的轻量落地：段级时间戳本身
+    不准（首尾含静音），字级对齐才能精确卡住"出现/消失"边界。
+    """
+    seg_start = float(getattr(seg, "start", 0) or 0)
+    seg_end = float(getattr(seg, "end", 0) or 0)
+    words = getattr(seg, "words", None)
+    if not words:
+        return seg_start, seg_end
+    ws = [float(w.start) for w in words if getattr(w, "start", None) is not None]
+    we = [float(w.end) for w in words if getattr(w, "end", None) is not None]
+    if not ws or not we:
+        return seg_start, seg_end
+    start = min(ws)
+    end = max(we)
+    start = max(seg_start - 0.05, min(start, seg_end))
+    end = min(seg_end + 0.05, max(end, seg_start))
+    if end <= start:
+        return seg_start, seg_end
+    return start, end
+
+
 def _run_one_pass(
     model, wav: Path, name: str, language: str | None, **kwargs
 ) -> tuple[list[dict], str]:
@@ -348,16 +411,19 @@ def _run_one_pass(
     kw = dict(kwargs)
     if language:
         kw["language"] = language
+    # word 级时间戳：精确卡住语音边界，去掉段级 VAD 静音填充造成的早/迟。
+    kw.setdefault("word_timestamps", True)
     segs_iter, info = model.transcribe(str(wav), **kw)
     out: list[dict] = []
     for s in segs_iter:
         text = (s.text or "").strip()
         if not text:
             continue
+        start, end = refine_bounds_from_words(s)
         out.append(
             {
-                "start": round(float(s.start), 3),
-                "end": round(float(s.end), 3),
+                "start": round(start, 3),
+                "end": round(end, 3),
                 "text": text,
                 "avg_logprob": float(getattr(s, "avg_logprob", 0.0) or 0.0),
                 "no_speech_prob": float(getattr(s, "no_speech_prob", 0.0) or 0.0),
@@ -386,8 +452,8 @@ VAD_PARAMS_DEFAULT = {
 _ASR_MODEL_LOCK = threading.Lock()
 
 
-def _available_ram_gb() -> float | None:
-    """Best-effort available physical RAM in GB (Windows via ctypes); None if undetected."""
+def _memory_snapshot() -> dict[str, float] | None:
+    """Windows 内存快照(GB)，明确区分物理 RAM 与提交量/页面文件三种口径。"""
     try:
         import ctypes
         from ctypes import wintypes
@@ -407,26 +473,100 @@ def _available_ram_gb() -> float | None:
 
         st = _MEMORYSTATUSEX()
         st.dwLength = ctypes.sizeof(st)
-        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
-            return st.ullAvailPhys / (1024 ** 3)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+            return None
+        gb = 1024 ** 3
+        return {
+            "ram_total": st.ullTotalPhys / gb,
+            "ram_avail": st.ullAvailPhys / gb,
+            # ull*PageFile 是「提交上限 / 剩余可提交量」，不是页面文件使用量；
+            # 页面文件大小 ≈ 提交上限 - 物理内存。
+            "commit_limit": st.ullTotalPageFile / gb,
+            "commit_avail": st.ullAvailPageFile / gb,
+            "pagefile_size": max(0.0, (st.ullTotalPageFile - st.ullTotalPhys) / gb),
+        }
     except Exception:
         return None
-    return None
 
 
-def _log_asr_memory(model_id: str) -> None:
-    """Log available RAM before loading a Whisper model; warn if too low for it."""
-    avail = _available_ram_gb()
-    if avail is None:
+def _available_ram_gb() -> float | None:
+    """Best-effort available physical RAM in GB; None if undetected."""
+    snap = _memory_snapshot()
+    return snap["ram_avail"] if snap else None
+
+
+def _vram_free_gb() -> float | None:
+    """Best-effort free VRAM via nvidia-smi; None when no NVIDIA GPU / CLI."""
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+        )
+        if r.returncode != 0 or not (r.stdout or "").strip():
+            return None
+        return int(r.stdout.strip().splitlines()[0].strip()) / 1024
+    except Exception:
+        return None
+
+
+def _log_asr_memory(model_id: str, device: str | None = None) -> None:
+    """加载前打印三种独立口径的内存，避免把物理 RAM / 提交量 / 显存混为一谈。"""
+    snap = _memory_snapshot()
+    if snap is None:
         return
-    # large-v3 in int8 needs ~10GB; flag below a safety margin.
-    warn_gb = 9.0
-    print(f"[whisper-mp] available RAM={avail:.1f}GB before loading {model_id}")
-    if avail < warn_gb:
+    avail = snap["ram_avail"]
+    # 日志保持 ASCII：Windows 控制台可能是 GBK，中文/特殊符号会显示成乱码。
+    print(
+        f"[whisper-mp] memory: RAM avail={avail:.1f}/{snap['ram_total']:.1f}GB | "
+        f"commit avail={snap['commit_avail']:.1f}/{snap['commit_limit']:.1f}GB | "
+        f"pagefile={snap['pagefile_size']:.1f}GB"
+    )
+    if device == "cuda":
+        vram = _vram_free_gb()
+        if vram is not None:
+            print(
+                f"[whisper-mp] memory: VRAM free={vram:.1f}GB "
+                "(separate from system RAM)"
+            )
+    if avail < LOW_RAM_GB:
         print(
             f"[whisper-mp] WARNING: low RAM ({avail:.1f}GB) for {model_id}; "
-            f"risk of OOM / mkl_malloc crash. Free memory or use a smaller model."
+            f"MKL may fail mkl_malloc; DNNL backend is used at low RAM."
         )
+
+
+# 低于该可用物理内存(GB)时把 ctranslate2 从 MKL 切到 DNNL；同时是告警线。
+# 实测依据(ctranslate2 4.8.1, CT2_VERBOSE 可观测后端, 2026-11):
+#   - RAM 6.4GB + commit 6.3GB (2026-11-05 现场): MKL mkl_malloc 进程级失败
+#   - RAM 8GB  + commit 宽裕   (2026-11-14): MKL 加载 large-v3 成功(avail 8→6.15GB)
+#   - RAM 10GB / 15.5GB + commit 宽裕: MKL 均成功
+# 故最坏失败点约 6.5GB 物理 RAM(且 commit 也紧张时)；9GB 是覆盖最坏情况的安全余量，
+# 不是模型内存需求(large-v3 int8 实测仅占约 1.5GB RAM)。>=9GB 保持 MKL(packed GEMM)性能。
+LOW_RAM_GB = 9.0
+
+
+def ensure_ct2_backend() -> None:
+    """低内存 Windows 上把 ctranslate2 从 MKL 切到 DNNL，避开 mkl_malloc 失败。
+
+    后端在原生扩展初始化时确定，因此必须在 import faster_whisper 之前调用；
+    CT2_USE_MKL=0 使 SGEMM/GEMM_S8 走 DNNL（CT2_VERBOSE=1 可观测）。
+    用户显式设置的 CT2_* / OMP_* 环境变量一律优先，大内存机器保持 MKL 性能。
+    """
+    if os.name != "nt" or "CT2_USE_MKL" in os.environ:
+        return
+    if "ctranslate2" in sys.modules or "faster_whisper" in sys.modules:
+        return
+    avail = _available_ram_gb()
+    if avail is None or avail >= LOW_RAM_GB:
+        return
+    os.environ["CT2_USE_MKL"] = "0"
+    os.environ.setdefault("OMP_NUM_THREADS", "2")
+    os.environ.setdefault("MKL_NUM_THREADS", "2")
+    print(f"[whisper-mp] low RAM ({avail:.1f}GB): MKL -> DNNL backend")
 
 
 def transcribe_multipass(
@@ -440,9 +580,12 @@ def transcribe_multipass(
     relisten: bool = True,
 ) -> tuple[list[dict], dict]:
     """Return (merged segments, raw passes dict)."""
+    ensure_ct2_backend()
     from faster_whisper import WhisperModel
 
-    _log_asr_memory(model_id)
+    # 占位标题 / 视频 ID 不能当词汇种子（会让 B 遍与 relisten 整段吐 BV 号）。
+    hotwords = sanitize_hotwords(hotwords)
+    _log_asr_memory(model_id, device)
     print(f"[whisper-mp] loading {model_id} device={device} compute={compute}")
     os.environ.setdefault("OMP_NUM_THREADS", "4")
     os.environ.setdefault("MKL_NUM_THREADS", "4")
@@ -595,6 +738,11 @@ def llm_correct_segments(
                 print(f"  [correct] #{i} reject long ({len(line)}>{max_len}) keep A")
             line = a
         fixed = rule_fix(line)
+        if is_hard_pollution(fixed):
+            for cand in (a, c, b):
+                if cand and not is_hard_pollution(cand):
+                    fixed = rule_fix(cand)
+                    break
         # Reject over-truncation that drops domain nouns still present in A.
         if a and len(fixed) + 4 < len(a):
             keepers = ("空气炸锅", "蒜皮", "只需", "手套", "月饼", "豆干", "洗勺", "拧结")
@@ -618,6 +766,8 @@ def restore_truncated_from_baseline(
     for s in segs:
         cur = rule_fix(s.get("text") or "")
         a = rule_fix(nearest_text(baseline, float(s["start"]), float(s["end"])))
+        if is_hard_pollution(cur) and not is_hard_pollution(a):
+            cur = a
         na = re.sub(r"\s+", "", a)
         nc = re.sub(r"\s+", "", cur)
         if a and nc and na != nc and na.startswith(nc) and len(na) >= len(nc) + 2:
@@ -635,7 +785,7 @@ def load_hotwords(text: str | None, path: Path | None) -> str | None:
     if path and path.exists():
         parts.append(path.read_text(encoding="utf-8").strip())
     joined = "\n".join(p for p in parts if p)
-    return joined or None
+    return sanitize_hotwords(joined or None)
 
 
 def save_raw(path: Path, raw: dict, meta: dict | None = None) -> None:

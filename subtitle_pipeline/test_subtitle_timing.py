@@ -1,0 +1,116 @@
+"""subtitle_timing 的单元测试：规范化 + 硬字幕区间对齐。"""
+from __future__ import annotations
+
+import subtitle_timing as st
+
+
+def test_normalize_overlap_min_max_dur():
+    cues = [
+        {"start": 0.0, "end": 2.0, "text": "a"},
+        {"start": 1.0, "end": 3.0, "text": "b"},   # 与 a 重叠
+        {"start": 3.0, "end": 3.2, "text": "c"},   # 过短
+        {"start": 5.0, "end": 20.0, "text": "d"},  # 过长
+    ]
+    out = st.normalize_cue_timing(cues)
+    assert len(out) == 4
+    # 重叠收敛：b 起点推到 a 终点之后
+    assert out[1]["start"] >= out[0]["end"] - 1e-6
+    # 单调递增
+    for i in range(1, len(out)):
+        assert out[i]["start"] >= out[i - 1]["start"] - 1e-6
+    # 最小时长（c 被延长到 ~0.8s）
+    assert out[2]["end"] - out[2]["start"] >= 0.79
+    # 最大时长（d 截断到 7s）
+    assert out[3]["end"] - out[3]["start"] <= 7.01
+    assert out[3]["start"] == 5.0
+
+
+def test_normalize_negative_fixed():
+    out = st.normalize_cue_timing([{"start": 1.0, "end": 0.5, "text": "x"}])
+    assert out[0]["end"] > out[0]["start"]
+
+
+def test_normalize_nested_cue_stays_monotonic():
+    """整条嵌套在上一条内时,收敛重叠必须同时后移终点,否则产出倒挂/乱序 SRT。"""
+    out = st.normalize_cue_timing([
+        {"start": 0.0, "end": 6.0, "text": "a"},
+        {"start": 3.0, "end": 4.0, "text": "b"},  # 完全嵌套在 a 内
+        {"start": 5.0, "end": 5.8, "text": "c"},
+    ])
+    starts = [c["start"] for c in out]
+    assert starts == sorted(starts)          # 时间单调递增
+    assert all(c["end"] > c["start"] for c in out)  # 无倒挂
+    # 收敛后 b 保住原时长 1.0s(只推起点会把它压成负时长)
+    assert abs((out[1]["end"] - out[1]["start"]) - 1.0) < 0.02
+
+
+def test_parse_srt_with_position_suffix():
+    """带坐标后缀(X1:/Y1:)的 SRT 时间轴行不得让 parse_srt 崩溃(用枚举行下标)。"""
+    from retime_from_hardsub import parse_srt
+
+    srt = "1\n00:00:01,000 --> 00:00:02,000 X1:1 X2:2 Y1:3 Y2:4\nHello world\n"
+    cues = parse_srt(srt)
+    assert cues == [{"start": 1.0, "end": 2.0, "text": "Hello world"}]
+
+
+def test_align_repeat_text_by_temporal_proximity():
+    # 同一句"我不在意"在片中出现了两次，必须按时间就近匹配，而非有序指针漂移
+    cues = [
+        {"text": "我不在意", "start": 2.6},
+        {"text": "我不在意", "start": 13.6},
+    ]
+    intervals = [
+        {"text": "我不在意", "start": 15.9, "end": 16.8},  # 后一次
+        {"text": "我不在意", "start": 3.7, "end": 4.5},    # 前一次
+    ]
+    intervals.sort(key=lambda x: x["start"])
+    out = st.align_cues_to_intervals(cues, intervals)
+    assert out[0][1] is intervals[0]   # cue@2.6 -> 3.7-4.5
+    assert out[1][1] is intervals[1]   # cue@13.6 -> 15.9-16.8
+
+
+def test_align_unmatched_none():
+    cues = [{"text": "完全不同", "start": 1.0}]
+    intervals = [{"text": "毫无关系", "start": 1.0, "end": 2.0}]
+    out = st.align_cues_to_intervals(cues, intervals)
+    assert out[0][1] is None
+
+
+def test_apply_interval_timing():
+    cues = [{"text": "a", "start": 0.0, "end": 9.0}]
+    aligned = [(0, {"text": "a", "start": 1.3, "end": 4.3})]
+    out = st.apply_interval_timing(cues, aligned)
+    assert out[0]["start"] == 1.3 and out[0]["end"] == 4.3
+    # 未命中保留原时间
+    aligned2 = [(0, None)]
+    out2 = st.apply_interval_timing(cues, aligned2)
+    assert out2[0]["start"] == 0.0 and out2[0]["end"] == 9.0
+
+
+def test_norm_strips_punct_for_similarity():
+    a = st._norm("我，不在意！")
+    b = st._norm("我不在意")
+    assert a == b
+    assert st._sim("我不在意。", "我不在意！") >= 0.99
+
+
+def test_normalize_is_idempotent():
+    """规范化必须幂等：源轨落盘前与翻译轨各调一次，结果须完全一致（锁轴）。"""
+    cues = [
+        {"start": 0.0, "end": 1.2, "text": "a"},
+        {"start": 1.1, "end": 2.0, "text": "b"},   # 重叠
+        {"start": 2.0, "end": 2.1, "text": "c"},   # 过短
+        {"start": 3.0, "end": 12.0, "text": "d"},  # 过长
+    ]
+    once = st.normalize_cue_timing(cues)
+    twice = st.normalize_cue_timing(once)
+    assert once == twice
+
+
+def test_apply_interval_timing_never_makes_cue_late():
+    """命中区间的起点须严格等于原片显示起点（pad=0），不得前移更早。"""
+    cues = [{"text": "x", "start": 9.0, "end": 20.0}]
+    aligned = [(0, {"text": "x", "start": 12.43, "end": 16.67})]
+    out = st.apply_interval_timing(cues, aligned)
+    assert out[0]["start"] == 12.43 and out[0]["end"] == 16.67
+

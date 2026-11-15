@@ -15,7 +15,7 @@ if str(ROOT) not in sys.path:
 from discover.content_db import ContentDB
 from discover.run_batch import register_work_dir, translate_summary_locale
 from job_layout import existing_wav
-from langs import PACKS, file_tag, normalize_lang, resolve_targets
+from langs import DEFAULT_PACK, PACKS, file_tag, normalize_lang, resolve_targets
 from pipeline import (
     ensure_ollama_model,
     find_ollama,
@@ -26,15 +26,19 @@ from pipeline import (
 
 
 def localize_notes(work_dir: Path, source_lang: str, stem: str = "full_16k") -> None:
+    from llm.factory import configure_llm, get_role_config
+
+    configure_llm()
     ollama = find_ollama()
-    model = "translategemma:4b"
+    # 与 pipeline/run_batch 一致：主译模型取 active profile，不再硬编码。
+    model = get_role_config("translate").model
     ensure_ollama_model(model, role="translate")
     src = normalize_lang(source_lang)
     summary = load_notes_summary(work_dir, stem, src)
     if not summary:
         summary_path = work_dir / f"{stem}_summary.json"
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    for loc in resolve_targets("site", src):
+    for loc in resolve_targets(DEFAULT_PACK, src):
         data = translate_summary_locale(
             ollama, model, summary, source_lang=src, target_lang=loc
         )
@@ -71,7 +75,7 @@ def main() -> int:
             source_lang=args.source_lang,
             title=args.title or None,
             source_wav=str(existing_wav(args.work_dir) or args.work_dir / "media" / f"{args.stem}.wav"),
-            locales=list(PACKS["site"]),
+            locales=list(PACKS[DEFAULT_PACK]),
         )
     finally:
         content.close()

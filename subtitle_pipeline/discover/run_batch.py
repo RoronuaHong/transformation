@@ -18,8 +18,9 @@ if str(ROOT) not in sys.path:
 
 from discover.content_db import ContentDB, embed_url_for, public_slug, slugify
 from discover.queue_db import QueueDB
-from langs import coalesce_source_lang, file_tag, normalize_lang, resolve_targets
+from langs import DEFAULT_PACK, coalesce_source_lang, file_tag, lang_name, normalize_lang, resolve_targets
 from job_layout import existing_wav, is_usable_wav, job_media_dir, list_locale_srts, locale_srt_path
+from translation_integrity import sanitize_hotwords
 from pipeline import (
     DEFAULT_CHAT,
     DEFAULT_LANG_WORKERS,
@@ -497,12 +498,17 @@ def translate_summary_locale(
     *,
     source_lang: str,
     target_lang: str,
+    proofread_report: dict | None = None,
 ) -> dict:
-    """Localize title/one_liner/notes lists via translategemma."""
+    """Localize title/one_liner/notes lists via translategemma + multi-model proofread."""
     src = normalize_lang(source_lang)
     tgt = normalize_lang(target_lang)
     payload = notes_fields(summary)
     if src == tgt:
+        if proofread_report is not None:
+            from llm.verify import ProofreadReport
+
+            proofread_report.update(ProofreadReport(status="skipped", mode="same_language").to_dict())
         return payload
     prompt = (
         f"Translate this JSON from {src} into {tgt}. "
@@ -565,6 +571,26 @@ def translate_summary_locale(
                 item["image"] = src_item["image"]
             if "start_sec" in src_item and "start_sec" not in item:
                 item["start_sec"] = src_item["start_sec"]
+
+    # 多模型校对（与字幕共用 llm.verify 编排）：副译共识 → Judge → 择优修复。
+    # 校对异常内部吞掉，笔记原样返回，绝不阻断本地化 job。
+    from llm.verify import proofread_notes
+
+    merged, pr = proofread_notes(
+        payload, merged,
+        src_lang=lang_name(src),
+        tgt_lang=lang_name(tgt),
+    )
+    if proofread_report is not None:
+        proofread_report.update(pr.to_dict())
+    if pr.status == "ok":
+        locked_print(
+            f"[proofread-notes {tgt}] consensus={pr.consensus} "
+            f"divergent={pr.divergent} judged={pr.judged} repaired={pr.repaired} "
+            f"review={pr.human_review}"
+        )
+    elif pr.status != "disabled":
+        locked_print(f"[proofread-notes {tgt}] {pr.status}: {pr.error or 'skipped'}")
     return merged
 
 
@@ -931,7 +957,7 @@ def process_job(
         auto=False,
         from_srt=None,
         from_txt=None,
-        hotwords=(str(job["title"] or "").strip() or None),
+        hotwords=sanitize_hotwords(str(job["title"] or "").strip() or None),
         hotwords_file=None,
         bvid=detect_bvid(url) if platform == "bilibili" else None,
         slice_start_sec=0.0,
@@ -1067,17 +1093,26 @@ def process_job(
             print(f"[notes-loc] {len(targets)} locales (workers={workers})")
 
             def _one_loc(loc: str) -> Path:
+                proofread: dict = {}
                 loc_data = translate_summary_locale(
                     ollama,
                     translate_model,
                     summary,
                     source_lang=src_lang,
                     target_lang=loc,
+                    proofread_report=proofread,
                 )
                 loc_data["source_lang"] = src_lang
                 loc_data["summary_lang"] = loc
                 _js, md = write_locale_notes(loc_data, out_dir, loc)
+                # 笔记校对报告与字幕 translate_qa 报告对齐（同一 ProofreadReport 结构）。
+                qa_path = job_media_dir(out_dir) / f"notes_qa_{file_tag(loc)}.json"
+                qa_path.write_text(
+                    json.dumps({"proofread": proofread}, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
                 locked_print(f"[out] {md}")
+                locked_print(f"[out] {qa_path}")
                 return md
 
             if workers <= 1 or len(targets) <= 1:
@@ -1182,7 +1217,7 @@ def main(argv: list[str] | None = None) -> int:
         help="per-job work root",
     )
     p.add_argument("--limit", type=int, default=1, help="max jobs this run (default 1)")
-    p.add_argument("--langs", default="site", help="translate pack (default site)")
+    p.add_argument("--langs", default=DEFAULT_PACK, help=f"translate pack (default {DEFAULT_PACK})")
     p.add_argument(
         "--lang-workers",
         type=int,

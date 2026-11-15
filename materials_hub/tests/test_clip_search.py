@@ -26,7 +26,7 @@ def _setup():
     core.SHOT_DIR = os.path.join(tmp, "shots")
     for d in (core.MATERIALS, core.THUMBS, core.PHASH_DIR, core.OCR_DIR, core.SHOT_DIR):
         os.makedirs(d, exist_ok=True)
-    for k in ("videos", "silent", "images"):
+    for k in ("videos", "images"):
         os.makedirs(os.path.join(core.MATERIALS, k), exist_ok=True)
     core._init_db()
     core._CLIP_PROBE_CACHE.update(probed=False, info=None)

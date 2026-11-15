@@ -21,8 +21,8 @@ import {
 import { formatBatchJobLabel } from "@/lib/batch-job-label";
 import { parseUrlLines, type UrlProbeResult } from "@/lib/try-urls";
 import { tryApiBase } from "@/lib/api-base";
-import type { Locale } from "@/lib/locales";
-import { localeNames, localePath, locales } from "@/lib/locales";
+import type { Locale, SubtitleLocale } from "@/lib/locales";
+import { localePath, subtitleLangs, subtitleLangName } from "@/lib/locales";
 import {
   DehardsubConfirmModal,
   type DhBox,
@@ -338,7 +338,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
   const [files, setFiles] = useState<File[]>([]);
   const [fileDragOver, setFileDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [targetLangs, setTargetLangs] = useState<Locale[]>(() => [...locales]);
+  const [targetLangs, setTargetLangs] = useState<SubtitleLocale[]>(() => [...subtitleLangs]);
   const [wantTranslate, setWantTranslate] = useState(true);
   const [wantNotes, setWantNotes] = useState(true);
   const [wantClips, setWantClips] = useState(false);
@@ -364,6 +364,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
   const [prevFrameOpts, setPrevFrameOpts] = useState<FrameOptsLike | null>(null);
   const [langsOpen, setLangsOpen] = useState(false);
   const [langsQuery, setLangsQuery] = useState("");
+  const [favOnly, setFavOnly] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   // Dehardsub human-confirm gate (detect → modal → confirm → enqueue).
   const [dhConfirm, setDhConfirm] = useState<null | {
@@ -470,7 +471,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
       tooLongMsg: copy.clipsTooLong,
     });
   }, null);
-  const allLangsSelected = targetLangs.length === locales.length;
+  const allLangsSelected = targetLangs.length === subtitleLangs.length;
 
   const batchHasClips = sourceItems.some(({ key }) => {
     const sm = sourceMedia[key];
@@ -578,7 +579,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
       ? copy.langsPick
       : targetLangs
           .slice(0, 3)
-          .map((c) => localeNames[c])
+          .map((c) => subtitleLangName(c))
           .join(locale.startsWith("zh") ? "、" : ", ") +
         (targetLangs.length > 3 ? ` +${targetLangs.length - 3}` : "");
 
@@ -770,7 +771,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
-  function toggleLang(code: Locale) {
+  function toggleLang(code: SubtitleLocale) {
     setTargetLangs((prev) =>
       prev.includes(code) ? prev.filter((x) => x !== code) : [...prev, code]
     );
@@ -836,7 +837,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     setCachedDone(false);
     setPrevLangs(null);
     setPrevFrameOpts(null);
-    setTargetLangs([...locales]);
+    setTargetLangs([...subtitleLangs]);
     setWantTranslate(true);
     setWantNotes(true);
     setWantClips(false);
@@ -1561,9 +1562,9 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
 
   const langsFiltered = useMemo(() => {
     const q = langsQuery.trim().toLowerCase();
-    if (!q) return [...locales];
-    return locales.filter((code) => {
-      const name = localeNames[code].toLowerCase();
+    if (!q) return [...subtitleLangs];
+    return subtitleLangs.filter((code) => {
+      const name = subtitleLangName(code).toLowerCase();
       return name.includes(q) || code.toLowerCase().includes(q);
     });
   }, [langsQuery]);
@@ -2145,7 +2146,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                 </span>
                 <span className="try-langs-trigger-meta">
                   <span className="try-langs-count">
-                    {targetLangs.length}/{locales.length}
+                    {targetLangs.length}/{subtitleLangs.length}
                   </span>
                   <span className="try-langs-chevron" aria-hidden="true">
                     ▾
@@ -2167,6 +2168,18 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                     aria-label={copy.langsSection}
                   >
                     <span className="try-langs-bubble-handle" aria-hidden="true" />
+                    <div className="try-langs-tools">
+                      <button
+                        type="button"
+                        className={`try-langs-fav${favOnly ? " is-on" : ""}`}
+                        aria-pressed={favOnly}
+                        disabled={submitting}
+                        title="app 要求的 20 种字幕语言(标准集)"
+                        onClick={() => setFavOnly((v) => !v)}
+                      >
+                        <span aria-hidden="true">★</span> 收藏
+                      </button>
+                    </div>
                     <div className="try-langs-search">
                       <input
                         ref={langsSearchRef}
@@ -2183,6 +2196,11 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                       />
                     </div>
                     <div className="try-langs-list" role="group" aria-label={copy.langsSection}>
+                      {favOnly && (
+                        <p className="try-langs-favhead">
+                          <span aria-hidden="true">★</span> 收藏 · 标准 20 语
+                        </p>
+                      )}
                       {langsFiltered.length === 0 ? (
                         <p className="try-langs-empty">{copy.langsEmpty}</p>
                       ) : (
@@ -2199,7 +2217,12 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                               onClick={() => toggleLang(code)}
                             >
                               <span className="try-langs-option-main">
-                                <em>{localeNames[code]}</em>
+                                {favOnly && (
+                                  <span className="try-langs-star" aria-hidden="true">
+                                    ★
+                                  </span>
+                                )}
+                                <em>{subtitleLangName(code)}</em>
                                 <small>{code}</small>
                               </span>
                               <span className="try-langs-check" aria-hidden="true">
@@ -2215,7 +2238,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                         type="button"
                         className="try-lang-action"
                         disabled={submitting || allLangsSelected}
-                        onClick={() => setTargetLangs([...locales])}
+                        onClick={() => setTargetLangs([...subtitleLangs])}
                       >
                         {copy.langsSelectAll}
                       </button>

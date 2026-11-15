@@ -26,7 +26,20 @@ import {
   hubDeliver,
   hubSetReviewed,
   hubSetFavorite,
+  hubBulk,
+  hubColl,
 } from "@/lib/hub-api";
+import HubFilePreview from "./HubFilePreview";
+
+/** 用户策展合集标签:album:<名称>,名称去逗号/空白,避免破坏 CSV tags。 */
+function albumTagOf(name: string): string {
+  const n = name.trim().replace(/[,，]+/g, " ").replace(/\s+/g, " ").slice(0, 40);
+  return `album:${n || "untitled"}`;
+}
+
+function albumTitleOf(tag: string): string {
+  return tag.startsWith("album:") ? (tag.slice(6) || tag) : tag;
+}
 
 function SecHead({ open, onToggle, children }: { open: boolean; onToggle: () => void; children: ReactNode }) {
   return (
@@ -204,33 +217,30 @@ function FormNodeView({ node, onSelect, openIds, onToggleOpen, ensureOpen }: {
   );
 }
 
+// 规范媒体类型(对齐 DAM/图库最佳实践):图/视频/音/文档/矢量/3D/工程/字体/其他。
+// 原片/GIF/字幕/静音 不再是一级 kind,而是 images/docs/videos 下的「子分面」(见 SUBFACETS)。
+// UI:常显 CORE_KINDS;矢量/三维/工程/字体/其他仅在有库存或当前选中时出现,避免空 tab 刷屏。
 const KINDS = [
-  "raw",
   "images",
   "videos",
-  "silent",
-  "docs",
   "audio",
-  "subs",
-  "anim",
-  "project",
+  "docs",
   "vector",
   "model3d",
+  "project",
   "font",
   "other",
 ] as const;
 
+const CORE_KINDS = new Set<string>(["images", "videos", "audio", "docs"]);
+
 // 每个 kind 的图标(emoji,零依赖、通用、无需翻译);"" 为「全部」入口。
 const KIND_ICON: Record<string, string> = {
   "": "📚",
-  raw: "📷",
   images: "🖼️",
   videos: "🎬",
-  silent: "🔇",
   docs: "📄",
   audio: "🎵",
-  subs: "💬",
-  anim: "🎞️",
   project: "🗂️",
   vector: "✒️",
   model3d: "🧊",
@@ -252,18 +262,55 @@ function orderKinds(keys: string[]): string[] {
 const KIND_LABEL: Record<string, keyof HubCopy> = {
   images: "kindImages",
   videos: "kindVideos",
-  silent: "kindSilent",
   docs: "kindDocs",
   audio: "kindAudio",
-  subs: "kindSubs",
-  anim: "kindAnim",
-  raw: "kindRaw",
   project: "kindProject",
   vector: "kindVector",
   model3d: "kindModel3d",
   font: "kindFont",
   other: "kindOther",
 };
+
+// 规范类型下的子分面(格式/角色/衍生)。按 DAM 最佳实践,它们应是类型内的筛选而非独立类型:
+//   视频 → 静音(has_audio:0);图片 → 动图(type:gif)/相机原片(type:raw);
+//   文档 → 字幕(含译文)/笔记/数据常显;PDF/文稿/表格/演示仅 n>0 或选中时显示。
+// 这些子分面来自后端 /api/stats.subfacets 的实时计数。
+const SUBFACETS: Record<string, { tag: string; icon: string; label: keyof HubCopy }[]> = {
+  videos: [{ tag: "has_audio:0", icon: "🔇", label: "fSilent" }],
+  images: [
+    { tag: "type:gif", icon: "🎞️", label: "fGif" },
+    { tag: "type:raw", icon: "📷", label: "fRaw" },
+  ],
+  docs: [
+    { tag: "type:subs", icon: "💬", label: "fSubs" },
+    { tag: "type:text", icon: "📝", label: "fText" },
+    { tag: "type:data", icon: "🧾", label: "fData" },
+    { tag: "type:pdf", icon: "📕", label: "fPdf" },
+    { tag: "type:doc", icon: "📄", label: "fDoc" },
+    { tag: "type:sheet", icon: "📊", label: "fSheet" },
+    { tag: "type:slide", icon: "📽️", label: "fSlide" },
+  ],
+};
+
+/** 文档子分面里始终展示的主路径项(与流水线产物对齐)。 */
+const CORE_DOC_SUBFACETS = new Set(["type:subs", "type:text", "type:data"]);
+
+// 卡片/详情上的子分面徽标(保留旧 tab 承载的信息)
+function facetBadges(m: HubMaterial): { icon: string; label: keyof HubCopy }[] {
+  const tags = (m.tags || "").split(",");
+  const out: { icon: string; label: keyof HubCopy }[] = [];
+  if (tags.includes("has_audio:0")) out.push({ icon: "🔇", label: "fSilent" });
+  if (tags.includes("type:gif")) out.push({ icon: "🎞️", label: "fGif" });
+  if (tags.includes("type:raw")) out.push({ icon: "📷", label: "fRaw" });
+  if (tags.includes("type:subs")) out.push({ icon: "💬", label: "fSubs" });
+  if (tags.includes("type:pdf")) out.push({ icon: "📕", label: "fPdf" });
+  if (tags.includes("type:doc")) out.push({ icon: "📄", label: "fDoc" });
+  if (tags.includes("type:text")) out.push({ icon: "📝", label: "fText" });
+  if (tags.includes("type:sheet")) out.push({ icon: "📊", label: "fSheet" });
+  if (tags.includes("type:slide")) out.push({ icon: "📽️", label: "fSlide" });
+  if (tags.includes("type:data")) out.push({ icon: "🧾", label: "fData" });
+  return out;
+}
 
 function displayName(m: HubMaterial): string {
   const n = (m.name || "").trim() || "file";
@@ -276,6 +323,401 @@ function displayName(m: HubMaterial): string {
 
 function fmtSize(n: number): string {
   return `${(n / 1048576).toFixed(2)} MB`;
+}
+
+// 字幕/文稿类素材识别:带 type:subs 标签,或扩展名属于字幕格式。
+const SUBS_EXT = ["srt", "vtt", "ass", "ssa", "sbv", "sub", "smi", "lrc"];
+function isSubtitle(m: HubMaterial): boolean {
+  const tags = (m.tags || "").split(",").map((t) => t.trim());
+  if (tags.includes("type:subs")) return true;
+  // hub 的 ext 带前导点(".srt"),必须归一后再比,否则此分支恒 false。
+  const ext = (m.ext || "").replace(/^\./, "").toLowerCase();
+  return SUBS_EXT.includes(ext);
+}
+
+/** 详情面板只按真实字幕格式走字幕播放器:带 type:subs 标签的 .txt 笔记仍按文本预览,
+ *  否则 SubtitlePanel 解析不到 cue 会显示一片空白。合集归类仍用 isSubtitle(含标签)。 */
+function isSubtitleFile(m: HubMaterial): boolean {
+  return SUBS_EXT.includes((m.ext || "").replace(/^\./, "").toLowerCase());
+}
+
+// 字幕语言:优先取 lang: 标签,否则从文件名末段 `_vi.srt` 解析。
+function subtitleLang(m: HubMaterial): string {
+  const tags = (m.tags || "").split(",").map((t) => t.trim());
+  const lt = tags.find((t) => t.startsWith("lang:"));
+  if (lt) return lt.slice(5);
+  const m2 = (m.name || "").match(/_([a-zA-Z]{2,5})(?:\.[^.]+)?$/);
+  if (m2) return m2[1];
+  return "";
+}
+
+type SubCue = { n: number; start: number; end: number; text: string };
+
+function tsToSec(s: string): number {
+  const t = s.trim().replace(",", ".");
+  const p = t.split(":").map(Number);
+  if (p.length === 3) return (p[0] || 0) * 3600 + (p[1] || 0) * 60 + (p[2] || 0);
+  if (p.length === 2) return (p[0] || 0) * 60 + (p[1] || 0);
+  return p[0] || 0;
+}
+
+function fmtStamp(sec: number): string {
+  const s = Math.max(0, sec);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = Math.floor(s % 60);
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+  return `${String(m).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+}
+
+// 解析 SRT / VTT(ASS/SSA 仅取文本,时间轴可能不准,足够预览用)。
+function parseSubtitles(text: string): SubCue[] {
+  const raw = text.replace(/\r\n?/g, "\n");
+  const blocks = raw.split(/\n\s*\n/);
+  const CUE = /(\d{1,2}:)?\d{1,2}:\d{2}[:.,]\d{1,3}\s*-->\s*(\d{1,2}:)?\d{1,2}:\d{2}[:.,]\d{1,3}/;
+  const cues: SubCue[] = [];
+  let auto = 0;
+  for (const b of blocks) {
+    const lines = b.split("\n").map((l) => l.trim()).filter((l) => l !== "");
+    if (!lines.length) continue;
+    let ti = -1;
+    for (let j = 0; j < lines.length; j++) {
+      if (CUE.test(lines[j])) { ti = j; break; }
+    }
+    if (ti === -1) continue;
+    const mm = lines[ti].match(CUE);
+    if (!mm) continue;
+    const parts = mm[0].split("-->");
+    const start = tsToSec(parts[0]);
+    const end = tsToSec(parts[1]);
+    const body = lines.slice(ti + 1).join("\n").trim();
+    if (!body) continue;
+    let n = auto + 1;
+    if (ti > 0 && /^\d+$/.test(lines[0])) n = parseInt(lines[0], 10);
+    auto = Math.max(auto, n);
+    cues.push({ n, start, end, text: body });
+  }
+  return cues;
+}
+
+// 搜索命中高亮(仅首个命中,足够预览用)
+function highlightText(text: string, kw: string): ReactNode {
+  if (!kw) return text;
+  const i = text.toLowerCase().indexOf(kw);
+  if (i < 0) return text;
+  return (
+    <>
+      {text.slice(0, i)}
+      <mark>{text.slice(i, i + kw.length)}</mark>
+      {text.slice(i + kw.length)}
+    </>
+  );
+}
+
+const SUBS_PAGE = 300; // 长字幕分页渲染,避免一次挂几千 DOM 节点
+
+const CAP_LANG: Record<string, string> = {
+  zh: "中文", "zh-Hant": "繁中", en: "英文", vi: "越南文", ja: "日文", ko: "韩文",
+  de: "德文", fr: "法文", es: "西班牙文", ru: "俄文", th: "泰文", tr: "土耳其文",
+  ar: "阿拉伯文", hi: "印地文", id: "印尼文", pt: "葡萄牙文",
+  it: "意大利文", nl: "荷兰文", ms: "马来文", pl: "波兰文",
+};
+function capLangName(code: string): string {
+  return CAP_LANG[code] || code || "字幕";
+}
+
+// 播放器字幕层照 YouTube 的做法:
+// ① 字幕是播放器 DOM 里的一层(不是浏览器 ::cue 原生轨),字幕文件按「轨」挂到视频上,可开关/切换语言;
+// ② 全屏的是整个播放器容器(含字幕层与按钮),不是 <video> 自己,所以放大后字幕不会丢;
+// ③ 字幕位置随原生控制条显隐避让,字号可切换并随全屏放大。
+// 字幕详情面板:真实文本预览 + 语言/条数/时长 + 搜索高亮 + 复制/下载 + 关联视频跳转/播放跟随。
+function SubtitlePanel({ detail, copy }: { detail: HubMaterial; copy: HubCopy }) {
+  const [cues, setCues] = useState<SubCue[]>([]);
+  const [status, setStatus] = useState<"loading" | "ok" | "err">("loading");
+  const [filter, setFilter] = useState("");
+  const [videoId, setVideoId] = useState<string | null>(null);
+  const [tracks, setTracks] = useState<HubMaterial[]>([]); // 同 job 的多语言字幕轨
+  const [trackId, setTrackId] = useState(detail.id);
+  const [ccOn, setCcOn] = useState(true);
+  const [ccMenu, setCcMenu] = useState(false);
+  const [capSize, setCapSize] = useState<"sm" | "md" | "lg">("md");
+  const [copied, setCopied] = useState(false);
+  const [curT, setCurT] = useState(-1);
+  const [limit, setLimit] = useState(SUBS_PAGE);
+  const [isFs, setIsFs] = useState(false);
+  const vidRef = useRef<HTMLVideoElement>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const copyTimer = useRef<number | null>(null);
+  const activeMat = tracks.find((t) => t.id === trackId) || detail;
+  const activeLang = subtitleLang(activeMat) || subtitleLang(detail);
+
+  useEffect(() => () => { if (copyTimer.current) window.clearTimeout(copyTimer.current); }, []);
+
+  // 当前字幕轨文件:切语言只换这一份文本,视频不重载、播放不中断。
+  useEffect(() => {
+    let cancel = false;
+    setStatus("loading");
+    setCues([]);
+    (async () => {
+      try {
+        const res = await fetch(hubFileUrl(trackId));
+        if (!res.ok) throw new Error(String(res.status));
+        const txt = await res.text();
+        if (cancel) return;
+        setCues(parseSubtitles(txt));
+        setStatus("ok");
+      } catch {
+        if (!cancel) setStatus("err");
+      }
+    })();
+    return () => { cancel = true; };
+  }, [trackId]);
+
+  useEffect(() => {
+    const sync = () => {
+      const fsEl = document.fullscreenElement;
+      setIsFs(!!fsEl && (fsEl === wrapRef.current || fsEl === vidRef.current));
+    };
+    document.addEventListener("fullscreenchange", sync);
+    return () => document.removeEventListener("fullscreenchange", sync);
+  }, []);
+
+  // 字幕设置菜单:点击播放器其它位置收起(与 YouTube 设置面板一致)
+  useEffect(() => {
+    if (!ccMenu) return;
+    const onDown = (e: PointerEvent) => {
+      const el = e.target as Element | null;
+      if (!el?.closest?.(".hub-subs-ccmenu, .hub-subs-cc")) setCcMenu(false);
+    };
+    document.addEventListener("pointerdown", onDown);
+    return () => document.removeEventListener("pointerdown", onDown);
+  }, [ccMenu]);
+
+  const toggleFullscreen = () => {
+    if (document.fullscreenElement) {
+      void document.exitFullscreen().catch(() => undefined);
+      return;
+    }
+    const el = wrapRef.current;
+    if (el?.requestFullscreen) void el.requestFullscreen().catch(() => undefined);
+  };
+
+  // 同 job 下:关联视频 + 所有字幕文件(YouTube 的字幕语言菜单)
+  useEffect(() => {
+    let cancel = false;
+    setTrackId(detail.id);
+    setTracks([]);
+    setCcMenu(false);
+    setVideoId(null);
+    setFilter("");
+    setCurT(-1);
+    setLimit(SUBS_PAGE);
+    const jobTag = (detail.tags || "").split(",").map((t) => t.trim()).find((t) => t.startsWith("job:"));
+    if (jobTag) {
+      (async () => {
+        const list = await hubFetch<HubMaterial[]>(`/list?tag=${encodeURIComponent(jobTag)}&limit=200`).catch(() => null);
+        if (cancel) return;
+        const all = list || [];
+        const subs = all.filter((x) => isSubtitle(x) && !x.missing);
+        subs.sort((a, b) => (a.id === detail.id ? -1 : b.id === detail.id ? 1 : subtitleLang(a).localeCompare(subtitleLang(b))));
+        if (subs.length) setTracks(subs);
+        // 优先「源片/无字幕」:排除已烧字幕的渲染片(type:render)与无声派生轨
+        const tagsOf = (x: HubMaterial) => (x.tags || "").split(",").map((t) => t.trim());
+        const has = (x: HubMaterial, t: string) => tagsOf(x).includes(t);
+        const isDerived = (x: HubMaterial) => tagsOf(x).some((t) => t.startsWith("parent:"));
+        const clean = all.filter((x) => !has(x, "type:render"));
+        const v =
+          clean.find((x) => x.kind === "videos" && has(x, "type:media") && has(x, "has_audio:1") && !isDerived(x)) ||
+          clean.find((x) => x.kind === "videos" && has(x, "type:media") && has(x, "has_audio:1")) ||
+          clean.find((x) => x.kind === "videos" && has(x, "type:media")) ||
+          clean.find((x) => x.kind === "videos") ||
+          all.find((x) => x.kind === "videos") ||
+          all[0] ||
+          null;
+        if (v) setVideoId(v.id);
+      })();
+    }
+    return () => { cancel = true; };
+  }, [detail.id, detail.tags]);
+
+  const kw = filter.trim().toLowerCase();
+  const filtered = kw ? cues.filter((c) => c.text.toLowerCase().includes(kw)) : cues;
+  const shown = filtered.slice(0, limit);
+  const duration = cues.length ? cues[cues.length - 1].end - cues[0].start : 0;
+
+  // 播放跟随:高亮当前时间所在的 cue;搜索过滤时不自动滚动,避免打断定位
+  const activeCue = useMemo(() => {
+    if (curT < 0) return undefined;
+    return cues.find((x) => curT >= x.start && curT < x.end);
+  }, [curT, cues]);
+  const activeN = activeCue ? activeCue.n : -1;
+  useEffect(() => {
+    if (activeN < 0 || kw || !listRef.current) return;
+    const el = listRef.current.querySelector(`[data-cue="${activeN}"]`);
+    if (el) el.scrollIntoView({ block: "nearest" });
+  }, [activeN, kw]);
+
+  const copyText = () => {
+    const body = cues.map((c) => `${fmtStamp(c.start)}\n${c.text}`).join("\n\n");
+    void navigator.clipboard?.writeText(body);
+    setCopied(true);
+    if (copyTimer.current) window.clearTimeout(copyTimer.current);
+    copyTimer.current = window.setTimeout(() => setCopied(false), 1500);
+  };
+  const seek = (t: number) => {
+    if (vidRef.current) {
+      vidRef.current.currentTime = t;
+      setCurT(t); // 点击立即高亮,不等 timeupdate
+    }
+  };
+
+  return (
+    <div className="hub-subs">
+      <div className="hub-subs-bar">
+        {activeLang ? <span className="chip ok">{copy.subsLang}: {capLangName(activeLang)}</span> : null}
+        <span className="muted">{cues.length} {copy.subsCues}</span>
+        {duration > 0 ? <span className="muted">{copy.subsDuration}: {fmtStamp(duration)}</span> : null}
+        <span className="sp" />
+        <button type="button" onClick={copyText}>{copied ? `✓ ${copy.copied}` : copy.subsCopyText}</button>
+        <a href={hubFileUrl(trackId)} download>{copy.subsDownload}</a>
+      </div>
+      {videoId ? (
+        <div className={`hub-subs-vwrap cap-${capSize}`} ref={wrapRef}>
+          <video
+            ref={vidRef}
+            key={videoId}
+            src={hubFileUrl(videoId)}
+            controls
+            controlsList="nofullscreen"
+            playsInline
+            preload="metadata"
+            onTimeUpdate={(e) => setCurT(e.currentTarget.currentTime)}
+          />
+          {/* 字幕层与 CC/全屏按钮都属于播放器容器;全屏的是容器,不是 <video> 自己 */}
+          <div className="hub-subs-tools">
+            <button
+              type="button"
+              className={"hub-subs-cc" + (ccOn ? " on" : "")}
+              title="字幕设置 (CC)"
+              aria-label="字幕设置"
+              aria-expanded={ccMenu}
+              onClick={() => setCcMenu((v) => !v)}
+            >
+              CC
+            </button>
+            <button
+              type="button"
+              className="hub-subs-fs"
+              title={isFs ? "退出全屏 (Esc)" : "放大播放(带字幕)"}
+              aria-label={isFs ? "退出全屏" : "放大播放"}
+              onClick={toggleFullscreen}
+            >
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                {isFs ? (
+                  <path d="M6 1.5v4.5H1.5M14.5 6H10v4.5M10 14.5V10h4.5M1.5 10H6v4.5" />
+                ) : (
+                  <path d="M1.5 6V1.5H6M10 1.5h4.5V6M14.5 10v4.5H10M6 14.5H1.5V10" />
+                )}
+              </svg>
+            </button>
+          </div>
+          {ccMenu ? (
+            <div className="hub-subs-ccmenu">
+              <div className="hub-subs-cchead">
+                <span>字幕设置</span>
+                <button type="button" onClick={() => setCcMenu(false)} aria-label="关闭字幕设置">✕</button>
+              </div>
+              <button
+                type="button"
+                className="hub-subs-ccswitch"
+                aria-pressed={ccOn}
+                onClick={() => setCcOn((v) => !v)}
+              >
+                {ccOn ? "字幕 · 开" : "字幕 · 关"}
+              </button>
+              {tracks.length > 1 ? (
+                <>
+                  <div className="hub-subs-cclabel">字幕语言</div>
+                  <div className="hub-subs-cclist">
+                    {tracks.map((t) => (
+                      <button
+                        key={t.id}
+                        type="button"
+                        className={t.id === trackId ? "on" : ""}
+                        onClick={() => setTrackId(t.id)}
+                      >
+                        {capLangName(subtitleLang(t))}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              ) : null}
+              <div className="hub-subs-cclabel">字号</div>
+              <div className="hub-subs-cclist">
+                {([["sm", "小"], ["md", "中"], ["lg", "大"]] as const).map(([s, label]) => (
+                  <button
+                    key={s}
+                    type="button"
+                    className={capSize === s ? "on" : ""}
+                    onClick={() => setCapSize(s)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          {ccOn && activeCue ? (
+            <div className="hub-subs-cap" aria-live="polite">{activeCue.text}</div>
+          ) : null}
+        </div>
+      ) : null}
+      {status === "loading" ? <div className="hub-subs-msg">…</div> : null}
+      {status === "err" ? <div className="hub-subs-msg warn">{copy.subsLoadErr}</div> : null}
+      {status === "ok" ? (
+        <>
+          <input
+            className="hub-field"
+            placeholder={copy.subsFilter}
+            value={filter}
+            onChange={(e) => { setFilter(e.target.value); setLimit(SUBS_PAGE); }}
+          />
+          {videoId ? <div className="hub-subs-hint">{copy.subsSeekHint}</div> : null}
+          <div className="hub-subs-list" ref={listRef}>
+            {shown.length ? (
+              shown.map((c) => (
+                <div
+                  key={c.n}
+                  data-cue={c.n}
+                  className={
+                    "hub-cue" +
+                    (videoId ? " seekable" : "") +
+                    (activeN === c.n ? " active" : "")
+                  }
+                  onClick={videoId ? () => seek(c.start) : undefined}
+                >
+                  <span className="hub-cue-t">{fmtStamp(c.start)}</span>
+                  <span className="hub-cue-tx">{highlightText(c.text, kw)}</span>
+                </div>
+              ))
+            ) : (
+              <div className="hub-subs-msg">—</div>
+            )}
+          </div>
+          {filtered.length > shown.length ? (
+            <button
+              type="button"
+              className="hub-subs-more"
+              onClick={() => setLimit((l) => l + SUBS_PAGE)}
+            >
+              {copy.more} ({filtered.length - shown.length})
+            </button>
+          ) : null}
+        </>
+      ) : null}
+    </div>
+  );
 }
 
 // 卡片抽成 memo 组件:父组件任意状态(toast/err/gridMode/busy/sideQ 等)变动时,
@@ -297,6 +739,7 @@ interface HubCardProps {
 }
 
 const HubCard = memo(function HubCard({ m, copy, kindLabel, tagLabelMap, locale, pendingIds, onOpen, onDelete, onToggleFavorite, selected, onToggleSelect }: HubCardProps) {
+  const vidRef = useRef<HTMLVideoElement>(null);
   return (
     <article className={"hub-card" + (selected ? " selected" : "")}>
       <div className="hub-thumb">
@@ -350,7 +793,7 @@ const HubCard = memo(function HubCard({ m, copy, kindLabel, tagLabelMap, locale,
         </button>
         {m.missing ? (
           <span className="pill bad">{copy.missing}</span>
-        ) : m.kind === "images" || m.kind === "anim" ? (
+        ) : m.kind === "images" ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
             src={m.thumb ? hubThumbUrl(m.id) : hubFileUrl(m.id)}
@@ -359,26 +802,37 @@ const HubCard = memo(function HubCard({ m, copy, kindLabel, tagLabelMap, locale,
             decoding="async"
             onClick={() => onOpen(m)}
           />
-        ) : m.kind === "videos" || m.kind === "silent" ? (
+        ) : m.kind === "videos" ? (
           <>
-            {/* video 不能包在 <button> 里,否则原生进度条无法拖动 */}
+            {/* 视频卡片:B 站/抖音式 hover 预览(静音自动播放,移开复位),不在网格显示进度条;
+                精确播放/拖拽走详情弹层。点击不冒泡到卡片体(避免误开详情)。 */}
             <video
+              ref={vidRef}
               src={hubFileUrl(m.id)}
               muted
               playsInline
-              controls
+              loop
               preload="metadata"
               poster={m.thumb ? hubThumbUrl(m.id) : undefined}
               onLoadedMetadata={(e) => {
                 if (m.hit_t) e.currentTarget.currentTime = m.hit_t;
               }}
+              onMouseEnter={() => {
+                const v = vidRef.current;
+                if (!v) return;
+                if (m.hit_t != null) v.currentTime = m.hit_t;
+                void v.play().catch(() => undefined);
+              }}
+              onMouseLeave={() => {
+                const v = vidRef.current;
+                if (!v) return;
+                v.pause();
+                if (m.hit_t != null) v.currentTime = m.hit_t;
+              }}
               onClick={(e) => e.stopPropagation()}
               onPointerDown={(e) => e.stopPropagation()}
               onMouseDown={(e) => e.stopPropagation()}
             />
-            {m.kind === "silent" ? (
-              <span className="hub-kind-badge">{kindLabel("silent")}</span>
-            ) : null}
           </>
         ) : m.kind === "audio" ? (
           <span className="ph" onClick={() => onOpen(m)} role="presentation">
@@ -389,6 +843,11 @@ const HubCard = memo(function HubCard({ m, copy, kindLabel, tagLabelMap, locale,
             {(m.ext || "?").replace(/^\./, "").slice(0, 5).toUpperCase()}
           </span>
         )}
+        {/* 类型角标:所有类型都显示,图标 + 强调色,一眼区分视频/图片/音频 */}
+        <span className={`hub-kind-badge k-${m.kind}`} title={kindLabel(m.kind)}>
+          <span className="ki" aria-hidden="true">{KIND_ICON[m.kind] || "📦"}</span>
+          {kindLabel(m.kind)}
+        </span>
       </div>
       <button
         type="button"
@@ -396,6 +855,15 @@ const HubCard = memo(function HubCard({ m, copy, kindLabel, tagLabelMap, locale,
         onClick={() => onOpen(m)}
       >
         <strong title={displayName(m)}>{displayName(m)}</strong>
+        {facetBadges(m).length > 0 && (
+          <span className="hub-card-badges">
+            {facetBadges(m).map((b) => (
+              <span key={b.label} className="hub-mini-badge" title={copy[b.label]}>
+                <span aria-hidden="true">{b.icon}</span> {copy[b.label]}
+              </span>
+            ))}
+          </span>
+        )}
         {m.hit_t != null ? (
           <span className="hub-hit" title={copy.hitReason}>
             {m.hit_via === "asr"
@@ -437,6 +905,306 @@ const HubCard = memo(function HubCard({ m, copy, kindLabel, tagLabelMap, locale,
   );
 });
 
+/* ───────────────── 视频合集 ─────────────────
+ * 流水线给同一个视频(job:<id>)的源片、音轨、字幕、翻译都打了 job: 锚点,
+ * 拆条子件只有 parent: 时沿父链回查同一任务。默认把 >=2 项的任务折成一张
+ * 可展开的合集卡,避免一个视频刷出几十张平铺卡片;单件素材仍按原样展示。
+ */
+/** 字幕与译文是同一批语言产物,只用一个 tab 承载;流水线 sidecar JSON 归文档。
+ * 图片(kind=images,如截图/预览/关键帧)单独成桶,不再被误算进「文档」。 */
+type CollCat = "translate" | "videos" | "audio" | "images" | "docs";
+const COLL_CATS: CollCat[] = ["translate", "videos", "audio", "images", "docs"];
+const COLL_LABEL: Record<CollCat, keyof HubCopy> = {
+  translate: "collSubsPack", videos: "kindVideos", audio: "kindAudio",
+  images: "kindImages", docs: "kindDocs",
+};
+const COLL_ICON: Record<CollCat, string> = {
+  translate: "💬", videos: "🎬", audio: "🎵", images: "🖼️", docs: "📄",
+};
+
+function collectionCat(m: HubMaterial): CollCat {
+  const ext = (m.ext || "").replace(/^\./, "").toLowerCase();
+  if (isSubtitle(m) || SUBS_EXT.includes(ext)) return "translate";
+  if (m.kind === "videos") return "videos";
+  if (m.kind === "audio") return "audio";
+  if (m.kind === "images") return "images";
+  return "docs";
+}
+
+function collectionKeyOf(m: HubMaterial, byId: Map<string, HubMaterial>): string | null {
+  let cur: HubMaterial | undefined = m;
+  const seen = new Set<string>();
+  while (cur && !seen.has(cur.id)) {
+    seen.add(cur.id);
+    const tags = csv(cur.tags);
+    const job = tags.find((t) => t.startsWith("job:"));
+    if (job) return job.slice(4);
+    const par = tags.find((t) => t.startsWith("parent:"));
+    if (!par) {
+      // 无流水线 job/parent 时,用户 album: 也可折成合集卡(单件也显示,便于策展)。
+      if (cur === m) {
+        const album = tags.find((t) => t.startsWith("album:"));
+        if (album) return album;
+      }
+      return null;
+    }
+    const pid = par.slice(7);
+    const next = byId.get(pid);
+    if (!next) return `parent:${pid}`;
+    cur = next;
+  }
+  return null;
+}
+
+/** 封面取被 parent: 引用最多的母版,其次 role:master / type:media 源片。 */
+function collectionCover(members: HubMaterial[]): HubMaterial {
+  const refs = new Map<string, number>();
+  for (const m of members) {
+    const par = csv(m.tags).find((t) => t.startsWith("parent:"));
+    if (par) {
+      const pid = par.slice(7);
+      refs.set(pid, (refs.get(pid) || 0) + 1);
+    }
+  }
+  const score = (m: HubMaterial) => {
+    const tags = csv(m.tags);
+    return (refs.get(m.id) || 0) * 100
+      + (tags.includes("role:master") ? 50 : 0)
+      + (m.kind === "videos" ? 20 : 0)
+      + (tags.includes("type:media") ? 10 : 0)
+      - (tags.some((t) => t.startsWith("parent:")) ? 10 : 0)
+      - (/(silent|wm_only|dehardsub|demark|keepsub)/i.test(m.name || "") ? 5 : 0);
+  };
+  return members.reduce((best, m) => (score(m) > score(best) ? m : best), members[0]);
+}
+
+type HubGroup = {
+  key: string;
+  jobTag: string | null;
+  title: string;
+  cover: HubMaterial;
+  members: HubMaterial[];
+  counts: Record<CollCat, number>;
+  platform: string;
+};
+type GridEntry = { type: "group"; group: HubGroup } | { type: "card"; m: HubMaterial };
+
+function buildGridEntries(rows: HubMaterial[]): GridEntry[] {
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const buckets = new Map<string, HubMaterial[]>();
+  const keys = new Map<string, string | null>();
+  for (const m of rows) {
+    const k = collectionKeyOf(m, byId);
+    keys.set(m.id, k);
+    if (!k) continue;
+    const arr = buckets.get(k);
+    if (arr) arr.push(m);
+    else buckets.set(k, [m]);
+  }
+  const out: GridEntry[] = [];
+  const loose: GridEntry[] = [];
+  const emitted = new Set<string>();
+  for (const m of rows) {
+    const k = keys.get(m.id) || null;
+    const isAlbum = !!k && k.startsWith("album:");
+    // 流水线 job 合集至少 2 项才折叠;用户 album 单件也成卡,方便「刚建合集」可见。
+    const minN = isAlbum ? 1 : 2;
+    if (!k || (buckets.get(k)?.length || 0) < minN) {
+      // 散件不按 rows 原序就地插入:合集卡是 grid-column:1/-1 全宽行,夹在两条
+      // 全宽行之间的单张散件会独占一列、右侧大片留白,看着像挂在上面那个合集里。
+      // 统一沉到末尾成块,合集连续排列、散件并排填满,避免错位。
+      loose.push({ type: "card", m });
+      continue;
+    }
+    if (emitted.has(k)) continue;
+    emitted.add(k);
+    const members = buckets.get(k)!;
+    const counts: Record<CollCat, number> = { translate: 0, videos: 0, audio: 0, images: 0, docs: 0 };
+    for (const x of members) counts[collectionCat(x)] += 1;
+    const cover = collectionCover(members);
+    const jobTag = isAlbum ? k : (k.startsWith("parent:") ? null : `job:${k}`);
+    const platform = members
+      .flatMap((x) => csv(x.tags))
+      .find((t) => t === "bilibili" || t === "douyin" || t === "youtube") || "";
+    out.push({
+      type: "group",
+      group: {
+        key: k,
+        jobTag,
+        title: isAlbum ? albumTitleOf(k) : (jobTag ? k : displayName(cover)),
+        cover,
+        members,
+        counts,
+        platform,
+      },
+    });
+  }
+  return out.concat(loose);
+}
+
+type HubCardCtx = {
+  copy: HubCopy;
+  kindLabel: (k: string) => string;
+  tagLabelMap: Record<string, string>;
+  locale: string;
+  pendingIds: Set<string>;
+  selected: Set<string>;
+  selectMode: boolean;
+  openDetail: (m: HubMaterial) => void;
+  removeMaterial: (m: HubMaterial) => void;
+  toggleFav: (m: HubMaterial) => void;
+  toggleSelect: (m: HubMaterial) => void;
+};
+
+const HubCollection = memo(function HubCollection({
+  group, defaultOpen, cardCtx, onFilterJob, onSelectGroup, onRenameColl, onDissolveColl,
+}: {
+  group: HubGroup;
+  defaultOpen: boolean;
+  cardCtx: HubCardCtx;
+  onFilterJob: (tag: string) => void;
+  onSelectGroup: (ids: string[]) => void;
+  onRenameColl?: (tag: string, title: string) => void;
+  onDissolveColl?: (tag: string, title: string, kind: "album" | "job") => void;
+}) {
+  const { copy } = cardCtx;
+  const [open, setOpen] = useState(defaultOpen);
+  const [cat, setCat] = useState<CollCat | "all">("all");
+  const isAlbum = group.key.startsWith("album:");
+  const collKind = isAlbum ? "album" as const : "job" as const;
+  const collLabel = isAlbum ? copy.collAlbumTitle : copy.collTitle;
+  // 从合集点「只看此合集」后自动展开,省掉再点一次
+  useEffect(() => { if (defaultOpen) setOpen(true); }, [defaultOpen]);
+  const domId = `hub-coll-${group.key.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+  const ids = group.members.map((x) => x.id);
+  const allSel = ids.length > 0 && ids.every((id) => cardCtx.selected.has(id));
+  const shown = cat === "all" ? group.members : group.members.filter((x) => collectionCat(x) === cat);
+  const cover = group.cover;
+  const coverSrc = cover.thumb
+    ? hubThumbUrl(cover.id)
+    : cover.kind === "images" ? hubFileUrl(cover.id) : "";
+  const total = group.members.length;
+  const collTag = group.jobTag || (isAlbum ? group.key : null);
+  return (
+    <section className={`hub-collection${open ? " open" : ""}`} aria-label={`${collLabel} ${group.title}`}>
+      <div className="hub-collection-head">
+        <button
+          type="button"
+          className="hub-collection-main"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          aria-controls={domId}
+        >
+          <span className="hub-collection-cover">
+            {coverSrc ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img className="face" src={coverSrc} alt="" loading="lazy" decoding="async" />
+            ) : (
+              <span className="face" aria-hidden="true">{KIND_ICON[cover.kind] || "📚"}</span>
+            )}
+            <span className="hub-collection-cover-n">{total}</span>
+          </span>
+          <span className="hub-collection-info">
+            <span className="hub-collection-title">
+              <span className="hub-collection-tag">{collLabel}</span>
+              <strong title={group.title}>{group.title}</strong>
+            </span>
+            <span className="hub-collection-sub" title={displayName(cover)}>{displayName(cover)}</span>
+            <span className="hub-collection-stats">
+              <span className="hub-collection-stat total">{fillCopy(copy.collCount, { n: total })}</span>
+              {group.platform ? (
+                <span className="hub-collection-stat">
+                  {cardCtx.tagLabelMap[group.platform] ?? formatHubTag(group.platform, cardCtx.locale)}
+                </span>
+              ) : null}
+              {COLL_CATS.filter((c) => group.counts[c] > 0).map((c) => (
+                <span key={c} className="hub-collection-stat">
+                  <span aria-hidden="true">{COLL_ICON[c]}</span> {copy[COLL_LABEL[c]]} {group.counts[c]}
+                </span>
+              ))}
+            </span>
+          </span>
+          <span className="hub-collection-caret" aria-hidden="true">{open ? "▴" : "▾"}</span>
+        </button>
+        <div className="hub-collection-actions">
+          {collTag ? (
+            <button
+              type="button"
+              title={copy.collFilterJob}
+              onClick={() => onFilterJob(collTag)}
+            >
+              {copy.collFilterJob}
+            </button>
+          ) : null}
+          <button type="button" aria-pressed={allSel} onClick={() => onSelectGroup(ids)}>
+            {allSel ? copy.collDeselectAll : copy.collSelectAll}
+          </button>
+          {isAlbum && collTag && onRenameColl ? (
+            <button type="button" title={copy.albumRename} onClick={() => onRenameColl(collTag, group.title)}>
+              {copy.albumRename}
+            </button>
+          ) : null}
+          {collTag && onDissolveColl ? (
+            <button
+              type="button"
+              className="hub-coll-danger"
+              title={isAlbum ? copy.albumDelete : copy.jobDissolve}
+              onClick={() => onDissolveColl(collTag, group.title, collKind)}
+            >
+              {isAlbum ? copy.albumDelete : copy.jobDissolve}
+            </button>
+          ) : null}
+          <button type="button" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+            {open ? copy.collCollapse : copy.collExpand}
+          </button>
+        </div>
+      </div>
+      {open && (
+        <div className="hub-collection-body" id={domId}>
+          <div className="hub-collection-tabs" role="group" aria-label={copy.collTitle}>
+            <button
+              type="button"
+              className={`hub-collection-tab${cat === "all" ? " on" : ""}`}
+              onClick={() => setCat("all")}
+            >
+              {copy.all} <span className="n">{total}</span>
+            </button>
+            {COLL_CATS.filter((c) => group.counts[c] > 0).map((c) => (
+              <button
+                key={c}
+                type="button"
+                className={`hub-collection-tab${cat === c ? " on" : ""}`}
+                onClick={() => setCat(c)}
+              >
+                <span aria-hidden="true">{COLL_ICON[c]}</span> {copy[COLL_LABEL[c]]}
+                <span className="n">{group.counts[c]}</span>
+              </button>
+            ))}
+          </div>
+          <div className="hub-grid hub-collection-grid">
+            {shown.map((x) => (
+              <HubCard
+                key={x.id}
+                m={x}
+                copy={cardCtx.copy}
+                kindLabel={cardCtx.kindLabel}
+                tagLabelMap={cardCtx.tagLabelMap}
+                locale={cardCtx.locale}
+                pendingIds={cardCtx.pendingIds}
+                selected={cardCtx.selected.has(x.id)}
+                onOpen={cardCtx.selectMode ? cardCtx.toggleSelect : cardCtx.openDetail}
+                onDelete={cardCtx.removeMaterial}
+                onToggleFavorite={cardCtx.toggleFav}
+                onToggleSelect={cardCtx.toggleSelect}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+});
+
 export function MaterialsHub({ copy }: { copy: HubCopy }) {
   const params = useParams();
   const locale = typeof params?.locale === "string" ? params.locale : "zh";
@@ -449,6 +1217,10 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
   const pageSize = 48;
   const [rows, setRows] = useState<HubMaterial[]>([]);
   const [total, setTotal] = useState(0);
+  // 无限滚动累积用:记录上一次查询签名与页码,判断本次是「翻页追加」还是「筛选重置/替换」
+  const lastQuerySig = useRef("");
+  const lastPage = useRef(1);
+  const sentinelRef = useRef<HTMLDivElement>(null);
   const [stats, setStats] = useState<HubStats | null>(null);
   const [tags, setTags] = useState<HubTag[]>([]);
   const [busy, setBusy] = useState(false);
@@ -457,13 +1229,34 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
   const [upNote, setUpNote] = useState("");
   const [pendingIds, setPendingIds] = useState<Set<string>>(new Set());
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const [gridMode, setGridMode] = useState<"" | "2" | "1">("");
-  // 多选:卡片左上勾选框 → 底部批量浮条(删除/收藏/全选/清空)
+
+  // 多选:卡片左上勾选框 → 底部批量浮条(加入合集/移动/删除/收藏)
   const [selected, setSelected] = useState<Set<string>>(new Set());
   // 拖拽上传:落区高亮
   const [dragOver, setDragOver] = useState(false);
   // 批量管理模式(B 站「批量管理」):开启后卡片常显勾选框、点卡片即选中而非打开
   const [selectMode, setSelectMode] = useState(false);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const bulkBusyRef = useRef(false);
+  const [albumOpen, setAlbumOpen] = useState(false);
+  const [moveOpen, setMoveOpen] = useState(false);
+  const [albumName, setAlbumName] = useState("");
+  // 结构筛选切换时清列表出骨架,避免旧结果闪一下再变
+  const [skelReset, setSkelReset] = useState(false);
+  // 视频合集视图:同一 job 的源片/字幕/翻译折成一张卡(默认开,偏好持久化)。
+  // SSR 首帧一律 true,挂载后再读 localStorage,避免 hydration mismatch。
+  const [collMode, setCollMode] = useState(true);
+  const collMounted = useRef(false);
+  useEffect(() => {
+    try {
+      if (localStorage.getItem("vitual.hub.collectionMode") === "0") setCollMode(false);
+    } catch { /* 隐私模式下 localStorage 不可用 */ }
+    collMounted.current = true;
+  }, []);
+  useEffect(() => {
+    if (!collMounted.current) return;
+    try { localStorage.setItem("vitual.hub.collectionMode", collMode ? "1" : "0"); } catch { /* ignore */ }
+  }, [collMode]);
   const [maxUp, setMaxUp] = useState(HUB_UPLOAD_MAX_BYTES);
   const [detail, setDetail] = useState<HubMaterial | null>(null);
   // removeMaterial 用 useCallback 稳定身份,但需读当前 detail 决定是否清面板——
@@ -552,7 +1345,21 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
     [copy],
   );
 
-  // 查询类数据(count + 当前页 list)。分面筛选(form/topic/usage)走全量本地过滤。
+  // 切换类型时清空子分面筛选(类型与子分面是正交的两级筛选)
+  const chooseKind = useCallback(
+    (k: string) => {
+      const next = kind === k ? "" : k;
+      setKind(next);
+      setTag("");
+      setPage(1);
+    },
+    [kind],
+  );
+
+  const subfacets = stats?.subfacets;
+
+  // 查询类数据(count + 当前页 list)。所有维度(含 form/topic/usage 分面)均由服务端筛选,
+  // 服务端在分页前过滤;大库下不再把整库 JSON 拉到浏览器做本地过滤。
   const loadQuery = useCallback(async () => {
     const seq = ++loadSeq.current;
     setBusy(true);
@@ -565,62 +1372,38 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
       if (mode) qs.set("mode", mode);
       if (sort) qs.set("sort", sort);
       if (favOnly) qs.set("favorites_only", "1");
-      // 内容形式/题材/用途 是受控词表分面,后端 /api/list 不支持这三个参数,
-      // 故在前端按全量本地过滤(素材量级小,逻辑简单且零回归风险)。
-      // 但文本检索 q / kind / tag / mode / sort 是后端能力,必须继续下传,否则叠加分面时
-      // 文本检索会被悄悄丢弃(反之亦然:若丢弃 q 又会让人误以为"分面没生效")。
-      const needLocal = !!(formSel || topicSel || usageSel);
-      // 后端 /list 入参(分面之外的维度,始终下传)
-      const srv = new URLSearchParams();
-      if (q.trim()) srv.set("q", q.trim());
-      if (kind) srv.set("kind", kind);
-      if (tag) srv.set("tag", tag);
-      if (mode) srv.set("mode", mode);
-      if (sort) srv.set("sort", sort);
-      if (favOnly) srv.set("favorites_only", "1");
-      let rowsAll: HubMaterial[];
-      if (needLocal) {
-        const list = await hubFetch<HubMaterial[]>(`/list?${srv}`); // 不带 limit = 全量
-        if (loadSeq.current !== seq) return;
-        rowsAll = Array.isArray(list) ? list : [];
-        if (formSel) {
-          // 选父节点 → 匹配其全部后代(含自身);叶子 → 精确匹配
-          const desc = (taxonomy?.form_descendants && taxonomy.form_descendants[formSel]) || [formSel];
-          rowsAll = rowsAll.filter((r) => !!r.form && desc.includes(r.form));
-        }
-        if (topicSel) {
-          // 选父组 → 匹配其全部叶子;选叶子 → 精确匹配
-          const leaves = (taxonomy?.topic_descendants && taxonomy.topic_descendants[topicSel]) || [topicSel];
-          // 题材与用途存在同名标签(如「影视」):素材把影视只标在 usage 上、topics 不含,
-          // 导致点「题材›影视」命中 0 而「用途›影视」有 7 条。同名叶子同时按 usage 兜底匹配,
-          // 让按题材找影视内容也能捞到(仅对确实同名的叶子生效,不影响其它题材)。
-          const usageLabels = new Set(taxonomy?.usages || []);
-          const topicOrUsage = leaves.filter((l) => usageLabels.has(l));
-          rowsAll = rowsAll.filter((r) =>
-            csv(r.topics).some((t) => leaves.includes(t)) ||
-            (topicOrUsage.length > 0 && csv(r.usage).some((u) => topicOrUsage.includes(u))));
-        }
-        if (usageSel)
-          rowsAll = rowsAll.filter((r) => csv(r.usage).includes(usageSel));
-      } else {
-        const count = await hubFetch<{ total: number }>(`/count?${qs}`);
-        if (loadSeq.current !== seq) return;
-        const tTotal = count.total || 0;
-        setTotal(tTotal);
-        const pages = Math.max(1, Math.ceil(tTotal / pageSize));
-        const p = Math.min(page, pages);
-        if (p !== page) setPage(p);
-        qs.set("offset", String((p - 1) * pageSize));
-        qs.set("limit", String(pageSize));
-        const list = await hubFetch<HubMaterial[]>(`/list?${qs}`);
-        if (loadSeq.current !== seq) return;
-        rowsAll = Array.isArray(list) ? list : [];
-      }
-      setTotal(rowsAll.length);
-      const pages = Math.max(1, Math.ceil(rowsAll.length / pageSize));
+      // 受控词表分面:后端 /api/list 与 /api/count 已支持,口径统一、分页正确。
+      if (formSel) qs.set("form", formSel);
+      if (topicSel) qs.set("topic", topicSel);
+      if (usageSel) qs.set("usage", usageSel);
+      // 查询签名:仅含影响数据集合的参数;locale 只影响文案,不计。
+      const querySig = [q.trim(), kind, tag, mode, sort, favOnly ? "1" : "", formSel, topicSel, usageSel].join("|");
+      const count = await hubFetch<{ total: number }>(`/count?${qs}`);
+      if (loadSeq.current !== seq) return;
+      const tTotal = count.total || 0;
+      setTotal(tTotal);
+      const pages = Math.max(1, Math.ceil(tTotal / pageSize));
       const p = Math.min(page, pages);
       if (p !== page) setPage(p);
-      setRows(rowsAll.slice((p - 1) * pageSize, p * pageSize));
+      // 同签名且页码递增 → 只取新一页追加;其余情况(筛选变化 / 同页重复请求 /
+      // 并发请求被 loadSeq 取消)一律重取 0..p*pageSize 全窗口。否则重复触发查询时
+      // 只写回「最后一页」会把已累积的行冲掉 —— 合集折叠后网格变矮、哨兵提前翻页,
+      // 这个竞态更容易撞上(实测 59 条只剩最后 11 条)。
+      const append = querySig === lastQuerySig.current && p > lastPage.current;
+      if (append) {
+        qs.set("offset", String((p - 1) * pageSize));
+        qs.set("limit", String(pageSize));
+      } else {
+        qs.set("offset", "0");
+        qs.set("limit", String(p * pageSize));
+      }
+      const list = await hubFetch<HubMaterial[]>(`/list?${qs}`);
+      if (loadSeq.current !== seq) return;
+      const rowsAll: HubMaterial[] = Array.isArray(list) ? list : [];
+      // 分页路径:total 已由 /count 写入,不能再用本页 rows 长度覆盖(否则共 N 条会变成 pageSize)。
+      setRows((prev) => (append ? [...prev, ...rowsAll] : rowsAll));
+      lastQuerySig.current = querySig;
+      lastPage.current = p;
     } catch (e) {
       if (loadSeq.current !== seq) return;
       setRows([]);
@@ -628,7 +1411,7 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
     } finally {
       if (loadSeq.current === seq) setBusy(false);
     }
-  }, [q, kind, tag, mode, sort, page, formSel, topicSel, usageSel, favOnly, taxonomy, copy.error, locale]);
+  }, [q, kind, tag, mode, sort, page, formSel, topicSel, usageSel, favOnly, copy.error]);
 
   // 切换收藏:乐观更新本页 rows(收藏置顶用稳定排序,组内保持当前顺序);
   // 若处于「仅看收藏」模式且取消收藏,该卡片立即移出列表。失败回滚。
@@ -665,6 +1448,18 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
     await Promise.all([loadQuery(), loadMeta()]);
   }, [loadQuery, loadMeta]);
 
+  // 结构筛选(类型/分面/收藏)变化 → 立刻清空出骨架;纯搜索词变化保留旧结果防抖,不闪空。
+  const structSig = [kind, tag, formSel, topicSel, usageSel, favOnly ? "1" : ""].join("|");
+  const structSigRef = useRef(structSig);
+  useEffect(() => {
+    if (structSigRef.current !== structSig) {
+      structSigRef.current = structSig;
+      setSkelReset(true);
+      setRows([]);
+      setSelected(new Set());
+    }
+  }, [structSig]);
+
   useEffect(() => {
     // 250ms 防抖:搜索框每敲一个字不再立刻发请求。只拉查询数据(loadQuery);
     // 全局 stats/tags 由 loadMeta 在挂载/结构性变更时拉一次即可,避免每次击键都重拉拖慢交互。
@@ -673,6 +1468,43 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
     const t = window.setTimeout(() => void loadQuery(), 250);
     return () => window.clearTimeout(t);
   }, [loadQuery]);
+
+  useEffect(() => {
+    if (!busy) setSkelReset(false);
+  }, [busy]);
+
+  // Esc:关闭浮层 / 退出多选(DAM 批量栏惯例)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (albumOpen) { setAlbumOpen(false); return; }
+      if (moveOpen) { setMoveOpen(false); return; }
+      if (selected.size || selectMode) {
+        setSelected(new Set());
+        setSelectMode(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [albumOpen, moveOpen, selected.size, selectMode]);
+
+  // 无限滚动(Douyin / B 站式):滚到底部(提前 400px)自动加载下一页;
+  // 同时保留「加载更多」按钮作为无观察者环境/手动兜底。仅在没有更多页时停用。
+  useEffect(() => {
+    if (busy) return;
+    const pg = Math.max(1, Math.ceil(total / pageSize));
+    if (page >= pg) return;
+    const el = sentinelRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting) setPage((p) => Math.min(pg, p + 1));
+      },
+      { rootMargin: "400px 0px" },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [busy, page, total, pageSize]);
 
   // 挂载时拉一次全局统计/词表(分面计数、标签 UI),之后仅在上传/删除/保存后由 load() 刷新。
   useEffect(() => {
@@ -689,15 +1521,27 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
 
   const facets = useMemo(() => {
     const kinds = stats?.kinds || {};
+    // 常显图/视频/音/文档;冷门 kind 仅有库存或当前选中时出现。
+    // 后端未回报的 CORE_KINDS 也补 0,保证主路径 tab 稳定。
+    const keys = new Set([...Object.keys(kinds), ...CORE_KINDS]);
+    const ordered = orderKinds([...keys]).filter(
+      (k) => CORE_KINDS.has(k) || (kinds[k] || 0) > 0 || kind === k,
+    );
     return [
       { val: "", label: copy.all, n: stats?.total || 0 },
-      ...orderKinds(Object.keys(kinds)).map((k) => ({
+      ...ordered.map((k) => ({
         val: k,
         label: kindLabel(k),
         n: kinds[k] || 0,
       })),
     ];
-  }, [stats, copy.all, kindLabel]);
+  }, [stats, copy.all, kindLabel, kind]);
+
+  // 工具栏「筛选 (N)」按钮的激活分面计数:侧栏分面(内容形式/题材/用途/标签),不含顶部类型标签与收藏
+  const activeFilterCount = useMemo(
+    () => [formSel, topicSel, usageSel, tag].filter(Boolean).length,
+    [formSel, topicSel, usageSel, tag],
+  );
 
   // 内容形式筛选数据:递归构建多级树(计数来自 stats.forms 按 leaf;上层由 form_descendants 聚合)
   const formGroups = useMemo(() => {
@@ -770,6 +1614,22 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
       document.removeEventListener("keydown", onKey);
     };
   }, [upCfgOpen]);
+  // 工具栏「⋯ 更多」溢出菜单:收纳检索方式 / 刷新 / 批量管理(低频、权力项,不抢主行)
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!moreOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (moreRef.current && !moreRef.current.contains(e.target as Node)) setMoreOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setMoreOpen(false); };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [moreOpen]);
   // 侧边栏顶部统一搜索:跨 内容形式/题材/用途 受控词表检索
   const [sideQ, setSideQ] = useState("");
   // 题材/用途标签的中英切换(对齐 UI locale,避免分类语言不一致)
@@ -807,11 +1667,15 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
 
   // 侧边栏分区折叠状态:默认展开「内容形式」,其余收起
   const [openSec, setOpenSec] = useState<Record<string, boolean>>({
-    form: true, kind: false, topic: false, usage: false, tags: false,
+    form: true, kind: false, topic: false, usage: false, albums: true, tags: false,
   });
   // 标签分业务/系统:系统标签来自流水线内部(sp/bilibili/job:/type:/parent:/role:/lang:/asr/demux/upload),默认收起
+  // album: 在「我的合集」专区展示,不进普通业务标签列表。
   const SYS_TAG_RE = /^(sp|bilibili|job:|type:|parent:|role:|lang:|asr|demux|upload)/;
-  const bizTags = useMemo(() => (tags || []).filter((t) => !SYS_TAG_RE.test(t.tag)), [tags]);
+  const bizTags = useMemo(
+    () => (tags || []).filter((t) => !SYS_TAG_RE.test(t.tag) && !t.tag.startsWith("album:")),
+    [tags],
+  );
   const sysTags = useMemo(() => (tags || []).filter((t) => SYS_TAG_RE.test(t.tag)), [tags]);
 
   // 标签人读文案以服务端 /tags?ui=1 为准(hub-api.ts 的 formatHubTag 仅作兜底)。
@@ -916,25 +1780,12 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
     return () => clearTimeout(t);
   }, [pendingIds, loadPending]);
 
-  // 移动端筛选抽屉:应用筛选后自动收起,让结果区可见
+  // 移动端筛选抽屉:应用筛选后自动收起,让结果区可见(桌面侧栏常驻,不被频繁收起)
   useEffect(() => {
-    setFiltersOpen(false);
+    if (typeof window !== "undefined" && window.matchMedia("(max-width: 720px)").matches) {
+      setFiltersOpen(false);
+    }
   }, [kind, tag, formSel, topicSel, usageSel]);
-
-  // 网格密度:localStorage 记忆(自适应/一行2个/一行1个)
-  useEffect(() => {
-    try {
-      const saved = window.localStorage.getItem("hubGridMode");
-      if (saved === "2" || saved === "1") setGridMode(saved);
-    } catch {}
-  }, []);
-
-  function applyGridMode(m: "" | "2" | "1") {
-    setGridMode(m);
-    try {
-      window.localStorage.setItem("hubGridMode", m);
-    } catch {}
-  }
 
   async function onUpload(files: FileList | null) {
     if (!files?.length) return;
@@ -1004,8 +1855,12 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
     });
     setToast(copy.deleted);
     if (detailRef.current?.id === m.id) setDetail(null);
-    await load();
-  }, [copy, load, setToast, setDetail]);
+    // 乐观移除:直接从已加载列表摘掉该卡片并递减总数,刷新分面计数;
+    // 不调用 load()(否则当前累积的多页会被整页替换、丢失滚动位置)。
+    setRows((prev) => prev.filter((r) => r.id !== m.id));
+    setTotal((t) => Math.max(0, t - 1));
+    void loadMeta();
+  }, [copy, loadMeta, setToast, setDetail]);
 
   async function removeDetail() {
     if (!detail) return;
@@ -1044,31 +1899,289 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
   const selectAllVisible = useCallback(() => {
     setSelected(new Set(rows.map((r) => r.id)));
   }, [rows]);
+
+  // 合集视图:按 job:/parent: 归组;组内仍是原来的 HubCard,不改任何单卡交互。
+  const gridEntries = useMemo<GridEntry[]>(
+    () => (collMode ? buildGridEntries(rows) : rows.map((m) => ({ type: "card" as const, m }))),
+    [collMode, rows],
+  );
+  const cardCtx = useMemo<HubCardCtx>(() => ({
+    copy, kindLabel, tagLabelMap, locale, pendingIds, selected, selectMode,
+    openDetail, removeMaterial, toggleFav, toggleSelect,
+  }), [copy, kindLabel, tagLabelMap, locale, pendingIds, selected, selectMode,
+       openDetail, removeMaterial, toggleFav, toggleSelect]);
+  const filterJob = useCallback((jobTag: string) => {
+    setKind("");
+    setTag(jobTag);
+    setPage(1);
+  }, []);
+  const selectGroup = useCallback((ids: string[]) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      const all = ids.every((id) => next.has(id));
+      for (const id of ids) {
+        if (all) next.delete(id);
+        else next.add(id);
+      }
+      return next;
+    });
+  }, []);
+  const renderCard = (m: HubMaterial) => (
+    <HubCard
+      key={m.id}
+      m={m}
+      copy={copy}
+      kindLabel={kindLabel}
+      tagLabelMap={tagLabelMap}
+      locale={locale}
+      pendingIds={pendingIds}
+      selected={selected.has(m.id)}
+      onOpen={selectMode ? toggleSelect : openDetail}
+      onDelete={removeMaterial}
+      onToggleFavorite={toggleFav}
+      onToggleSelect={toggleSelect}
+    />
+  );
+  // 「加入合集」候选:流水线 job 视频合集 + 用户 album 合集(此前漏了 job,页面上那俩合集选不了)
+  const collPickOptions = useMemo(() => {
+    type Opt = { tag: string; count: number; title: string; kind: "job" | "album" };
+    const map = new Map<string, Opt>();
+    const put = (tag: string, count: number, title?: string) => {
+      if (tag.startsWith("job:")) {
+        const id = tag.slice(4);
+        const prev = map.get(tag);
+        map.set(tag, {
+          tag,
+          kind: "job",
+          title: title || id,
+          count: Math.max(prev?.count || 0, count),
+        });
+      } else if (tag.startsWith("album:")) {
+        const prev = map.get(tag);
+        map.set(tag, {
+          tag,
+          kind: "album",
+          title: title || albumTitleOf(tag),
+          count: Math.max(prev?.count || 0, count),
+        });
+      }
+    };
+    // album 标题用纯名(albumTitleOf);tags.label 带「合集·」前缀,空合集也会难看
+    for (const tg of tags) {
+      if (tg.tag.startsWith("album:")) put(tg.tag, tg.count || 0);
+      else put(tg.tag, tg.count || 0, tg.label);
+    }
+    for (const r of rows) {
+      for (const t of csv(r.tags)) {
+        if (t.startsWith("job:") || t.startsWith("album:")) put(t, 0);
+      }
+    }
+    // 当前网格里已折叠的合集卡(标题更可读,如 BV 号)
+    for (const e of gridEntries) {
+      if (e.type !== "group" || !e.group.jobTag) continue;
+      put(e.group.jobTag, e.group.members.length, e.group.title);
+    }
+    const all = Array.from(map.values());
+    const jobs = all.filter((o) => o.kind === "job")
+      .sort((a, b) => b.count - a.count || a.title.localeCompare(b.title, locale));
+    const albums = all.filter((o) => o.kind === "album")
+      .sort((a, b) => a.title.localeCompare(b.title, locale));
+    return [...jobs, ...albums];
+  }, [tags, rows, gridEntries, locale]);
+  // 侧栏「我的合集」仍只展示用户 album
+  const albumOptions = useMemo(
+    () => collPickOptions.filter((o) => o.kind === "album"),
+    [collPickOptions],
+  );
+
+  const beginBulk = useCallback(() => {
+    if (bulkBusyRef.current) return false;
+    bulkBusyRef.current = true;
+    setBulkBusy(true);
+    return true;
+  }, []);
+  const endBulk = useCallback(() => {
+    bulkBusyRef.current = false;
+    setBulkBusy(false);
+  }, []);
+
   const bulkFavorite = useCallback(async () => {
     const ids = Array.from(selected);
-    if (!ids.length) return;
-    await Promise.all(ids.map((id) => hubSetFavorite(id, true).catch(() => undefined)));
-    setRows((prev) => prev.map((r) => (selected.has(r.id) ? { ...r, favorite: true } : r)));
-    setToast(copy.favMany);
-    clearSelect();
-  }, [selected, copy, clearSelect]);
+    if (!ids.length || !beginBulk()) return;
+    try {
+      await hubBulk("favorite", ids);
+      setRows((prev) => prev.map((r) => (selected.has(r.id) ? { ...r, favorite: true } : r)));
+      setToast(copy.favMany);
+      clearSelect();
+      setSelectMode(false);
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : copy.error);
+    } finally {
+      endBulk();
+    }
+  }, [selected, copy, clearSelect, beginBulk, endBulk]);
+
   const bulkDelete = useCallback(async () => {
     const ids = Array.from(selected);
-    if (!ids.length) return;
+    if (!ids.length || bulkBusyRef.current) return;
     if (!window.confirm(`${copy.delMany}？(${ids.length})`)) return;
-    await Promise.all(
-      ids.map((id) =>
-        hubFetch("/remove", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id }),
-        }).catch(() => undefined),
-      ),
-    );
-    setToast(fillCopy(copy.deletedMany, { n: String(ids.length) }));
-    clearSelect();
-    await load();
-  }, [selected, copy, clearSelect, load]);
+    if (!beginBulk()) return;
+    try {
+      const r = await hubBulk("remove", ids);
+      setToast(fillCopy(copy.deletedMany, { n: String(r.done || ids.length) }));
+      clearSelect();
+      setSelectMode(false);
+      setRows((prev) => prev.filter((x) => !ids.includes(x.id)));
+      setTotal((t) => Math.max(0, t - (r.done || ids.length)));
+      void loadMeta();
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : copy.error);
+    } finally {
+      endBulk();
+    }
+  }, [selected, copy, clearSelect, beginBulk, endBulk, loadMeta]);
+
+  const bulkAddToAlbum = useCallback(async (collTag: string) => {
+    const ids = Array.from(selected);
+    if (!ids.length || !collTag || !beginBulk()) return;
+    try {
+      // join_coll:album 合并;job 改写归属(否则护栏删不了旧 job:,合集卡也进不去)
+      const r = await hubBulk("join_coll", ids, { tags: collTag });
+      if ((r.errors || []).length && !r.done) {
+        throw new Error(r.errors?.[0]?.error || copy.error);
+      }
+      setRows((prev) => prev.map((row) => {
+        if (!selected.has(row.id)) return row;
+        let cur = csv(row.tags);
+        if (collTag.startsWith("job:")) cur = cur.filter((t) => !t.startsWith("job:"));
+        if (!cur.includes(collTag)) cur = [...cur, collTag];
+        return { ...row, tags: cur.join(",") };
+      }));
+      setToast(copy.albumAdded);
+      setAlbumOpen(false);
+      setAlbumName("");
+      clearSelect();
+      setSelectMode(false);
+      void loadMeta();
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : copy.error);
+    } finally {
+      endBulk();
+    }
+  }, [selected, copy, clearSelect, beginBulk, endBulk, loadMeta]);
+
+  const bulkMoveForm = useCallback(async (formId: string) => {
+    const ids = Array.from(selected);
+    if (!ids.length || !beginBulk()) return;
+    try {
+      const r = await hubBulk("set_form", ids, { form: formId });
+      setRows((prev) => prev.map((x) => (selected.has(x.id) ? { ...x, form: formId } : x)));
+      setToast(fillCopy(copy.movedMany, { n: String(r.done || ids.length) }));
+      setMoveOpen(false);
+      clearSelect();
+      setSelectMode(false);
+      void loadMeta();
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : copy.error);
+    } finally {
+      endBulk();
+    }
+  }, [selected, copy, clearSelect, beginBulk, endBulk, loadMeta]);
+
+  // 当前筛选若是合集 tag,批量栏可「移出合集」
+  const activeCollTag = (tag.startsWith("album:") || tag.startsWith("job:")) ? tag : "";
+
+  const bulkLeaveColl = useCallback(async () => {
+    const ids = Array.from(selected);
+    if (!ids.length || !activeCollTag || !beginBulk()) return;
+    if (!window.confirm(fillCopy(copy.leaveCollConfirm, { n: String(ids.length) }))) {
+      endBulk();
+      return;
+    }
+    try {
+      const r = await hubBulk("leave_coll", ids, { tags: activeCollTag });
+      setToast(copy.leftColl);
+      const leaveIds = new Set(ids);
+      setRows((prev) => prev
+        .map((row) => {
+          if (!leaveIds.has(row.id)) return row;
+          return { ...row, tags: csv(row.tags).filter((t) => t !== activeCollTag).join(",") };
+        })
+        // 「只看此合集」筛选下,移出的条目立刻从列表消失
+        .filter((row) => !(leaveIds.has(row.id) && activeCollTag)));
+      clearSelect();
+      setSelectMode(false);
+      setTotal((t) => Math.max(0, t - (r.done || ids.length)));
+      void loadMeta();
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : copy.error);
+    } finally {
+      endBulk();
+    }
+  }, [selected, activeCollTag, copy, clearSelect, beginBulk, endBulk, loadMeta]);
+
+  const renameColl = useCallback(async (collTag: string, title: string) => {
+    if (!collTag.startsWith("album:")) return;
+    const next = window.prompt(copy.albumRenamePh, title || albumTitleOf(collTag));
+    if (next == null) return;
+    const newTag = albumTagOf(next);
+    if (newTag === collTag) return;
+    try {
+      const r = await hubColl("rename", { from: collTag, to: newTag });
+      if (!r.ok) throw new Error(r.error || copy.error);
+      setToast(copy.albumRenamed);
+      if (tag === collTag) setTag(newTag);
+      setRows((prev) => prev.map((row) => {
+        const cur = csv(row.tags);
+        if (!cur.includes(collTag)) return row;
+        return { ...row, tags: cur.map((t) => (t === collTag ? newTag : t)).join(",") };
+      }));
+      void loadMeta();
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : copy.error);
+    }
+  }, [copy, tag, loadMeta]);
+
+  const dissolveColl = useCallback(async (collTag: string, title: string, kind: "album" | "job") => {
+    const msg = kind === "album"
+      ? fillCopy(copy.albumDeleteConfirm, { name: title })
+      : fillCopy(copy.jobDissolveConfirm, { name: title });
+    if (!window.confirm(msg)) return;
+    try {
+      const r = await hubColl("delete", { tag: collTag });
+      if (!r.ok && (r.errors || []).length) throw new Error(r.errors?.[0]?.error || copy.error);
+      setToast(copy.albumDeleted);
+      if (tag === collTag) { setTag(""); setPage(1); }
+      setRows((prev) => prev.map((row) => {
+        const cur = csv(row.tags);
+        if (!cur.includes(collTag)) return row;
+        return { ...row, tags: cur.filter((t) => t !== collTag).join(",") };
+      }));
+      void load();
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : copy.error);
+    }
+  }, [copy, tag, load]);
+
+  const createEmptyAlbum = useCallback(async () => {
+    const name = window.prompt(copy.albumNamePh, "");
+    if (name == null || !name.trim()) return;
+    try {
+      const r = await hubColl("create", { name: name.trim() });
+      if (!r.ok || !r.tag) throw new Error(r.error || copy.error);
+      // 空合集尚无成员时,先用 toast 提示;有选中则直接加入
+      if (selected.size > 0) {
+        await bulkAddToAlbum(r.tag);
+      } else {
+        setToast(`${copy.albumNew}: ${r.title || name.trim()}`);
+        setTag(r.tag);
+        setPage(1);
+        void loadMeta();
+      }
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : copy.error);
+    }
+  }, [copy, selected.size, bulkAddToAlbum, loadMeta]);
   const onDropFiles = useCallback(
     (e: DragEvent<HTMLDivElement>) => {
       e.preventDefault();
@@ -1087,16 +2200,16 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
           className="hub-aside-toggle"
           aria-expanded={filtersOpen}
           aria-controls="hub-aside-body"
+          title={filtersOpen ? copy.asideCollapse : copy.asideExpand}
+          aria-label={filtersOpen ? copy.asideCollapse : copy.asideExpand}
           onClick={() => setFiltersOpen((v) => !v)}
         >
-          <span className="nav-burger-box" aria-hidden="true">
-            <span />
-            <span />
-            <span />
-          </span>
-          {copy.asideFilter}
+          <span className="hub-aside-toggle-ico" aria-hidden="true">{filtersOpen ? "‹" : "›"}</span>
         </button>
         <aside id="hub-aside-body" className={`hub-aside${filtersOpen ? " open" : ""}`}>
+          <div className="hub-aside-top">
+            <span className="hub-aside-title">{copy.asideFilter}</span>
+          </div>
           {/* 侧边栏顶部统一搜索:跨 内容形式/题材/用途 三个受控词表检索,点结果即套用筛选。
               「上传默认分类」已移至工具栏上传按钮旁的 ⚙(它是上传设置,不是筛选,不应混在筛选区) */}
           <div className="hub-sidesearch">
@@ -1172,10 +2285,9 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
                     key={f.val || "all"}
                     type="button"
                     className={`hub-facet${kind === f.val ? " on" : ""}${f.n === 0 ? " zero" : ""}`}
-                    onClick={() => { setKind(kind === f.val ? "" : f.val); setPage(1); }}
+                    onClick={() => chooseKind(f.val)}
                   >
                     <span className="lbl">
-                      {f.val === "raw" && <span className="ico" aria-hidden="true">{KIND_ICON[f.val]}</span>}
                       {f.label}
                     </span>
                     <span className="n">{f.n}</span>
@@ -1249,6 +2361,58 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
             </div>
           </div>
 
+          {/* 我的合集:增删改查(点选=查;新建/重命名/删除=增改删) */}
+          <div className={`hub-sec${openSec.albums !== false ? " open" : ""}`}>
+            <SecHead
+              open={openSec.albums !== false}
+              onToggle={() => setOpenSec((s) => ({ ...s, albums: s.albums === false }))}
+            >
+              {copy.albumMine}
+            </SecHead>
+            <div className="hub-sec-body">
+              {albumOptions.length ? (
+                <div className="hub-album-list">
+                  {albumOptions.map((a) => (
+                    <div key={a.tag} className={`hub-album-row${tag === a.tag ? " on" : ""}`}>
+                      <button
+                        type="button"
+                        className="hub-album-main"
+                        title={a.tag}
+                        onClick={() => { setTag(tag === a.tag ? "" : a.tag); setPage(1); }}
+                      >
+                        <span className="hub-album-title">{a.title}</span>
+                        <span className="n">{a.count}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="hub-album-act"
+                        title={copy.albumRename}
+                        aria-label={copy.albumRename}
+                        onClick={() => void renameColl(a.tag, a.title)}
+                      >
+                        ✎
+                      </button>
+                      <button
+                        type="button"
+                        className="hub-album-act danger"
+                        title={copy.albumDelete}
+                        aria-label={copy.albumDelete}
+                        onClick={() => void dissolveColl(a.tag, a.title, "album")}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="hub-sec-hint">{copy.albumEmpty}</p>
+              )}
+              <button type="button" className="hub-album-new" onClick={() => void createEmptyAlbum()}>
+                + {copy.albumNew}
+              </button>
+            </div>
+          </div>
+
           {/* 标签:业务标签常显,系统/流水线标签收起 */}
           <div className={`hub-sec${openSec.tags ? " open" : ""}`}>
             <SecHead open={openSec.tags} onToggle={() => setOpenSec((s) => ({ ...s, tags: !s.tags }))}>{copy.tags}</SecHead>
@@ -1318,10 +2482,12 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
         </aside>
 
         <div className="hub-main">
-          <header className="home-intro try-intro">
-            <p className="kicker">{copy.kicker}</p>
-            <h1 className="hero-line">{copy.headline}</h1>
-            <p className="lede">{copy.lede}</p>
+          <header className="home-intro try-intro hub-hero">
+            <div className="hub-hero-text">
+              <p className="kicker">{copy.kicker}</p>
+              <h1 className="hero-line">{copy.headline}</h1>
+              <p className="lede">{copy.lede}</p>
+            </div>
             <div className="hub-hero-cta">
               <Link className="watch-btn hub-agent-cta" href={`/${locale}/hub/agent`}>
                 {copy.openAgent}
@@ -1331,6 +2497,65 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
               </Link>
             </div>
           </header>
+
+          <div className="hub-subnav">
+          {/* B 站风格:顶部醒目的媒体类型分段标签栏(带图标 + 计数),直接筛选 kind —— 一眼区分视频/图片/音频 */}
+          <div className="hub-typetabs" role="tablist" aria-label={copy.mediaType}>
+            {facets.map((f) => (
+              <button
+                key={f.val || "all"}
+                type="button"
+                role="tab"
+                aria-selected={kind === f.val}
+                className={`hub-typetab${kind === f.val ? " on" : ""}${f.n === 0 ? " zero" : ""}`}
+                onClick={() => chooseKind(f.val)}
+              >
+                <span className="ki" aria-hidden="true">{KIND_ICON[f.val] || "📦"}</span>
+                <span className="kl">{f.label}</span>
+                <span className="kn">{f.n}</span>
+              </button>
+            ))}
+          </div>
+
+          {/* 子分面(格式/角色/衍生):DAM 最佳实践把它们作为类型内的筛选项,而非独立类型。
+              视频→静音;图片→动图/相机原片;文档→字幕。计数来自后端 /api/stats.subfacets。 */}
+          {SUBFACETS[kind || ""] && (
+            <div className="hub-subfacets" style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+              <button
+                type="button"
+                className={`hub-typetab${tag === "" ? " on" : ""}`}
+                onClick={() => { setTag(""); setPage(1); }}
+              >
+                <span className="ki" aria-hidden="true">{KIND_ICON[kind] || "📦"}</span>
+                <span className="kl">{kindLabel(kind)} · {copy.all}</span>
+              </button>
+              {SUBFACETS[kind || ""]
+                .filter((sf) => {
+                  // 图片/视频子分面本身就少,全显;文档冷门格式(PDF/文稿/表格/演示)仅有库存或选中时显示。
+                  if (kind !== "docs") return true;
+                  const n = (subfacets?.docs as Record<string, number> | undefined)?.[sf.tag] ?? 0;
+                  return CORE_DOC_SUBFACETS.has(sf.tag) || n > 0 || tag === sf.tag;
+                })
+                .map((sf) => (
+                <button
+                  key={sf.tag}
+                  type="button"
+                  className={`hub-typetab${tag === sf.tag ? " on" : ""}${
+                    (((subfacets?.[kind || ""] as Record<string, number> | undefined)?.[sf.tag]) ?? 0) === 0
+                      ? " zero"
+                      : ""
+                  }`}
+                  onClick={() => { setTag(tag === sf.tag ? "" : sf.tag); setPage(1); }}
+                >
+                  <span className="ki" aria-hidden="true">{sf.icon}</span>
+                  <span className="kl">{copy[sf.label]}</span>
+                  <span className="kn">
+                    {((subfacets?.[kind || ""] as Record<string, number> | undefined)?.[sf.tag]) ?? 0}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
 
           <div className="hub-toolbar">
             <input
@@ -1343,43 +2568,108 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
               placeholder={copy.searchPh}
               aria-label={copy.searchPh}
             />
+            {/* 唯一带框的主筛选入口:点击展开/收起侧栏分面面板,并显示激活分面数 */}
+            <button
+              type="button"
+              className={`hub-filter-btn${activeFilterCount ? " on" : ""}`}
+              onClick={() => setFiltersOpen((v) => !v)}
+              aria-expanded={filtersOpen}
+              aria-controls="hub-aside-body"
+              title={copy.asideFilter}
+            >
+              {copy.asideFilter}
+              {activeFilterCount > 0 ? <span className="hub-filter-n">({activeFilterCount})</span> : null}
+            </button>
             <div className="hub-toolbar-actions">
-              <select value={mode} onChange={(e) => { setMode(e.target.value); setPage(1); }} aria-label={copy.modeAuto}>
-                <option value="auto">{copy.modeAuto}</option>
-                <option value="lexical">{copy.modeLex}</option>
-                <option value="semantic">{copy.modeSem}</option>
-              </select>
-              <select value={sort} onChange={(e) => { setSort(e.target.value); setPage(1); }} aria-label={copy.sortDefault}>
-                <option value="">{copy.sortDefault}</option>
-                <option value="newest">{copy.sortNewest}</option>
-                <option value="name">{copy.sortName}</option>
-                <option value="size">{copy.sortSize}</option>
-              </select>
+              {/* 视频合集:同任务的源片/字幕/翻译折叠成一张卡,可随时切回平铺 */}
               <button
                 type="button"
-                className={`watch-btn${favOnly ? " on" : ""}`}
+                className={`hub-coll-toggle${collMode ? " on" : ""}`}
+                onClick={() => setCollMode((v) => !v)}
+                aria-pressed={collMode}
+                title={copy.collModeHint}
+                aria-label={copy.collMode}
+              >
+                <span aria-hidden="true">🗂️</span> {copy.collMode}
+              </button>
+              {/* 排序:无边框、显当前值;「相关」仅在有关键词时出现 */}
+              <div className="hub-sort">
+                <span className="hub-sort-label">{copy.filterSort}</span>
+                <select
+                  value={q.trim() ? sort : sort === "" ? "newest" : sort}
+                  onChange={(e) => { setSort(e.target.value); setPage(1); }}
+                  aria-label={copy.filterSort}
+                >
+                  {q.trim() ? <option value="">{copy.sortDefault}</option> : null}
+                  <option value="newest">{copy.sortNewest}</option>
+                  <option value="name">{copy.sortName}</option>
+                  <option value="size">{copy.sortSize}</option>
+                </select>
+              </div>
+              {/* 收藏筛选:图标切换,选中填 ⭐ */}
+              <button
+                type="button"
+                className={`hub-fav${favOnly ? " on" : ""}`}
                 onClick={() => { setFavOnly((v) => !v); setPage(1); }}
                 aria-pressed={favOnly}
                 title={copy.favOnly}
+                aria-label={copy.favOnly}
               >
-                {favOnly ? "★ " + copy.favOnly : "☆ " + copy.favOnly}
+                <span aria-hidden="true">{favOnly ? "★" : "☆"}</span>
               </button>
-              {upNote ? <span className="hub-upnote">{upNote}</span> : null}
-              <button type="button" className="watch-btn" onClick={() => void load()} disabled={busy}>
-                {copy.refresh}
-              </button>
+              {/* 批量管理:主行常显(DAM 最佳实践——选中/加入合集要找得到,不埋进 ⋯) */}
               <button
                 type="button"
-                className={`watch-btn${selectMode ? " on" : ""}`}
+                className={`hub-batch-toggle${selectMode ? " on" : ""}`}
                 onClick={() => {
                   setSelectMode((v) => !v);
-                  if (selectMode) setSelected(new Set());
+                  if (selectMode) {
+                    setSelected(new Set());
+                    setAlbumOpen(false);
+                    setMoveOpen(false);
+                  }
                 }}
                 aria-pressed={selectMode}
                 title={copy.batch}
+                aria-label={copy.batch}
               >
-                {copy.batch}
+                {selectMode ? copy.exitSelect : copy.batch}
               </button>
+              {/* ⋯ 更多:收纳检索方式 / 刷新(低频) */}
+              <div className="hub-more" ref={moreRef}>
+                <button
+                  type="button"
+                  className={`hub-more-btn${moreOpen ? " on" : ""}`}
+                  onClick={() => setMoreOpen((v) => !v)}
+                  aria-expanded={moreOpen}
+                  aria-haspopup="true"
+                  title={copy.more}
+                  aria-label={copy.more}
+                >
+                  <span aria-hidden="true">⋯</span>
+                </button>
+                {moreOpen && (
+                  <div className="hub-more-pop" role="menu">
+                    <div className="hub-more-row">
+                      <span className="hub-more-k">{copy.searchMode}</span>
+                      <select value={mode} onChange={(e) => { setMode(e.target.value); setPage(1); }} aria-label={copy.searchMode}>
+                        <option value="auto">{copy.modeAuto}</option>
+                        <option value="lexical">{copy.modeLex}</option>
+                        <option value="semantic">{copy.modeSem}</option>
+                      </select>
+                    </div>
+                    <button
+                      type="button"
+                      className="hub-more-item"
+                      onClick={() => { void load(); setMoreOpen(false); }}
+                      disabled={busy}
+                    >
+                      {copy.refresh}
+                    </button>
+                  </div>
+                )}
+              </div>
+              {upNote ? <span className="hub-upnote">{upNote}</span> : null}
               <div className="hub-upwrap" ref={upCfgRef}>
                 <button type="button" className="watch-btn hub-upload" onClick={() => fileRef.current?.click()}>
                   {copy.upload}
@@ -1458,6 +2748,7 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
               onChange={(e) => void onUpload(e.target.files)}
             />
           </div>
+          </div>
 
           {err ? (
             <p className="hub-error">
@@ -1488,67 +2779,6 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
             </div>
           )}
 
-          <div className="hub-resultbar">
-            {q.trim() ? (
-              <p className="hub-stats">
-                {fillCopy(copy.hitOf, { q: q.trim(), n: String(total) })}
-              </p>
-            ) : (
-              <p className="hub-stats muted">
-                {copy.statTotal} {stats?.total ?? "—"}
-                {stats
-                  ? ` · ${Object.entries(stats.kinds || {})
-                      .map(([k, v]) => `${kindLabel(k)} ${v}`)
-                      .join(" · ")}`
-                  : ""}
-              </p>
-            )}
-            <div className="hub-gridmode" role="group" aria-label={copy.gridAuto}>
-              <button
-                type="button"
-                className={gridMode === "" ? "on" : ""}
-                aria-pressed={gridMode === ""}
-                title={copy.gridAuto}
-                aria-label={copy.gridAuto}
-                onClick={() => applyGridMode("")}
-              >
-                {/* auto-fill:2x2 自适应方块 */}
-                <svg viewBox="0 0 16 16" aria-hidden="true">
-                  <rect x="1.5" y="1.5" width="5" height="5" rx="1" />
-                  <rect x="9.5" y="1.5" width="5" height="5" rx="1" />
-                  <rect x="1.5" y="9.5" width="5" height="5" rx="1" />
-                  <rect x="9.5" y="9.5" width="5" height="5" rx="1" />
-                </svg>
-              </button>
-              <button
-                type="button"
-                className={gridMode === "2" ? "on" : ""}
-                aria-pressed={gridMode === "2"}
-                title={copy.gridTwo}
-                aria-label={copy.gridTwo}
-                onClick={() => applyGridMode("2")}
-              >
-                {/* 一行 2 个:两根立柱 */}
-                <svg viewBox="0 0 16 16" aria-hidden="true">
-                  <rect x="1.5" y="1.5" width="5" height="13" rx="1" />
-                  <rect x="9.5" y="1.5" width="5" height="13" rx="1" />
-                </svg>
-              </button>
-              <button
-                type="button"
-                className={gridMode === "1" ? "on" : ""}
-                aria-pressed={gridMode === "1"}
-                title={copy.gridOne}
-                aria-label={copy.gridOne}
-                onClick={() => applyGridMode("1")}
-              >
-                {/* 一行 1 个:单根立柱 */}
-                <svg viewBox="0 0 16 16" aria-hidden="true">
-                  <rect x="4.5" y="1.5" width="7" height="13" rx="1" />
-                </svg>
-              </button>
-            </div>
-          </div>
           {(() => {
             const stageCls = "hub-stage" + (dragOver ? " drag" : "") + (selectMode ? " selmode" : "");
             const stageProps = {
@@ -1563,19 +2793,41 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
               onDrop: onDropFiles,
             };
             const gridCls =
-              "hub-grid" + (gridMode ? ` cols-${gridMode}` : "") + (busy ? " busy" : "");
-            // 首屏加载:骨架屏(替代转圈),提升感知性能
-            if (busy && !rows.length && !err) {
+              "hub-grid" + (busy ? " busy" : "") + (busy && rows.length ? " refreshing" : "");
+            // 首屏 / 结构筛选切换:骨架屏(匹配合集模式布局),替代转圈与空态闪烁
+            if ((busy && !rows.length && !err) || skelReset) {
               return (
-                <div className={stageCls} {...stageProps}>
+                <div className={stageCls} {...stageProps} aria-busy="true" aria-label={copy.loading}>
                   <div className={gridCls}>
-                    {Array.from({ length: 12 }).map((_, i) => (
-                      <div className="hub-skel" key={i}>
-                        <div className="hub-skel-thumb" />
-                        <div className="hub-skel-line" />
-                        <div className="hub-skel-line short" />
-                      </div>
-                    ))}
+                    {collMode ? (
+                      <>
+                        {Array.from({ length: 2 }).map((_, i) => (
+                          <div className="hub-skel hub-skel-coll" key={`c${i}`}>
+                            <div className="hub-skel-coll-cover" />
+                            <div className="hub-skel-coll-meta">
+                              <div className="hub-skel-line" />
+                              <div className="hub-skel-line short" />
+                              <div className="hub-skel-line short" />
+                            </div>
+                          </div>
+                        ))}
+                        {Array.from({ length: 6 }).map((_, i) => (
+                          <div className="hub-skel" key={`k${i}`}>
+                            <div className="hub-skel-thumb" />
+                            <div className="hub-skel-line" />
+                            <div className="hub-skel-line short" />
+                          </div>
+                        ))}
+                      </>
+                    ) : (
+                      Array.from({ length: 12 }).map((_, i) => (
+                        <div className="hub-skel" key={i}>
+                          <div className="hub-skel-thumb" />
+                          <div className="hub-skel-line" />
+                          <div className="hub-skel-line short" />
+                        </div>
+                      ))
+                    )}
                   </div>
                 </div>
               );
@@ -1593,57 +2845,178 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
             return (
               <div className={stageCls} {...stageProps}>
                 <div className={gridCls}>
-                  {rows.map((m) => (
-                    <HubCard
-                      key={m.id}
-                      m={m}
-                      copy={copy}
-                      kindLabel={kindLabel}
-                      tagLabelMap={tagLabelMap}
-                      locale={locale}
-                      pendingIds={pendingIds}
-                      selected={selected.has(m.id)}
-                      onOpen={selectMode ? toggleSelect : openDetail}
-                      onDelete={removeMaterial}
-                      onToggleFavorite={toggleFav}
-                      onToggleSelect={toggleSelect}
-                    />
-                  ))}
+                  {gridEntries.map((e) =>
+                    e.type === "card" ? renderCard(e.m) : (
+                      <HubCollection
+                        key={`g-${e.group.key}`}
+                        group={e.group}
+                        defaultOpen={!!e.group.jobTag && tag === e.group.jobTag}
+                        cardCtx={cardCtx}
+                        onFilterJob={filterJob}
+                        onSelectGroup={selectGroup}
+                        onRenameColl={(t, title) => void renameColl(t, title)}
+                        onDissolveColl={(t, title, kind) => void dissolveColl(t, title, kind)}
+                      />
+                    ),
+                  )}
                 </div>
               </div>
             );
           })()}
 
-          <div className="hub-pager">
-            <button
-              type="button"
-              disabled={page <= 1}
-              onClick={() => setPage((p) => Math.max(1, p - 1))}
-            >
-              {copy.prev}
-            </button>
-            <span>
+          <div className="hub-loadmore">
+            <span className="hub-loadcount">
               {fillCopy(copy.pageOf, {
-                p: String(page),
+                p: String(Math.min(rows.length, total)),
                 n: String(pages),
                 t: String(total),
               })}
             </span>
-            <button
-              type="button"
-              disabled={page >= pages}
-              onClick={() => setPage((p) => p + 1)}
-            >
-              {copy.next}
-            </button>
+            {page < pages && (
+              <button
+                type="button"
+                className="watch-btn hub-loadbtn"
+                disabled={busy}
+                onClick={() => setPage((p) => Math.min(pages, p + 1))}
+              >
+                {copy.loadMore}
+              </button>
+            )}
           </div>
+          <div ref={sentinelRef} className="hub-sentinel" aria-hidden="true" />
           {(selected.size > 0 || selectMode) && (
-            <div className="hub-bulkbar" role="toolbar" aria-label={copy.select}>
-              <span className="n">{selected.size > 0 ? fillCopy(copy.selCount, { n: String(selected.size) }) : copy.selHint}</span>
-              <button type="button" className="watch-btn" onClick={selectAllVisible}>{copy.selectAll}</button>
-              <button type="button" className="watch-btn" onClick={() => void bulkFavorite()}>{copy.favMany}</button>
-              <button type="button" className="watch-btn hub-danger" onClick={() => void bulkDelete()}>{copy.delMany}</button>
-              <button type="button" className="watch-btn" onClick={clearSelect}>{copy.clearSel}</button>
+            <div className={`hub-bulkbar${bulkBusy ? " busy" : ""}`} role="toolbar" aria-label={copy.select}>
+              <span className="hub-bulk-count" aria-live="polite">
+                {selected.size > 0
+                  ? fillCopy(copy.selCount, { n: String(selected.size) })
+                  : copy.selHint}
+              </span>
+              <button type="button" className="watch-btn" disabled={bulkBusy} onClick={selectAllVisible}>{copy.selectAll}</button>
+              <div className="hub-bulk-popwrap">
+                <button
+                  type="button"
+                  className={`watch-btn hub-bulk-primary${albumOpen ? " on" : ""}`}
+                  disabled={bulkBusy || selected.size === 0}
+                  aria-expanded={albumOpen}
+                  onClick={() => { setAlbumOpen((v) => !v); setMoveOpen(false); }}
+                >
+                  {copy.addToAlbum}
+                </button>
+                {albumOpen && (
+                  <div className="hub-bulk-pop" role="dialog" aria-label={copy.addToAlbum}>
+                    <p className="hub-bulk-pop-hint">{copy.addToAlbumHint}</p>
+                    {collPickOptions.length ? (
+                      <div className="hub-bulk-pop-list">
+                        {collPickOptions.map((a) => (
+                          <button
+                            key={a.tag}
+                            type="button"
+                            className="hub-bulk-pop-item"
+                            disabled={bulkBusy}
+                            title={a.tag}
+                            onClick={() => void bulkAddToAlbum(a.tag)}
+                          >
+                            <span className="hub-bulk-pop-item-main">
+                              <span className={`hub-bulk-pop-kind k-${a.kind}`}>
+                                {a.kind === "job" ? copy.collTitle : copy.collAlbumTitle}
+                              </span>
+                              <span>{a.title}</span>
+                            </span>
+                            <span className="n">{a.count}</span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="hub-bulk-pop-empty">{copy.albumEmpty}</p>
+                    )}
+                    <div className="hub-bulk-pop-new">
+                      <span className="hub-bulk-pop-k">{copy.albumNew}</span>
+                      <input
+                        className="hub-field"
+                        value={albumName}
+                        onChange={(e) => setAlbumName(e.target.value)}
+                        placeholder={copy.albumNamePh}
+                        aria-label={copy.albumNamePh}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && albumName.trim()) {
+                            e.preventDefault();
+                            void bulkAddToAlbum(albumTagOf(albumName));
+                          }
+                        }}
+                      />
+                      <button
+                        type="button"
+                        className="watch-btn hub-bulk-primary"
+                        disabled={bulkBusy || !albumName.trim() || selected.size === 0}
+                        onClick={() => void bulkAddToAlbum(albumTagOf(albumName))}
+                      >
+                        {copy.albumCreate}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div className="hub-bulk-popwrap">
+                <button
+                  type="button"
+                  className={`watch-btn${moveOpen ? " on" : ""}`}
+                  disabled={bulkBusy || selected.size === 0}
+                  aria-expanded={moveOpen}
+                  onClick={() => { setMoveOpen((v) => !v); setAlbumOpen(false); }}
+                >
+                  {copy.moveMany}
+                </button>
+                {moveOpen && (
+                  <div className="hub-bulk-pop hub-bulk-pop-move" role="dialog" aria-label={copy.moveMany}>
+                    <p className="hub-bulk-pop-hint">{copy.moveManyHint}</p>
+                    <div className="hub-bulk-pop-k">{copy.moveForm}</div>
+                    <FormPicker
+                      value=""
+                      onChange={(id) => void bulkMoveForm(id)}
+                      options={(locale.startsWith("en")
+                        ? (taxonomy?.form_options_en || taxonomy?.form_options || [])
+                        : (taxonomy?.form_options || [])) as [string, string][]}
+                      placeholder={copy.formUnclassified}
+                      searchPh={copy.formPickSearch}
+                      emptyPh={copy.formPickEmpty}
+                    />
+                    <button
+                      type="button"
+                      className="hub-bulk-pop-item muted"
+                      disabled={bulkBusy}
+                      onClick={() => void bulkMoveForm("")}
+                    >
+                      {copy.formUnclassified}
+                    </button>
+                  </div>
+                )}
+              </div>
+              {activeCollTag ? (
+                <button
+                  type="button"
+                  className="watch-btn"
+                  disabled={bulkBusy || selected.size === 0}
+                  onClick={() => void bulkLeaveColl()}
+                >
+                  {copy.leaveColl}
+                </button>
+              ) : null}
+              <button type="button" className="watch-btn" disabled={bulkBusy || selected.size === 0} onClick={() => void bulkFavorite()}>{copy.favorite}</button>
+              <button type="button" className="watch-btn hub-danger" disabled={bulkBusy || selected.size === 0} onClick={() => void bulkDelete()}>{copy.del}</button>
+              <button
+                type="button"
+                className="watch-btn"
+                disabled={bulkBusy}
+                onClick={() => {
+                  clearSelect();
+                  setSelectMode(false);
+                  setAlbumOpen(false);
+                  setMoveOpen(false);
+                }}
+              >
+                {copy.exitSelect}
+              </button>
+              {bulkBusy ? <span className="hub-bulk-busy" aria-live="polite">{copy.bulkWorking}</span> : null}
             </div>
           )}
         </div>
@@ -1663,43 +3036,18 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
                 ✕
               </button>
             </div>
-            <div
-              className={
-                "hub-prev" +
-                (detail.kind === "images" || detail.kind === "anim" ? " checker" : "")
-              }
-            >
-              {detail.missing ? (
-                <span className="ph">⚠</span>
-              ) : detail.kind === "images" || detail.kind === "anim" ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={hubFileUrl(detail.id)}
-                  alt=""
-                  className="zoomable"
-                  title={copy.zoomTitle}
-                  decoding="async"
-                  onClick={() => setZoom(true)}
-                />
-              ) : detail.kind === "videos" || detail.kind === "silent" ? (
-                <video
-                  key={detail.id}
-                  src={hubFileUrl(detail.id)}
-                  controls
-                  playsInline
-                  preload="metadata"
-                  muted={detail.kind === "silent"}
-                  poster={detail.thumb ? hubThumbUrl(detail.id) : undefined}
-                  onLoadedMetadata={(e) => {
-                    if (detail.hit_t) e.currentTarget.currentTime = detail.hit_t;
-                  }}
-                />
-              ) : detail.kind === "audio" ? (
-                <audio src={hubFileUrl(detail.id)} controls />
-              ) : (
-                <span className="ph">{(detail.ext || "?").toUpperCase()}</span>
-              )}
-            </div>
+            {detail.missing ? (
+              <div className="hub-prev"><span className="ph">⚠</span></div>
+            ) : isSubtitleFile(detail) ? (
+              <SubtitlePanel detail={detail} copy={copy} />
+            ) : (
+              <HubFilePreview
+                key={detail.id}
+                detail={detail}
+                copy={copy}
+                onZoom={() => setZoom(true)}
+              />
+            )}
             <dl className="hub-kv">
               <dt>{copy.typeSize}</dt>
               <dd>
@@ -1759,7 +3107,8 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
                 ) : null}
               </div>
             ) : null}
-            {/* 步骤 6:按需交付(计划 → 确认 → 下载) */}
+            {/* 步骤 6:按需交付(计划 → 确认 → 下载) — 仅视频需要字幕烧录/嵌入,其它类型不显示 */}
+            {detail.kind === "videos" ? (
             <div className="hub-run hub-export">
               <div className="hub-export-title">{copy.exportTitle}</div>
               <div className="hub-export-row">
@@ -1823,6 +3172,7 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
                 </div>
               ) : null}
             </div>
+            ) : null}
             <input
               className="hub-field"
               value={editTags}
@@ -1865,7 +3215,7 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
         </div>
       ) : null}
 
-      {zoom && detail && !detail.missing && (detail.kind === "images" || detail.kind === "anim") ? (
+      {zoom && detail && !detail.missing && detail.kind === "images" ? (
         <div
           className="hub-lightbox"
           onClick={() => {

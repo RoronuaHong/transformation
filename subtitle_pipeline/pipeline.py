@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -29,27 +30,34 @@ from job_layout import (
     locale_srt_path,
 )
 from langs import (
+    DEFAULT_PACK,
     coalesce_source_lang,
     file_tag,
     lang_name,
     normalize_lang,
     resolve_targets,
     same_language,
+    to_traditional,
     whisper_lang,
 )
 from multipass_asr import (
     VAD_PARAMS_DEFAULT,
     _ASR_MODEL_LOCK,
     _log_asr_memory,
+    _available_ram_gb,
+    _vram_free_gb,
+    ensure_ct2_backend,
     llm_correct_segments,
     load_hotwords,
     nearest_text,
+    refine_bounds_from_words,
     restore_truncated_from_baseline,
     rule_fix,
     save_raw,
     strip_internal_fields,
     transcribe_multipass,
 )
+from subtitle_timing import normalize_cue_timing
 from sync_utils import (
     apply_slice_offset,
     assert_timeline_aligned,
@@ -57,12 +65,13 @@ from sync_utils import (
     validate_srt_monotonic,
     write_sync_meta,
 )
+import translation_integrity as ti
 
 DEFAULT_TRANSLATE = "translategemma:4b"
 DEFAULT_CHAT = "gemma4:e2b"  # ASR polish / glossary / correct / summarize
 DEFAULT_OLLAMA = DEFAULT_TRANSLATE  # CLI --ollama-model (translate)
 DEFAULT_CORRECT = DEFAULT_CHAT  # CLI --correct-model / --chat-model
-DEFAULT_LANGS = "site"  # 16-lang pack; CLI may pass all / world / core / list
+DEFAULT_LANGS = DEFAULT_PACK  # fununion20 (20-lang); CLI may pass site / all / world / core / list
 DEFAULT_LANG_WORKERS = 2
 # Best open Whisper: large-v3. On RTX 2060 6GB use int8 (see pick_compute_type).
 LOCAL_WHISPER = Path(r"D:\LLM\whisper-models\faster-whisper-large-v3")
@@ -126,7 +135,11 @@ def find_ollama() -> str:
 
 
 def stop_ollama_runners() -> None:
-    """Unload Ollama models so Whisper has RAM/VRAM (6GB / multipass)."""
+    """Unload Ollama models so Whisper has RAM/VRAM (6GB / multipass).
+
+    停前/停后各记一次 RAM 与 VRAM 口径，量化实际释放量并写入日志，
+    便于评估 Ollama 占用（尤其是 gemma4 这类大模型的 CPU 回退）的真实代价。
+    """
     ollama = shutil.which("ollama")
     if not ollama:
         local = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama.exe"
@@ -138,10 +151,14 @@ def stop_ollama_runners() -> None:
             data = json.loads(resp.read().decode("utf-8"))
     except Exception:
         return
-    for item in data.get("models") or []:
-        name = item.get("name") or item.get("model")
-        if not name:
-            continue
+    models = [item.get("name") or item.get("model") for item in (data.get("models") or [])]
+    models = [m for m in models if m]
+    if not models:
+        return
+    # 停前/停后各记一次独立口径，量化实际释放（CPU 回退模型释放 RAM，GPU 模型释放 VRAM）。
+    ram_before = _available_ram_gb()
+    vram_before = _vram_free_gb()
+    for name in models:
         try:
             subprocess.run(
                 [ollama, "stop", name],
@@ -153,7 +170,26 @@ def stop_ollama_runners() -> None:
             )
         except Exception:
             pass
-    print("[env] ollama models stopped (free RAM for Whisper)")
+    # 给 Ollama runner 进程退出、归还内存一点时间，避免低估释放量。
+    time.sleep(1.5)
+    ram_after = _available_ram_gb()
+    vram_after = _vram_free_gb()
+    freed_ram = (
+        (ram_after - ram_before)
+        if (ram_before is not None and ram_after is not None)
+        else None
+    )
+    freed_vram = (
+        (vram_after - vram_before)
+        if (vram_before is not None and vram_after is not None)
+        else None
+    )
+    parts = [f"stopped {len(models)} model(s)"]
+    if freed_ram is not None:
+        parts.append(f"RAM +{freed_ram:.1f}GB")
+    if freed_vram is not None:
+        parts.append(f"VRAM +{freed_vram:.1f}GB")
+    print("[env] ollama runners stopped (" + "; ".join(parts) + ") -> free RAM for Whisper")
 
 
 def resolve_whisper_id(model_size: str) -> str:
@@ -177,7 +213,7 @@ def resolve_whisper_id(model_size: str) -> str:
 
 
 def pick_compute_type(device: str, model_id: str) -> str:
-    """large-v3 needs ~10GB in float16; on 6GB cards use int8."""
+    """large-v3 in float16 needs ~10GB VRAM; on 6GB cards use int8."""
     if device != "cuda":
         return "int8"
     name = model_id.replace("\\", "/").lower()
@@ -283,23 +319,27 @@ def extract_audio(ffmpeg: str, video: Path, wav: Path) -> None:
 
 def release_cuda() -> None:
     gc.collect()
+    # 不要在 CPU-only 路径上为了清缓存而 import torch：加载 torch/CUDA DLL 会占用
+    # page file，本机内存紧张时直接触发 WinError 1455。只在 torch 已被加载时清理。
+    torch_mod = sys.modules.get("torch")
+    if torch_mod is None:
+        return
     try:
-        import torch
-
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        if torch_mod.cuda.is_available():
+            torch_mod.cuda.empty_cache()
     except Exception:
         pass
 
 
 def transcribe(wav: Path, model_size: str, device: str, language: str) -> tuple[list[dict], str]:
+    ensure_ct2_backend()
     from faster_whisper import WhisperModel
 
     with _ASR_MODEL_LOCK:
         model_id = resolve_whisper_id(model_size)
         compute = pick_compute_type(device, model_id)
         asr_lang = whisper_lang(language)
-        _log_asr_memory(model_id)
+        _log_asr_memory(model_id, device)
         print(f"[whisper] loading {model_id} device={device} compute={compute}")
         model = WhisperModel(model_id, device=device, compute_type=compute)
         try:
@@ -316,6 +356,8 @@ def transcribe(wav: Path, model_size: str, device: str, language: str) -> tuple[
                 log_prob_threshold=-1.0,
                 no_speech_threshold=0.6,
             )
+            # word 级时间戳：精确卡住语音边界，去掉段级 VAD 静音填充造成的早/迟。
+            kwargs.setdefault("word_timestamps", True)
             if asr_lang:
                 kwargs["language"] = asr_lang
             segments_iter, info = model.transcribe(str(wav), **kwargs)
@@ -334,7 +376,8 @@ def transcribe(wav: Path, model_size: str, device: str, language: str) -> tuple[
                 avg_lp = float(getattr(s, "avg_logprob", 0.0) or 0.0)
                 if no_speech > 0.8 and avg_lp < -1.5:
                     continue
-                out.append({"start": float(s.start), "end": float(s.end), "text": text})
+                start, end = refine_bounds_from_words(s)
+                out.append({"start": round(start, 3), "end": round(end, 3), "text": text})
             result = (out, detected)
         finally:
             del model
@@ -451,11 +494,27 @@ def extract_json_array(text: str) -> list:
     return []
 
 
+def load_job_glossary(out_dir: Path) -> dict:
+    """CLI translate 与 run_batch 共用 job 术语表/语境（单一真源）。"""
+    path = job_media_dir(out_dir) / "glossary.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def format_glossary(glossary: dict) -> str:
     names = glossary.get("names") or {}
     terms = glossary.get("terms") or {}
     fixes = glossary.get("asr_fix") or {}
+    context = str(glossary.get("context") or "").strip()
     lines = []
+    if context:
+        lines.append("Context (reference only, NOT an input line, do not translate):")
+        lines.append(f"- {context}")
     if names:
         lines.append("Names (keep consistent):")
         for src, dst in names.items():
@@ -603,6 +662,8 @@ def translate_segments(
     source_lang: str,
     glossary: dict | None = None,
     batch_size: int = 24,
+    *,
+    proofread_report: dict | None = None,
 ) -> list[dict]:
     src_name = lang_name(source_lang)
     tgt_name = lang_name(target_lang)
@@ -611,7 +672,29 @@ def translate_segments(
 
     # 源语言 → 同一语言：恒等返回（resolve_targets 正常已排除，双保险）
     if same_language(target_lang, source_lang):
+        if proofread_report is not None:
+            from llm.verify import ProofreadReport
+
+            proofread_report.update(ProofreadReport(status="skipped", mode="same_language").to_dict())
         return [dict(s) for s in segments]
+
+    # zh → zh-Hant 是逐字简繁转换，不是翻译。走确定性路径，避免简/繁两轨
+    # 被 LLM 各自改写（曾出现简轨「延绵」、繁轨「延綿不絕」不同内容）。
+    if normalize_lang(source_lang) == "zh" and normalize_lang(target_lang) == "zh-Hant":
+        out = [
+            {**s, "text": to_traditional((s.get("text") or "").strip())}
+            for s in segments
+        ]
+        if proofread_report is not None:
+            from llm.verify import ProofreadReport
+
+            proofread_report.update(
+                ProofreadReport(
+                    status="ok", mode="deterministic_zh_hant",
+                    total=len(out), consensus=len(out),
+                ).to_dict()
+            )
+        return out
 
     total = len(segments)
 
@@ -626,12 +709,21 @@ def translate_segments(
             "- Prefer Simplified Chinese if target is Simplified Chinese.\n"
             "- Keep length close to the source; for short-video Chinese→English "
             "prefer condensation under ~42 Latin characters when meaning allows.\n"
-            "- Use the glossary for names/terms when present; "
+            "- Use the glossary/context for names/terms and sense when present; "
             "otherwise keep names consistent across lines.\n"
+            "- Output plain subtitle text only: no dictionaries, no language labels, "
+            "no IDs or URLs, no explanations.\n"
             f"{gloss}\n"
             "Return ONLY a JSON array of strings.\n\n"
             f"{numbered}"
         )
+
+    def _coerce_line(item) -> str:
+        """模型偶发返回 [{"English": "..."}] 这类对象数组：取单值，别整块判废。"""
+        if isinstance(item, dict):
+            vals = [str(v).strip() for v in item.values() if isinstance(v, str)]
+            return ti.clean_model_output(vals[0]) if len(vals) == 1 else ""
+        return ti.clean_model_output(str(item).strip())
 
     def _translate_chunk(chunk: list[dict]) -> list[str]:
         """翻一个分块：整块重试一次 → 对半细分 → 单行简版提示 → 保留原文。"""
@@ -640,10 +732,13 @@ def translate_segments(
         for attempt in (1, 2):
             try:
                 raw = ollama_chat(ollama, model, prompt, role="translate")
-                arr = [str(x).strip() for x in extract_json_array(raw)]
-                out = [arr[i] if i < len(arr) and arr[i] else "" for i in range(len(chunk))]
-                if any(out):
-                    return out
+                arr = [_coerce_line(x) for x in extract_json_array(raw)]
+                if len(arr) != len(chunk):
+                    # 模型把语境说明也当成一行翻译 → 整批数组错位，必须重试。
+                    locked_print(f"[translate-retry] {tag} array {len(arr)} != {len(chunk)}")
+                    continue
+                if any(arr):
+                    return arr
             except Exception as e:  # noqa: BLE001 — 细分/兜底在下面
                 locked_print(
                     f"[translate-retry] {tag} chunk({len(chunk)}) "
@@ -656,11 +751,17 @@ def translate_segments(
         # 单行：简版提示再试，仍失败保留原文（由调用方回落）
         seg = chunk[0]
         try:
-            text = ollama_chat(
-                ollama,
-                model,
-                f"Translate to {tgt_name}. Output only the translation:\n{seg['text']}",
-                role="translate",
+            text = ti.clean_model_output(
+                ollama_chat(
+                    ollama,
+                    model,
+                    f"Translate this {src_name} subtitle line into {tgt_name}.\n"
+                    "Output ONLY the natural target-language subtitle text, "
+                    "using its own script (kana/hangul where applicable). "
+                    "No Chinese-only text, IDs, labels, dictionaries or explanations.\n"
+                    f"Source: {seg['text']}\n{tgt_name}:",
+                    role="translate",
+                )
             )
             return [text.splitlines()[0].strip() if text else ""]
         except Exception as e:  # noqa: BLE001 — 保留原文
@@ -668,6 +769,22 @@ def translate_segments(
                 f"[translate-skip] {tag} keep source for 1 cue: {type(e).__name__}"
             )
             return [""]
+
+    def _strict_retranslate(src_text: str) -> str:
+        """单独重译：不注入术语表/语境（单行场景它们会被模型当成台词翻出来）。"""
+        prompt = (
+            f"Translate this {src_name} subtitle line into {tgt_name}.\n"
+            "Output ONLY the natural target-language subtitle text, "
+            "using its own script (kana/hangul where applicable).\n"
+            "Never copy the source line verbatim; never output Chinese-only text, "
+            "IDs, language labels, dictionaries, term lists or explanations.\n"
+            f"Source: {src_text}\n{tgt_name}:"
+        )
+        try:
+            raw = ollama_chat(ollama, model, prompt, role="translate")
+        except Exception:  # noqa: BLE001 — 失败留给 integrity QA 标记
+            return ""
+        return ti.clean_model_output((raw or "").splitlines()[0].strip())
 
     for start in range(0, total, batch_size):
         chunk = segments[start : start + batch_size]
@@ -677,14 +794,60 @@ def translate_segments(
         arr = _translate_chunk(chunk)
         for i, seg in enumerate(chunk):
             text = (arr[i] if i < len(arr) else "") or ""
-            text = re.sub(r'^["“]|["”]$', "", text.strip()).strip()
+            text = ti.clean_model_output(re.sub(r'^["“]|["”]$', "", text.strip()).strip())
             src_t = (seg.get("text") or "").strip()
-            # Reject empty / extreme padding (MTPE: keep cue count & timing locked).
+            # Reject empty / hard pollution / extreme padding (cue count & timing locked).
             if not text:
                 text = src_t
             elif src_t and len(text) > max(len(src_t) * 4, len(src_t) + 48):
                 text = text[: max(12, int(len(src_t) * 2.5))].rstrip()
             translated.append({"start": seg["start"], "end": seg["end"], "text": text})
+
+    # ── 多模型校对（生产热路径）────────────────────────────────────────────
+    # 主译 t1 已出稿；用独立 verify 模型副译 → 共识比对 → 不一致 cue 回译+Judge
+    # → 择优替换。校对内部吞掉所有异常并原样返回 t1，绝不阻断翻译 job。
+    # 报告通过 proofread_report 出参交给 do_translate 写入 translate_qa_*.json。
+    from llm.verify import proofread_lines
+
+    src_lines = [(s.get("text") or "").strip() for s in segments]
+    t1_lines = [t["text"] for t in translated]
+    final_lines, pr = proofread_lines(
+        src_lines,
+        t1_lines,
+        src_lang=lang_name(source_lang),
+        tgt_lang=lang_name(target_lang),
+    )
+    relanged: set[int] = set()
+    for i, (seg, text) in enumerate(zip(translated, final_lines)):
+        if (ti.wrong_language(text, target_lang, src_lines[i])
+                or ti.overlong(text, src_lines[i], target_lang)):
+            retry = _strict_retranslate(src_lines[i])
+            if retry and not (
+                ti.wrong_language(retry, target_lang, src_lines[i])
+                or ti.overlong(retry, src_lines[i], target_lang)
+            ):
+                text = retry
+                relanged.add(i)
+                locked_print(f"[translate-relang {file_tag(target_lang)}] #{i+1}")
+        seg["text"] = text
+    if relanged:
+        # 强制重译已解决这些 cue，校对报告里的 human_review 不能留在 QA 里误报。
+        before = len(pr.flags)
+        pr.flags = [
+            f for f in pr.flags
+            if not (f.get("index") in relanged and f.get("reason") == "hard_issue_unresolved")
+        ]
+        pr.human_review = max(0, pr.human_review - (before - len(pr.flags)))
+    if proofread_report is not None:
+        proofread_report.update(pr.to_dict())
+    if pr.status == "ok":
+        locked_print(
+            f"[proofread {file_tag(target_lang)}] consensus={pr.consensus} "
+            f"divergent={pr.divergent} judged={pr.judged} repaired={pr.repaired} "
+            f"review={pr.human_review}"
+        )
+    elif pr.status != "disabled":
+        locked_print(f"[proofread {file_tag(target_lang)}] {pr.status}: {pr.error or 'skipped'}")
     return translated
 
 
@@ -1458,7 +1621,7 @@ def add_common_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument(
         "--langs",
         default=DEFAULT_LANGS,
-        help="site (16, default) | all | world | core | en,es,ar",
+        help="fununion20 (20, default) | site (16) | all | world | core | en,es,ar",
     )
     ap.add_argument(
         "--target-lang",
@@ -1682,6 +1845,19 @@ def do_translate(
     if not targets:
         print("[translate] no target languages (pack empty or only source lang)")
         return
+    # 翻译前：源字幕硬污染（BV id / 占位符）先从 multipass_raw 恢复；
+    # 与源文完全无关的术语表直接丢弃，防止跨 job 串稿进入 20 语提示词。
+    segs, src_qa = ti.repair_source_segments(segs, out_dir)
+    # 时间轴规范化（best-practice：收敛重叠、最小时长、最大时长兜底），
+    # 在翻译前对源 segs 统一处理 → 所有语轨共享同一规范化时间，锁轴 QA 不破。
+    segs = normalize_cue_timing(segs)
+    if src_qa["repaired"]:
+        print(f"[source-qa] restored {src_qa['repaired']} polluted cue(s) from multipass_raw")
+    glossary, gloss_qa = ti.filter_glossary_by_source(
+        glossary, [(s.get("text") or "") for s in segs]
+    )
+    if gloss_qa["dropped"]:
+        print(f"[glossary] dropped {gloss_qa['dropped']} unrelated term(s)")
     workers = lang_workers(getattr(args, "lang_workers", None))
     print(
         f"[translate] {len(targets)} languages via {args.ollama_model} "
@@ -1695,6 +1871,7 @@ def do_translate(
         if out_srt.exists() and not args.force:
             locked_print(f"[skip] {out_srt.name} exists")
             return
+        proofread: dict = {}
         xx = translate_segments(
             ollama,
             args.ollama_model,
@@ -1702,6 +1879,7 @@ def do_translate(
             lang,
             source_lang=args.source_lang,
             glossary=glossary or None,
+            proofread_report=proofread,
         )
         assert_timeline_aligned(segs, xx, label=f"{tag}.srt")
         warns = validate_srt_monotonic(xx)
@@ -1714,9 +1892,30 @@ def do_translate(
             max_chars=42,
         )
         write_srt(xx, out_srt)
+        # 真实质量报告：格式 QA + 多模型校对 + 译文完整性。
+        # Hub 只按文件名识别 sidecar，不解析内容，扩展字段向后兼容。
+        integrity = ti.qa_translation_integrity(segs, xx, target_lang=lang)
+        qa: dict = {
+            "bilingual": bi, "readability": read,
+            "proofread": proofread, "integrity": integrity,
+        }
+        # readability 是软警告（cps 由源时间轴决定，不是译文错误）→ 只记 advisory；
+        # ok / needs_review 只看硬指标：对齐、多模型校对状态、译文完整性。
+        qa["ok"] = (
+            bool(bi.get("ok"))
+            and bool(integrity.get("ok"))
+            and proofread.get("human_review", 0) == 0
+            and proofread.get("status") in ("ok", "disabled")
+        )
+        if not read.get("ok"):
+            qa["readability_advisory"] = read.get("warns", [])
+        if not qa["ok"]:
+            qa["needs_review"] = True
+        if integrity.get("issues"):
+            locked_print(f"[integrity {tag}] {len(integrity['issues'])} issue(s) → needs_review")
         qa_path = job_media_dir(out_dir) / f"translate_qa_{tag}.json"
         qa_path.write_text(
-            json.dumps({"bilingual": bi, "readability": read}, ensure_ascii=False, indent=2),
+            json.dumps(qa, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         locked_print(f"[out] {out_srt}")
@@ -2038,6 +2237,10 @@ def transcribe_video(args: argparse.Namespace) -> tuple[list[dict], Path, str, P
     else:
         src_tag = file_tag(args.source_lang)
 
+    # 源轨落盘前也做时间轴规范化：do_translate 内会对翻译轨规范化，
+    # 若源轨用未归一化的 segs，会出现"源轨=ASR 原始时间、翻译轨=规范化时间"
+    # 的锁轴错位。normalize 幂等，两处调用结果一致。
+    segs = normalize_cue_timing(segs)
     srt = locale_srt_path(out_dir, args.source_lang, stem)
     write_srt(segs, srt)
     qa = qa_srt_readability(segs)
@@ -2063,7 +2266,20 @@ def transcribe_video(args: argparse.Namespace) -> tuple[list[dict], Path, str, P
     return segs, out_dir, stem, srt
 
 
+def _configure_console() -> None:
+    """Windows 控制台默认 GBK；保留中文显示，把无法编码的字符转义而非抛异常。"""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(errors="backslashreplace")
+        except (ValueError, OSError):
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _configure_console()
     clear_proxy_env()
     args = parse_args(list(argv if argv is not None else sys.argv[1:]))
     cmd = args.cmd
@@ -2204,7 +2420,8 @@ def main(argv: list[str] | None = None) -> int:
             if not args.skip_translate:
                 ensure_ollama_model(args.ollama_model, role="translate")
             segs, out_dir, stem = load_source_segments(args)
-            glossary: dict = {}
+            # 非 --auto 时复用 job 已有术语表/语境（与 run_batch 一致）。
+            glossary: dict = {} if args.auto else load_job_glossary(out_dir)
             if args.auto:
                 glossary = auto_build_glossary(
                     ollama, chat_model(args), segs, args.source_lang

@@ -1,6 +1,7 @@
-import { locales } from "@/lib/locales";
+import { locales, subtitleLangs } from "@/lib/locales";
 
 /** Mirrors subtitle_pipeline/api/try_service.resolve_try_intent (keep in sync). */
+const DEFAULT_PACK = "fununion20";
 
 export type TryIntentKind =
   | "full"
@@ -28,27 +29,30 @@ function normalizeTryLangs(raw: string | readonly string[] | null | undefined): 
     }
   } else {
     const text = String(raw || "").trim();
-    if (!text || text === "site" || text === "all" || text === "*") return "site";
+    if (!text || text === "all" || text === "*" || text === DEFAULT_PACK) return DEFAULT_PACK;
+    if (text === "site") return "site";
     for (const part of text.replace(/;/g, ",").split(",")) {
       const tag = part.trim().toLowerCase();
       if (tag && !codes.includes(tag)) codes.push(tag);
     }
   }
-  if (!codes.length || codes.length >= locales.length) return "site";
+  if (!codes.length || codes.length >= subtitleLangs.length) return DEFAULT_PACK;
   return codes.join(",");
+}
+
+/** 与后端 expand_try_langs 一致:包标记先展开成代码集合,再比较。 */
+function expandTryLangs(p: string): string {
+  if (p === DEFAULT_PACK) return subtitleLangs.join(",").toLowerCase();
+  if (p === "site") return locales.join(",").toLowerCase();
+  return p;
 }
 
 function langsEqual(
   a: string | readonly string[] | null | undefined,
   b: string | readonly string[] | null | undefined
 ): boolean {
-  const left = normalizeTryLangs(a);
-  const right = normalizeTryLangs(b);
-  if (left === "site" && right === "site") return true;
-  if (left === "site" || right === "site") return false;
-  if (left === right) return true;
-  const A = new Set(left.split(",").filter(Boolean));
-  const B = new Set(right.split(",").filter(Boolean));
+  const A = new Set(expandTryLangs(normalizeTryLangs(a)).split(",").filter(Boolean));
+  const B = new Set(expandTryLangs(normalizeTryLangs(b)).split(",").filter(Boolean));
   if (A.size !== B.size) return false;
   for (const x of A) if (!B.has(x)) return false;
   return true;

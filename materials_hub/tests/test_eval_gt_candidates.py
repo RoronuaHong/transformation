@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import eval_gt_candidates as ev  # noqa: E402
 
 
-def _m(i, name, kind="silent", tags="sp"):
+def _m(i, name, kind="videos", tags="sp"):
     return {"id": i, "name": name, "kind": kind, "tags": tags}
 
 
@@ -19,7 +19,7 @@ def test_narrow_facet_gives_high_confidence():
     mats = [_m("a1", "c1.mp4", tags="sp,type:benchmark"),
             _m("a2", "c2.mp4", tags="sp,type:benchmark"),
             _m("a3", "c3.mp4", tags="sp,type:benchmark"),   # 未标注
-            _m("b1", "y.srt", kind="subs", tags="sp,type:subs")]
+            _m("b1", "y.srt", kind="docs", tags="sp,type:subs")]
     rep = ev.build_candidates({"基准测试视频": ["a1", "a2"]}, mats)
     cands = rep["基准测试视频"]["candidates"]
     assert [c["id"] for c in cands] == ["a3"], cands

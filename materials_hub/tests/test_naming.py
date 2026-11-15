@@ -50,7 +50,7 @@ def _mk(mid, kind, name, tags="", orig=None):
 
 def test_canonical_name_is_descriptive_and_keeps_original_token():
     """① 描述性 + ④ 保留原名 token:中文描述在前,英文原名 token 仍在名字里。"""
-    n = naming.canonical_name("001_delogo.mp4", "silent",
+    n = naming.canonical_name("001_delogo.mp4", "videos",
                               tags="sp,job:BV1aDb56iEvu,type:render", mid="abc123456789")
     assert "去台标" in n, n             # 中文自解释
     assert "delogo" in n, n             # 原名 token 保留(保住英文查询命中 + 溯源)
@@ -77,9 +77,9 @@ def test_canonical_name_no_spaces_and_consistent_separator():
 
 def test_canonical_name_language_from_tag():
     """语种走受控 lang: 标签;字幕类文件名本身是语种码时也能识别(含 zh-Hant)。"""
-    n1 = naming.canonical_name("zh.srt", "subs", tags="sp,lang:zh,job:aaaaaa111111", mid="m" * 12)
+    n1 = naming.canonical_name("zh.srt", "docs", tags="sp,lang:zh,type:subs,job:aaaaaa111111", mid="m" * 12)
     assert "中文" in n1, n1
-    n2 = naming.canonical_name("zh-Hant.srt", "subs", tags="sp,job:aaaaaa111111", mid="m" * 12)
+    n2 = naming.canonical_name("zh-Hant.srt", "docs", tags="sp,type:subs,job:aaaaaa111111", mid="m" * 12)
     assert "繁体中文" in n2, n2          # 键是 zh-hant,stem 归一后是 zh_Hant,须还原连字符命中
     print("PASS test_canonical_name_language_from_tag ->", n1, "|", n2)
 
@@ -97,7 +97,7 @@ def test_plan_renames_makes_every_name_unique():
 
 def test_normalize_is_idempotent():
     """⑤ 幂等:基于 orig_name 推导,重复规范化不会不断叠加中文前缀。"""
-    _mk("i1", "silent", "001_delogo.mp4", tags="sp,job:BV1aDb56iEvu")
+    _mk("i1", "videos", "001_delogo.mp4", tags="sp,job:BV1aDb56iEvu")
     n1 = core.normalize_name("i1")
     n2 = core.normalize_name("i1")      # 再跑一次
     assert n1 == n2, (n1, n2)
@@ -107,7 +107,7 @@ def test_normalize_is_idempotent():
 
 def test_normalize_only_touches_display_name():
     """⑥ 只改显示名:name 变了,orig_name/rel_path/external_path/磁盘文件一律不动。"""
-    m = _mk("d1", "silent", "clean.mp4", tags="sp,job:BBBBBB111111")
+    m = _mk("d1", "videos", "clean.mp4", tags="sp,job:BBBBBB111111")
     before = dict(m)
     disk = m["external_path"]
     assert os.path.isfile(disk)

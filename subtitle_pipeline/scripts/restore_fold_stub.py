@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
 from discover.content_db import ContentDB
 from discover.export_site import main as export_main
 from discover.run_batch import register_work_dir
-from langs import resolve_targets
+from langs import DEFAULT_PACK, PACKS
 
 SLUG = "bv1o24y1k7j7"
 VIDEO_ID = "BV1o24y1k7j7"
@@ -141,7 +141,7 @@ def main() -> int:
             work_dir=work,
             source_lang="zh",
             title=TITLE,
-            locales=resolve_targets("site", "zh"),
+            locales=list(PACKS[DEFAULT_PACK]),
         )
         print(f"[restore] registered article_id={aid}")
     finally:

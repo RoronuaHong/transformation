@@ -16,7 +16,7 @@ from discover.queue_db import QueueDB
 from discover.run_inbox import canonical_url, parse_url
 from fetch_media import ensure_source_video, find_ffmpeg, _looks_like_netscape
 from job_layout import existing_wav, job_media_dir, list_locale_srts
-from langs import PACKS, coalesce_source_lang, normalize_lang, resolve_targets
+from langs import DEFAULT_PACK, PACKS, coalesce_source_lang, normalize_lang, resolve_targets
 from workflows import (
     expand_workflow_tasks,
     infer_workflow_progress,
@@ -26,7 +26,8 @@ from workflows import (
     write_pack_manifest,
 )
 
-SITE_LANG_CODES = tuple(PACKS.get("site") or ())
+# Try 允许的语言 = 字幕产物默认包(20 语);站点 UI 的 16 语 locales 与此解耦。
+LANG_CODES = tuple(PACKS[DEFAULT_PACK])
 
 # Platforms that require login cookies for anonymous download.
 COOKIE_POLICY: dict[str, dict] = {
@@ -219,34 +220,38 @@ def _normalize_input_from_map(raw: dict | None) -> dict[str, str]:
 
 
 def normalize_try_langs(raw: str | list | None) -> str:
-    """Comma list of site locales, or ``site`` when empty / full pack."""
-    allowed = {normalize_lang(x) for x in SITE_LANG_CODES}
-    codes: list[str] = []
+    """Comma list of subtitle-pack locales, or ``DEFAULT_PACK`` when empty / full.
+
+    ``site`` remains an explicit alias for the legacy 16-lang UI pack.
+    """
+    allowed = {normalize_lang(x) for x in LANG_CODES}
     if isinstance(raw, list):
-        for item in raw:
-            tag = normalize_lang(str(item or "").strip())
-            if tag and tag in allowed and tag not in codes:
-                codes.append(tag)
+        items = raw
     else:
         text = (raw or "").strip()
-        if not text or text.lower() in ("site", "all", "*"):
+        if not text or text.lower() in ("all", "*", DEFAULT_PACK.lower()):
+            return DEFAULT_PACK
+        if text.lower() == "site":
             return "site"
-        for part in text.replace(";", ",").split(","):
-            tag = normalize_lang(part.strip())
-            if tag and tag in allowed and tag not in codes:
-                codes.append(tag)
-    if not codes:
-        return "site"
-    if set(codes) >= allowed:
-        return "site"
+        items = text.replace(";", ",").split(",")
+    codes: list[str] = []
+    for item in items:
+        s = str(item or "").strip()
+        if not s:
+            continue
+        tag = normalize_lang(s)
+        if tag in allowed and tag not in codes:
+            codes.append(tag)
+    if not codes or set(codes) >= allowed:
+        return DEFAULT_PACK
     return ",".join(codes)
 
 
 def expand_try_langs(pack: str | None) -> frozenset[str]:
-    """Normalized set of locale codes for comparison."""
+    """Normalized set of subtitle-pack codes for comparison."""
     p = normalize_try_langs(pack)
-    if p == "site":
-        return frozenset(normalize_lang(x) for x in SITE_LANG_CODES)
+    if p in PACKS:
+        return frozenset(normalize_lang(x) for x in PACKS[p])
     return frozenset(normalize_lang(x) for x in p.split(",") if x.strip())
 
 
@@ -860,7 +865,7 @@ def infer_try_progress(
     video_id: str,
     status: str,
     *,
-    langs: str = "site",
+    langs: str = DEFAULT_PACK,
     job_id: int | None = None,
 ) -> dict:
     """Best-effort progress from work-dir artifacts (no pipeline hooks needed)."""
@@ -1559,7 +1564,7 @@ def probe_url_duration(url: str) -> dict:
             job_info = {
                 "job_id": job_id,
                 "job_status": snap.get("status"),
-                "langs": job_langs(job) if job else "site",
+                "langs": job_langs(job) if job else DEFAULT_PACK,
                 "frame_opts": job_frame_opts(job) if job else normalize_frame_opts(),
                 "path": snap.get("path"),
                 "cached": snap.get("status") in ("done", "published"),
@@ -1968,7 +1973,7 @@ def submit_url(
     try:
         task_results: list[dict] = []
         starter: int | None = None
-        prev_langs = "site"
+        prev_langs = DEFAULT_PACK
         prev_frame_opts = normalize_frame_opts()
         job_status = None
         for spec in tasks_spec:

@@ -26,6 +26,33 @@ export function hubThumbUrl(id: string): string {
   return `${hubApiBase()}/thumb/${encodeURIComponent(id)}`;
 }
 
+/** 内容预览 JSON(服务器按扩展名给 mode + 有界文本,前端只按 mode 渲染)。 */
+export function hubPreviewUrl(id: string, offset = 0, limit = 65536): string {
+  return `${hubApiBase()}/preview/${encodeURIComponent(id)}?offset=${offset}&limit=${limit}`;
+}
+
+export type HubPreviewMode =
+  | "image" | "video" | "audio" | "pdf" | "font" | "subtitle"
+  | "text" | "code" | "table" | "sections" | "hex";
+
+export type HubPreview = {
+  ext: string;
+  name: string;
+  size: number;
+  mode: HubPreviewMode;
+  native: boolean;
+  reason: string;
+  encoding: string;
+  text: string;
+  rows: string[][];
+  sections: { title: string; text: string }[];
+  chars: number;
+  lines: number;
+  offset: number;
+  next_offset: number | null;
+  truncated: boolean;
+};
+
 export type HubMaterial = {
   id: string;
   kind: string;
@@ -55,6 +82,7 @@ export type HubStats = {
   total: number;
   dupes: number;
   kinds: Record<string, number>;
+  subfacets?: Record<string, Record<string, number>>;
   forms?: Record<string, number>;
   topics?: Record<string, number>;
   usages?: Record<string, number>;
@@ -107,6 +135,10 @@ const TAG_EXACT_ZH: Record<string, string> = {
   youtube: "平台·YouTube",
   demux: "拆条产物",
   asr: "ASR 音轨",
+  "has_audio:0": "静音画面",
+  "type:gif": "动图",
+  "type:raw": "相机原片",
+  "type:subs": "字幕",
 };
 const TAG_EXACT_EN: Record<string, string> = {
   sp: "src·pipeline",
@@ -115,6 +147,10 @@ const TAG_EXACT_EN: Record<string, string> = {
   youtube: "platform·YouTube",
   demux: "demuxed",
   asr: "ASR audio",
+  "has_audio:0": "silent",
+  "type:gif": "GIF",
+  "type:raw": "camera RAW",
+  "type:subs": "captions",
 };
 const TAG_TYPE_ZH: Record<string, string> = {
   media: "源片",
@@ -211,6 +247,11 @@ export async function hubFetch<T>(
   return undefined as T;
 }
 
+/** 只读取有界文本,不下载整个媒体文件;失败由调用方降级为占位说明。 */
+export async function hubPreview(id: string, offset = 0, limit = 65536): Promise<HubPreview> {
+  return hubFetch<HubPreview>(`/preview/${encodeURIComponent(id)}?offset=${offset}&limit=${limit}`);
+}
+
 /** 某 job 分发渠道就绪度(步骤 5/7):channel_ready + 命名空间化 blocking。 */
 export type HubReadiness = {
   job?: string;
@@ -290,6 +331,64 @@ export function hubSetFavorite(id: string, on: boolean): Promise<{ ok: boolean; 
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ id, on }),
+  });
+}
+
+export type HubBulkAction =
+  | "favorite"
+  | "unfavorite"
+  | "remove"
+  | "add_tags"
+  | "remove_tags"
+  | "set_form"
+  | "join_coll"
+  | "leave_coll";
+
+export type HubBulkResult = {
+  ok: boolean;
+  done: number;
+  total: number;
+  action?: string;
+  errors?: { id: string; error: string }[];
+  error?: string;
+};
+
+/** DAM 批量操作:加入合集/移出合集/收藏/删除/移动(改 form)。单条失败不阻断。 */
+export function hubBulk(
+  action: HubBulkAction,
+  ids: string[],
+  extra?: { tags?: string; form?: string },
+): Promise<HubBulkResult> {
+  return hubFetch<HubBulkResult>("/bulk", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action, ids, ...extra }),
+  });
+}
+
+export type HubCollResult = {
+  ok: boolean;
+  tag?: string;
+  title?: string;
+  from?: string;
+  to?: string;
+  done?: number;
+  total?: number;
+  count?: number;
+  ids?: string[];
+  errors?: { id: string; error: string }[];
+  error?: string;
+};
+
+/** 合集 CRUD:create / list / rename / delete(解散,不删文件) / members。 */
+export function hubColl(
+  action: "create" | "list" | "rename" | "delete" | "dissolve" | "members",
+  body: { name?: string; tag?: string; from?: string; to?: string; tags?: string } = {},
+): Promise<HubCollResult> {
+  return hubFetch<HubCollResult>("/coll", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action, ...body }),
   });
 }
 

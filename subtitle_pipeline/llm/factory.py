@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from .anthropic_client import AnthropicCompatClient, TokenHubClient
@@ -11,6 +12,16 @@ _profile_name: str = "local"
 _roles: dict[str, RoleConfig] = {}
 _config_path: Path | None = None
 _model_overrides: dict[str, str] = {}
+
+
+def _console_safe(text: str) -> str:
+    """Windows 控制台常为 GBK；把无法编码的字符转义成反斜杠形式，而不是抛
+    UnicodeEncodeError。日志失败不该把 provider 兜底升级成崩溃。"""
+    enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        return text.encode(enc, "backslashreplace").decode(enc, "strict")
+    except (LookupError, UnicodeError):
+        return text.encode("ascii", "backslashreplace").decode("ascii")
 
 
 def configure_llm(
@@ -35,7 +46,8 @@ def configure_llm(
     print(
         f"[llm] profile={name} "
         f"chat={get_role_config('chat').provider}:{get_role_config('chat').model} "
-        f"translate={get_role_config('translate').provider}:{get_role_config('translate').model}"
+        f"translate={get_role_config('translate').provider}:{get_role_config('translate').model} "
+        f"verify={get_role_config('verify').provider}:{get_role_config('verify').model}"
     )
     return name
 
@@ -48,7 +60,7 @@ def _ensure_configured() -> None:
 def get_role_config(role: str) -> RoleConfig:
     _ensure_configured()
     if role not in _roles:
-        raise KeyError(f"unknown llm role {role!r}; use chat|translate")
+        raise KeyError(f"unknown llm role {role!r}; use chat|translate|verify")
     cfg = _roles[role]
     override = _model_overrides.get(role)
     if override and override != cfg.model:
@@ -153,6 +165,23 @@ def complete(
     model: str | None = None,
 ) -> str:
     chain = get_role_chain(role)
+    # `model=` used to be accepted but ignored, so callers that asked for a
+    # specific model silently got the profile default. Honour it as a primary
+    # override while keeping the profile's fallback chain intact.
+    if model and chain:
+        first = chain[0]
+        chain = [
+            RoleConfig(
+                provider=first.provider,
+                model=model,
+                base_url=first.base_url,
+                api_key_env=first.api_key_env,
+                temperature=first.temperature,
+                prefer_anthropic=first.prefer_anthropic,
+                fallback=first.fallback,
+            ),
+            *chain[1:],
+        ]
     last_err: Exception | None = None
     for idx, cfg in enumerate(chain):
         try:
@@ -162,8 +191,10 @@ def complete(
             last_err = exc
             tag = f"primary[{idx}]" if idx == 0 else f"fallback[{idx}]"
             print(
-                f"[llm] {role} {tag} {cfg.provider}:{cfg.model} failed: {exc}; "
-                f"{'trying next' if idx < len(chain) - 1 else 'no more fallbacks'}"
+                _console_safe(
+                    f"[llm] {role} {tag} {cfg.provider}:{cfg.model} failed: {exc}; "
+                    f"{'trying next' if idx < len(chain) - 1 else 'no more fallbacks'}"
+                )
             )
             continue
     if last_err:

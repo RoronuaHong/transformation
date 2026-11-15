@@ -28,8 +28,8 @@
   python bridge_subtitle.py --auto --embed --prune
   python bridge_subtitle.py --watch --interval 60 --auto --embed --prune
 
-流水线 ``run_job_dir`` 默认会在新增 videos/silent 后:
-  1) 对有声 videos 拆 silent+track(``VITUAL_HUB_SPLIT_SILENT=0`` 关)
+流水线 ``run_job_dir`` 默认会在新增 videos 后:
+  1) 对有声 videos 拆静音画面+音轨(``VITUAL_HUB_SPLIT_SILENT=0`` 关;静音画面归 videos + has_audio:0 分面)
   2) 跑 ``auto_process``(``VITUAL_HUB_AUTOPROC=0`` 关)
 """
 import os
@@ -54,9 +54,28 @@ SCOPES = {
     "instances": "instances",
 }
 SKIP_EXT = {".db", ".pyc", ".py", ".log", ".err", ".example"}
-# 站点 16 语(与 subtitle_pipeline/langs.py PACKS["site"]、transform/lib/locales.ts 严格同步)。
-# `lang:` 受控词表只认这些代码(zh-Hant 保留连字符),ms(马来语)等不在站点集内。
-LANGS = {"zh", "zh-Hant", "en", "ja", "ko", "es", "fr", "de", "pt", "ru", "ar", "hi", "id", "vi", "th", "tr"}
+# 流水线 media/ 下的中间产物(元数据 / 状态 / 质检报告)不是素材:
+# 既不是可交付字幕,也不是可复用画面,入库只会把一个视频刷成几十张卡。
+# 与 mode-renders 质检件不入库的既有决策一致;文件仍在磁盘,find_meta 照常可读。
+SIDECAR_MEDIA_JSON = {
+    "fetch_meta.json", "sync_meta.json", "multipass_raw.json",
+    "media_status.json", "pack_manifest.json", "glossary.json",
+}
+
+
+def is_pipeline_sidecar(path):
+    """media/ 下的流水线 sidecar JSON(字幕/笔记翻译质检报告)。"""
+    low = str(path or "").replace("\\", "/").lower()
+    if "/media/" not in low or not low.endswith(".json"):
+        return False
+    base = os.path.basename(low)
+    return (
+        base in SIDECAR_MEDIA_JSON
+        or base.startswith("translate_qa_")
+        or base.startswith("notes_qa_")
+    )
+# 单一真源:core.HUB_LANGS(字幕产物 20 语包)。站点 UI 的 16 语 locales 与它刻意解耦。
+LANGS = set(core.HUB_LANGS)
 
 
 def find_meta(path):
@@ -88,7 +107,7 @@ def load_meta(path):
 def detect_lang(name):
     stem = os.path.splitext(name)[0]
     # 长代码优先(zh-Hant 要先于 zh 匹配);允许语种码位于文件名开头(如 zh.srt)
-    for lng in sorted(LANGS, key=len, reverse=True):
+    for lng in sorted(LANGS, key=lambda x: (-len(x), x)):
         if re.search(r"(?:^|[._\-])" + re.escape(lng) + r"(?:[._\-]|$)", stem, re.IGNORECASE):
             return lng
     return ""
@@ -101,7 +120,9 @@ def type_from_rel(rel):
         if "/media/clips/" in low:
             return "clip"
         if "/media/" in low:
-            return "media"
+            # media/ 下除源片外还堆着流水线 JSON;它们不是「源片素材」,
+            # 不打 type:media,避免被下游机械推成 type:translate。
+            return "" if low.endswith(".json") else "media"
         if "/subs/" in low:
             return "subs"
         if "/notes/" in low:
@@ -147,7 +168,9 @@ def file_tags_and_desc(path, root, *, platform="", video_id="", title=""):
     if t:
         tags.append("type:" + t)
     kind = core.classify(path)
-    tags.extend(core.media_facet_tags(path, kind))
+    # 与 ingest_external 用同一份 existing_tags,避免同一 JSON 先得 type:data
+    # 再得 type:translate,两个互斥分面同时留在库里。
+    tags.extend(core.media_facet_tags(path, kind, ",".join(tags)))
     lng = detect_lang(os.path.basename(path))
     if lng:
         tags.append("lang:" + lng)
@@ -163,7 +186,10 @@ def _iter_files(base):
                 continue
             if f.startswith("_probe"):
                 continue
-            yield os.path.join(dirpath, f)
+            p = os.path.join(dirpath, f)
+            if is_pipeline_sidecar(p):
+                continue
+            yield p
 
 
 def _register_tree(base, root, dry_run, limit, *, platform="", video_id="", title=""):
@@ -309,17 +335,17 @@ def run(scope, root, dry_run, limit):
 
 
 def do_auto(new_ids):
-    """对新入库(及仍有缺项)的 videos/silent/images 跑 auto_process 链。幂等。"""
+    """对新入库(及仍有缺项)的 videos/images 跑 auto_process 链。幂等。"""
     ids = []
     for mid in new_ids or []:
         m = core.get_material(mid)
-        if m and m.get("kind") in ("videos", "silent", "images"):
+        if m and m.get("kind") in ("videos", "images"):
             ids.append(mid)
     # 顺带补历史缺项(上限 8,避免一次扫全库过久)
     for m in core.all_materials():
         if len(ids) >= 8:
             break
-        if m.get("kind") not in ("videos", "silent", "images"):
+        if m.get("kind") not in ("videos", "images"):
             continue
         if m["id"] in ids:
             continue
@@ -344,7 +370,7 @@ def do_thumbs(new_ids):
     if not core.thumbs_status()["ffmpeg"]:
         print("[thumbs] 未找到 ffmpeg,跳过(面板会自动退化为浏览器截帧)")
         return 0
-    ids = [i for i in new_ids if (core.get_material(i) or {}).get("kind") in ("videos", "silent")]
+    ids = [i for i in new_ids if (core.get_material(i) or {}).get("kind") in ("videos",)]
     ids += [i for i in core.missing_thumbnail_ids() if i not in ids]
     if not ids:
         print("[thumbs] 无需生成")
@@ -376,6 +402,38 @@ def do_prune(dry_run=False):
     core.prune_broken_externals()
     print(f"[prune] 已清理 {len(bad)} 条索引(原文件未触碰)")
     return len(bad)
+
+
+def prune_sidecars(dry_run=False):
+    """清理历史登记的流水线 sidecar JSON 索引,并修复单字符脏标签。
+
+    旧版 bridge 把 media/ 下的 QA/元数据 JSON 当素材登记,又被机械标成
+    type:translate;修好登记规则后这些行不会自己消失,需显式清一次。
+    外部引用只删索引,磁盘原文件一律不动(可随时用 find_meta 读取)。
+    """
+    core.init_hub()
+    removed, fixed = [], []
+    for m in core.all_materials():
+        p = m.get("external_path") or m.get("rel_path") or ""
+        if is_pipeline_sidecar(p):
+            removed.append(m["id"])
+            continue
+        parts = [t.strip() for t in (m.get("tags") or "").split(",") if t.strip()]
+        if not any(len(t) == 1 for t in parts):
+            continue
+        clean = [t for t in parts if len(t) > 1]
+        if (m.get("kind") == "videos" and "demux" in clean
+                and "has_audio:0" in clean and "role:silent-picture" not in clean):
+            clean.append("role:silent-picture")
+        fixed.append((m["id"], core._merge_tag_csv("", clean)))
+    out = {"removed": len(removed), "fixed": len(fixed), "dry_run": bool(dry_run)}
+    if dry_run:
+        return out
+    for mid in removed:
+        core.remove_material(mid)
+    for mid, tags in fixed:
+        core.update_tags(mid, tags)
+    return out
 
 
 def do_embed():
@@ -453,7 +511,11 @@ def main():
     if "--state" in args:
         print_state()
         return
-    flags = ("--dry-run", "--watch", "--thumbs", "--prune", "--embed", "--auto")
+    if "--prune-sidecars" in args:
+        print("[prune-sidecars]", prune_sidecars(dry))
+        return
+    flags = ("--dry-run", "--watch", "--thumbs", "--prune", "--prune-sidecars",
+             "--embed", "--auto")
     rem = [a for a in args if a not in flags]
     scope, root, limit, interval = "all", DEFAULT_ROOT, 0, 30
     i = 0

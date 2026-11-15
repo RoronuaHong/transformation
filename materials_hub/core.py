@@ -35,11 +35,16 @@ THUMBS = os.path.join(INDEX_DIR, "thumbs")  # 视频封面缓存(派生数据,�
 RUN_DIR = os.path.join(INDEX_DIR, "run")              # 入库链路逐步状态记录(每次自动处理更新,派生可重建)
 UNDERSTAND_DIR = os.path.join(INDEX_DIR, "understand")  # 结构化理解记录(汇总 sidecar,派生可重建)
 
-# 站点 16 语(与 subtitle_pipeline/langs.py PACKS["site"]、transform/lib/locales.ts 严格同步)。
-# `lang:` 受控词表只认这些代码(zh-Hant 保留连字符),模型不能发明别名(见步骤 3)。
-SITE_LANGS = ("zh", "zh-Hant", "en", "ja", "ko", "es", "fr", "de",
-              "pt", "ru", "ar", "hi", "id", "vi", "th", "tr")
-SITE_LANG_SET = set(SITE_LANGS)
+# `lang:` 受控词表 = 字幕产物默认包 fununion20(20 语),与
+# subtitle_pipeline/langs.py PACKS["fununion20"]、transform/lib/locales.ts 的
+# subtitleLangs 严格同步(校验见 tests/test_multilang.py::test_lang_packs_single_source)。
+# 站点 UI 路由 locales 仍是 16 语:多出的 it/nl/ms/pl 只作字幕语种,
+# 不制造空壳语言路由。模型不能发明别名(见步骤 3)。
+HUB_LANGS = ("zh", "zh-Hant", "en", "ja", "ko", "es", "pt", "fr", "de",
+             "ru", "ar", "hi", "id", "vi", "th", "tr", "it", "nl", "ms", "pl")
+# 兼容旧引用(cli.py / 统计 / 既有测试);新代码请用 HUB_LANGS。
+SITE_LANGS = HUB_LANGS
+SITE_LANG_SET = set(HUB_LANGS)
 _LANG_ALIASES = {
     "zh-cn": "zh", "zh-hans": "zh",
     "zh-tw": "zh-Hant", "zh-hk": "zh-Hant",
@@ -75,26 +80,51 @@ def external_path_allowed(p):
     return any(p == r or p.startswith(r + os.sep) for r in EXT_ROOTS)
 
 # kinds that get ffmpeg thumbs / visual auto-process
-VIDEO_LIKE_KINDS = ("videos", "silent")
-# 画面描述(VLM)覆盖的种类:视频/无声/图片/动画(GIF 等动态片段,单帧会漏内容→按多帧采样)
-VISUAL_KINDS = ("videos", "silent", "images", "anim")
-# 按扩展名分类。video 容器再按「是否有音轨」拆成 videos / silent（无声）。
+VIDEO_LIKE_KINDS = ("videos",)
+# 画面描述(VLM)覆盖的种类:视频/图片。GIF 作为图片子类,按扩展名走多帧采样(见 _extract_frames)。
+VISUAL_KINDS = ("videos", "images")
+# 视频容器统一归 videos;「是否含音轨」是 has_audio:0/1 分面,不再是独立 kind。
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".flv", ".ts"}
+# 相机原片(CR2/NEF/ARW…):本质是图片子类,归 images + type:raw 分面(不再是一级 kind)。
+RAW_EXTS = {".raw", ".cr2", ".cr3", ".nef", ".arw", ".dng", ".orf", ".rw2", ".pef", ".srw", ".x3f"}
+# 字幕(SRT/ASS/VTT…):本质是文档子类,归 docs + type:subs 分面(不再是一级 kind)。
+SUB_EXTS = {".srt", ".ass", ".ssa", ".vtt", ".sub", ".sbv"}
+# 文档子类型:按扩展名细分(type:* 分面),而非独立 kind。
+#   srt/ass/...      → type:subs (字幕)
+#   pdf              → type:pdf  (PDF)
+#   doc/docx/rtf/epub→ type:doc  (文稿)
+#   txt/md           → type:text (笔记)
+#   xls/xlsx/csv     → type:sheet(表格)
+#   ppt/pptx         → type:slide(演示)
+#   json/yaml/yml/html→type:data (数据/代码)
+DOC_TYPE_BY_EXT = {
+    ".srt": "type:subs", ".ass": "type:subs", ".ssa": "type:subs",
+    ".vtt": "type:subs", ".sub": "type:subs", ".sbv": "type:subs",
+    ".pdf": "type:pdf",
+    ".doc": "type:doc", ".docx": "type:doc", ".rtf": "type:doc", ".epub": "type:doc",
+    ".txt": "type:text", ".md": "type:text",
+    ".xls": "type:sheet", ".xlsx": "type:sheet", ".csv": "type:sheet",
+    ".ppt": "type:slide", ".pptx": "type:slide",
+    ".json": "type:data", ".yaml": "type:data", ".yml": "type:data", ".html": "type:data",
+}
+# ── 规范媒体类型(对齐 DAM/图库最佳实践:图/视频/音/文档/矢量/3D/模板/字体)──
+# 类型按「资产本质」划分;格式/角色/衍生(原片/GIF/字幕/静音/切片/来源)一律下沉为分面标签:
+#   GIF        → images + type:gif
+#   相机原片    → images + type:raw
+#   字幕        → docs   + type:subs
+#   静音画面    → videos + has_audio:0 (+ role:silent-picture 区分 demux 组件)
+#   物理切片    → videos + role:clip / type:clip
 KINDS = {
-    "images": {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".svg", ".tif", ".tiff", ".ico", ".heic"},
-    "anim": {".gif"},
-    "videos": set(VIDEO_EXTS),          # 有音轨的画面
-    "silent": set(VIDEO_EXTS),          # 无声音轨的画面（同扩展名，靠探测分流）
-    "docs": {".pdf", ".md", ".txt", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx",
-             ".csv", ".json", ".yaml", ".yml", ".html", ".epub", ".rtf"},
+    "images": ({".jpg", ".jpeg", ".png", ".webp", ".bmp", ".svg", ".tif", ".tiff",
+                ".ico", ".heic", ".gif"} | RAW_EXTS),
+    "videos": set(VIDEO_EXTS),          # 容器统一归 videos;音轨有无→has_audio 分面
+    "docs": ({".pdf", ".md", ".txt", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx",
+              ".csv", ".json", ".yaml", ".yml", ".html", ".epub", ".rtf"} | SUB_EXTS),
     "audio": {".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac"},  # 纯音轨
-    "subs": {".srt", ".ass", ".ssa", ".vtt", ".sub", ".sbv"},
-    # ── 素材中心完整分类(对齐 shutterstock/envato:图/视频/音/动画/矢量/3D/模板/字体/原片)──
-    # 以下为非影视内容类素材:仅登记 + name/tags 检索,不做 VLM 画面描述(不进 VISUAL_KINDS)。
-    "raw": {".raw", ".cr2", ".cr3", ".nef", ".arw", ".dng", ".orf", ".rw2", ".pef", ".srw", ".x3f"},  # 相机原片
-    "project": {".aep", ".prproj", ".psd", ".psb", ".mogrt", ".fcpxml", ".drp", ".sesx"},             # 工程/模板
+    # ── 非影视内容类素材:仅登记 + name/tags 检索,不做 VLM 画面描述(不进 VISUAL_KINDS) ──
     "vector": {".ai", ".eps", ".cdr", ".emf", ".wmf"},                                                # 矢量(svg 归 images)
     "model3d": {".glb", ".gltf", ".obj", ".fbx", ".blend", ".dae", ".3ds", ".stl", ".ply"},           # 三维模型
+    "project": {".aep", ".prproj", ".psd", ".psb", ".mogrt", ".fcpxml", ".drp", ".sesx"},             # 工程/模板
     "font": {".ttf", ".otf", ".woff", ".woff2", ".eot"},                                              # 字体
 }
 
@@ -523,24 +553,50 @@ def coerce_role_tags(tags_csv, *, kind=None, path=None):
     return ",".join(out)
 
 
-def media_facet_tags(path, kind=None):
-    """DAM 面标签: master / clip / silent-picture / audio-stem。
+def media_facet_tags(path, kind=None, existing_tags=None):
+    """DAM 面标签: master / clip / silent-picture / audio-stem + 子类型分面(type:gif/raw/subs/translate)。
 
     四层模型(方案 A): 母版文件 + shots 逻辑切片 + silent/audio 组件 + 可选物理 clip。
     物理切片路径 → role:clip(不当 master); 有声源片 → role:master+role:picture。
+    原片/GIF/字幕 不再是独立 kind,而是 images/docs 的子分面 type:raw/type:gif/type:subs。
+    静音画面 = videos + has_audio:0(由 demux 拆出的组件另加 role:silent-picture)。
+    翻译产物(JSON 且带 type:media)→ type:translate,从「数据/代码」中拆出。
     """
     kind = kind or classify(path)
+    ext = os.path.splitext(path or "")[1].lower()
     name = os.path.basename(path or "").lower()
+    existing = set()
+    if isinstance(existing_tags, str):
+        existing = {t.strip() for t in existing_tags.split(",") if t.strip()}
+    elif existing_tags:
+        existing = {str(t).strip() for t in existing_tags if str(t).strip()}
     tags = []
-    if kind == "silent":
-        tags.extend(["role:silent-picture", "has_audio:0"])
-    elif kind == "videos":
+    if kind == "videos":
+        has = probe_has_audio(path)
         if is_physical_clip_path(path):
-            tags.extend(["role:clip", "type:clip", "has_audio:1"])
+            tags.extend(["role:clip", "type:clip"])
+            tags.append("has_audio:1" if has else "has_audio:0")
             t0, t1 = load_clip_timecodes(path)
             tags.extend(relation_tags(t_start=t0, t_end=t1))
         else:
-            tags.extend(["role:master", "role:picture", "has_audio:1"])
+            tags.extend(["role:master", "role:picture"])
+            tags.append("has_audio:1" if has else "has_audio:0")
+    elif kind == "images":
+        if ext == ".gif":
+            tags.append("type:gif")
+        if ext in RAW_EXTS:
+            tags.append("type:raw")
+    elif kind == "docs":
+        t = DOC_TYPE_BY_EXT.get(ext)
+        if t:
+            # 只认真正的翻译质检报告 translate_qa_<lang>.json。
+            # 旧规则「media/ 下任意 JSON + type:media → type:translate」把
+            # fetch_meta / pack_manifest / glossary 等元数据全标成译文,已废弃。
+            if (t == "type:data" and ext == ".json"
+                    and name.startswith("translate_qa_") and "type:media" in existing):
+                tags.append("type:translate")
+            else:
+                tags.append(t)
     elif kind == "audio":
         tags.append("role:audio-stem")
         tags.append("has_audio:1")
@@ -551,11 +607,33 @@ def media_facet_tags(path, kind=None):
 
 def _merge_tag_csv(old, extra):
     parts = [t.strip() for t in (old or "").split(",") if t.strip()]
+    # 历史 bug:调用方把逗号字符串当 list 传进来时会被逐字符迭代,
+    # 写出 r,o,l,e,: 之类的单字符脏标签。统一收口成列表再合并。
+    if isinstance(extra, str):
+        extra = extra.split(",")
     for t in extra or []:
-        t = (t or "").strip()
+        t = str(t or "").strip()
         if t and t not in parts:
             parts.append(t)
     return ",".join(parts)
+
+
+def reconcile_audio_facets(tags_csv, has_audio):
+    """按实测音轨归一互斥面标签（同名成品原地重制时必用）。
+
+    流水线会在同一路径上把无声成品重制为带声成品；旧索引的 ``has_audio:0`` /
+    ``role:silent-picture`` 若只走「只增不删」的标签合并，就会与新的
+    ``has_audio:1`` 并存，面板一直挂着「静音」徽章。
+    """
+    parts = [t.strip() for t in (tags_csv or "").split(",") if t.strip()]
+    want = "has_audio:1" if has_audio else "has_audio:0"
+    drop = {"has_audio:0", "has_audio:1"} - {want}
+    if has_audio:
+        drop.add("role:silent-picture")  # 不再是 demux 拆出的静音画面组件
+    out = [t for t in parts if t not in drop]
+    if want not in out:
+        out.append(want)
+    return ",".join(out)
 
 
 def _masters_by_job(all_ms=None):
@@ -566,6 +644,8 @@ def _masters_by_job(all_ms=None):
         if x.get("kind") != "videos" or is_role_clip(x):
             continue
         xt = _material_tag_set(x)
+        if "role:silent-picture" in xt:   # 静音组件不是母版
+            continue
         for t in xt:
             if not t.startswith("job:"):
                 continue
@@ -581,6 +661,8 @@ def _video_stem_index(all_ms=None):
     by_stem = {}
     for x in all_ms:
         if x.get("kind") != "videos" or is_role_clip(x):
+            continue
+        if "role:silent-picture" in _material_tag_set(x):   # 静音组件不是母版
             continue
         stem = os.path.splitext(x.get("name") or "")[0].lower()
         if stem:
@@ -655,7 +737,10 @@ def link_component_parents(*, limit=0):
     masters_by_job = _masters_by_job(all_ms)
     scanned = linked = skipped = 0
     for m in all_ms:
-        if m.get("kind") not in ("silent", "audio"):
+        # 组件 = 静音画面(role:silent-picture, 现在 kind 仍是 videos)或纯音轨(audio)
+        if m.get("kind") not in ("videos", "audio"):
+            continue
+        if m.get("kind") == "videos" and "role:silent-picture" not in _material_tag_set(m):
             continue
         if limit and scanned >= limit:
             break
@@ -713,28 +798,29 @@ def link_relation_parents(*, mids=None, limit=0):
 
 
 def classify(path):
-    """扩展名初分；视频容器再按音轨拆 videos / silent。"""
+    """扩展名初分；视频容器统一归 videos（音轨有无是 has_audio 分面，非 kind）。"""
     ext = os.path.splitext(path)[1].lower()
     if ext in VIDEO_EXTS:
-        return "videos" if probe_has_audio(path) else "silent"
+        return "videos"
     for k, exts in KINDS.items():
-        if k in ("videos", "silent"):
-            continue
         if ext in exts:
             return k
     return "other"
 
 
 def reclassify_video_audio_kinds(limit=0):
-    """把已入库的视频容器按音轨重分到 videos / silent。返回统计。"""
+    """对已入库的视频容器重新探测音轨,刷新 has_audio:0/1 分面(不再改 kind)。
+
+    旧版 silent kind 由 migrate_legacy_kinds() 统一迁到 videos + role:silent-picture。
+    """
     con = _con()
     con.row_factory = sqlite3.Row
     rows = con.execute(
         "SELECT id, kind, location, external_path, rel_path FROM materials "
-        "WHERE kind IN ('videos','silent') OR ext IN ('.mp4','.mkv','.mov','.avi','.webm','.m4v','.flv','.ts')"
+        "WHERE kind IN ('videos','audio') OR ext IN ('.mp4','.mkv','.mov','.avi','.webm','.m4v','.flv','.ts')"
     ).fetchall()
     con.close()
-    changed = {"to_videos": 0, "to_silent": 0, "skipped": 0, "missing": 0}
+    changed = {"retagged": 0, "restat": 0, "skipped": 0, "missing": 0}
     n = 0
     for r in rows:
         if limit and n >= limit:
@@ -742,48 +828,111 @@ def reclassify_video_audio_kinds(limit=0):
         n += 1
         p = r["external_path"] if (r["location"] or "") == "external" else None
         if not p:
-            # internal: MATERIALS/kind/rel or rel_path
             rp = r["rel_path"] or ""
             p = rp if os.path.isabs(rp) else os.path.join(HUB, rp)
         if not p or not os.path.isfile(p):
             changed["missing"] += 1
             continue
         want = classify(p)
-        if want == r["kind"]:
-            extra = media_facet_tags(p, want)
-            cur = get_material(r["id"])
-            merged = coerce_role_tags(
-                _merge_tag_csv(cur.get("tags") if cur else "", extra),
-                kind=want, path=p,
-            )
-            if cur and merged != (cur.get("tags") or ""):
-                _update_material(r["id"], tags=merged)
-            changed["skipped"] += 1
-            continue
-        extra = media_facet_tags(p, want)
         cur = get_material(r["id"])
-        _update_material(
-            r["id"],
-            kind=want,
-            tags=coerce_role_tags(
-                _merge_tag_csv(cur.get("tags") if cur else "", extra),
-                kind=want, path=p,
-            ),
-        )
-        if want == "silent":
-            changed["to_silent"] += 1
+        fields = {}
+        # 同名成品可能被流水线原地重制（无声→带声）：size 变了就同步刷新
+        # size/sha256，否则去重/交付/校验仍按旧文件走。
+        try:
+            st = os.stat(p)
+            if cur and int(cur.get("size") or 0) != st.st_size:
+                fields["size"] = st.st_size
+                fields["sha256"] = compute_sha256(p)
+        except OSError:
+            pass
+        extra = media_facet_tags(p, want)
+        merged = _merge_tag_csv(cur.get("tags") if cur else "", extra)
+        probe = next((t for t in extra if t.startswith("has_audio:")), "")
+        if probe:
+            merged = reconcile_audio_facets(merged, probe == "has_audio:1")
+        merged = coerce_role_tags(merged, kind=want, path=p)
+        if cur and merged != (cur.get("tags") or ""):
+            fields["tags"] = merged
+            fields["kind"] = want
+        if fields:
+            _update_material(r["id"], **fields)
+        if "tags" in fields:
+            changed["retagged"] += 1
+        elif fields:
+            changed["restat"] += 1
         else:
-            changed["to_videos"] += 1
+            changed["skipped"] += 1
     return changed
 
 
+def migrate_legacy_kinds():
+    """把旧版一级 kind(silent/anim/raw/subs)迁到规范 kind + 子分面标签。幂等。
+
+    silent → videos + role:silent-picture + has_audio:0
+    anim   → images  + type:gif
+    raw    → images  + type:raw
+    subs   → docs    + type:subs
+    之后建议再跑 apply_media_facet_tags() 归一角色面。
+    """
+    con = _con()
+    con.row_factory = sqlite3.Row
+    mapping = [
+        ("silent", "videos", ["role:silent-picture", "has_audio:0"]),
+        ("anim",   "images", ["type:gif"]),
+        ("raw",    "images", ["type:raw"]),
+        ("subs",   "docs",   ["type:subs"]),
+    ]
+    changed = {}
+    for old, new, extra in mapping:
+        rows = con.execute(
+            "SELECT id, tags FROM materials WHERE kind=?", (old,)
+        ).fetchall()
+        c = 0
+        for r in rows:
+            tags = _merge_tag_csv(r["tags"], extra)
+            con.execute(
+                "UPDATE materials SET kind=?, tags=? WHERE id=?",
+                (new, tags, r["id"]),
+            )
+            c += 1
+        changed[old] = c
+    con.commit()
+    con.close()
+    return changed
+
+
+def kind_subfacets(ms=None):
+    """各规范类型的子分面计数(供前端在类型下展示子筛选 chips)。
+
+    ms 可选:传入已载入的全量列表,避免同一请求内重复全表扫描(/api/stats)。
+    """
+    # (parent kind, facet tag, ...) —— 只统计对产品有意义的子分面
+    facets = {
+        "videos": ["has_audio:0"],
+        "images": ["type:gif", "type:raw"],
+        "docs": sorted(set(DOC_TYPE_BY_EXT.values()) | {"type:translate"}),
+    }
+    ms = all_materials() if ms is None else ms
+    out = {}
+    for parent, tags in facets.items():
+        counts = {t: 0 for t in tags}
+        for m in ms:
+            if m.get("kind") != parent:
+                continue
+            mt = _material_tag_set(m)
+            for t in tags:
+                if t in mt:
+                    counts[t] += 1
+        out[parent] = counts
+    return out
+
+
 def apply_media_facet_tags(limit=0):
-    """给已入库 videos/silent/audio 补 DAM 面标签，不改变 kind。"""
+    """给已入库素材补 DAM 面标签(角色 + 子分面),不改变 kind。"""
     con = _con()
     con.row_factory = sqlite3.Row
     rows = con.execute(
-        "SELECT id, kind, location, external_path, rel_path, tags FROM materials "
-        "WHERE kind IN ('videos','silent','audio')"
+        "SELECT id, kind, location, external_path, rel_path, tags FROM materials"
     ).fetchall()
     con.close()
     n = patched = 0
@@ -791,26 +940,31 @@ def apply_media_facet_tags(limit=0):
         if limit and n >= limit:
             break
         n += 1
+        kind = r["kind"]
+        if kind not in ("videos", "audio", "images", "docs"):
+            continue
         p = r["external_path"] if (r["location"] or "") == "external" else None
         if not p:
             rp = r["rel_path"] or ""
             p = rp if os.path.isabs(rp) else os.path.join(HUB, rp)
         # 路径缺失时仍可按 kind 补角色面(不依赖磁盘)
-        kind = r["kind"] or (classify(p) if p and os.path.isfile(p) else None)
-        if not kind:
-            continue
-        if p and os.path.isfile(p):
+        if kind == "docs":
+            # 文档子类型仅依赖扩展名(翻译 JSON 另看已有标签 type:media),无需磁盘存在
+            extra = media_facet_tags(p, kind, r["tags"])
+        elif p and os.path.isfile(p):
             extra = media_facet_tags(p, kind)
         elif kind == "videos":
             extra = ["role:master", "role:picture", "has_audio:1"]
-        elif kind == "silent":
-            extra = ["role:silent-picture", "has_audio:0"]
         elif kind == "audio":
             extra = ["role:audio-stem", "has_audio:1"]
         else:
             continue
+        base = r["tags"] or ""
+        # 翻译 JSON:type:translate 与 type:data 互斥,去掉旧 type:data
+        if "type:translate" in extra and "type:data" in [t.strip() for t in base.split(",")]:
+            base = ",".join(t for t in base.split(",") if t.strip() and t.strip() != "type:data")
         merged = coerce_role_tags(
-            _merge_tag_csv(r["tags"], extra), kind=kind, path=p if p and os.path.isfile(p) else None
+            _merge_tag_csv(base, extra), kind=kind, path=p if p and os.path.isfile(p) else None
         )
         if merged != (r["tags"] or ""):
             _update_material(r["id"], tags=merged)
@@ -840,8 +994,36 @@ def sanitize_name(name):
 
 
 # ---------- 数据库 ----------
+# 数据代际计数器:任何改变素材集合/索引的写操作都 bump 它,供检索/统计缓存即时失效,
+# 避免「删了 12 张图、列表还缓存着旧结果」这类不一致(对齐 2025 SQLite 缓存最佳实践)。
+HUB_GENERATION = 0
+
+
+def hub_generation():
+    """供跨模块读取当前代际。
+
+    注意:`from core import HUB_GENERATION` 是按值绑定,bump 后外部模块读到的是旧值,
+    缓存永远不会失效。跨模块一律走这个函数取实时值。
+    """
+    return HUB_GENERATION
+
+
+def bump_generation():
+    global HUB_GENERATION
+    HUB_GENERATION += 1
+
+
 def _con():
-    return sqlite3.connect(INDEX_DB)
+    con = sqlite3.connect(INDEX_DB)
+    # 2025 SQLite 高性能实践:WAL(读写并发,不再全库串行锁)+ busy_timeout(避免
+    # ThreadingHTTPServer 多线程抢写报 database is locked)+ synchronous=NORMAL(WAL 下安全且更快)。
+    try:
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA busy_timeout=5000")
+        con.execute("PRAGMA synchronous=NORMAL")
+    except sqlite3.OperationalError:
+        pass
+    return con
 
 
 def _init_db():
@@ -865,6 +1047,18 @@ def _init_db():
     )
     con.execute("CREATE INDEX IF NOT EXISTS idx_sha ON materials(sha256)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_kind ON materials(kind)")
+    # 高频排序/筛选列补索引:created_at(ORDER BY 倒序)、name(按名排序)、
+    # location(external 巡检)、(kind,tags) 组合过滤。原表只有 sha/kind 两索引,
+    # all_materials 的 ORDER BY created_at 此前是全表扫描+Python 排序。
+    con.execute("CREATE INDEX IF NOT EXISTS idx_created ON materials(created_at)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_name ON materials(name)")
+    # idx_location 依赖下面 ALTER 补的 location 列，必须等列存在后再建：
+    # 全新空库若在此处就建索引会抛 "no such column: location"。
+    con.execute("CREATE INDEX IF NOT EXISTS idx_kind_tags ON materials(kind, tags)")
+    try:
+        con.execute("ANALYZE")   # 刷新查询规划器统计,让新索引被选中
+    except sqlite3.OperationalError:
+        pass
     # 语义索引:向量以 float32 BLOB 存库,sig 用于检测文档文本变化(增量重建)
     con.execute(
         """CREATE TABLE IF NOT EXISTS embeddings(
@@ -910,6 +1104,7 @@ def _init_db():
             con.execute(f"ALTER TABLE materials ADD COLUMN {col} {ddl}")
         except sqlite3.OperationalError:
             pass
+    con.execute("CREATE INDEX IF NOT EXISTS idx_location ON materials(location)")
     # 写操作审计(对齐 2026 MCP 安全实践「谁在何时改了什么」,见最佳实践 §17.3):
     # 只记录显式变更(标签/描述/删除/打标/OCR),bridge 批量登记不记(幂等同步非人为变更)。
     con.execute(
@@ -1163,6 +1358,7 @@ def add_material(**kw):
     )
     con.commit()
     con.close()
+    bump_generation()             # 所有新增入库的统一咽喉(ingest/scan/bridge/测试)
 
 
 def get_material(mid):
@@ -1183,6 +1379,7 @@ def _update_material(mid, **fields):
     if not fields:
         return
     _versioned_update(mid, fields, actor="app", action="update")
+    bump_generation()             # 标签/描述/分类变更影响检索与统计,缓存立即失效
 
 
 def all_materials():
@@ -1494,9 +1691,61 @@ def query_materials(q="", kind="", tag=""):
     return [m for _, m in scored]
 
 
+# 排序结果缓存(2025 混合检索最佳实践:候选召回+排序是整条链最贵的一步,
+# 且 /api/count 与各页 /api/list 用的是**同一组** q/kind/tag/mode)。
+# 缓存在 _ranked 层共享,让「取总数」和「翻每一页」只算一次 ranking(尤其语义模式
+# 要同步调 ollama embedding)。TTL + HUB_GENERATION 双重失效,写操作后立即重算。
+_RANK_CACHE = {}
+_RANK_LOCK = threading.Lock()
+_RANK_COMPUTING = {}            # _rk -> Event:同一查询在算时,其余请求在此等待(防惊群)
+_RANK_TTL = float(os.environ.get("VITUAL_RANK_TTL", "30"))
+
+
 def _ranked(q="", kind="", tag="", mode="auto"):
-    """统一检索入口:返回 (结果列表, 是否用了语义)。
-    没有 q 时就是 kind/tag 过滤 + 时间倒序(与旧行为一致)。"""
+    """统一检索入口:返回 (结果列表, 是否用了语义)。带共享结果缓存。
+
+    并发安全:只按「同一查询键」互斥,不同查询并行计算 —— 否则一条慢语义查询
+    (ollama 模型加载可达分钟级)会卡住全局锁,导致所有 /api/list、/api/count 排队超时。
+    """
+    # 归一化:count_materials 传原始 q、search 已译过 q,统一后命中同一缓存键。
+    _cq = _maybe_translate(q or "")
+    _rk = (_cq, kind, tag, mode)
+    _now = time.time()
+    _c = _RANK_CACHE.get(_rk)
+    if _c and _now - _c[0] < _RANK_TTL and _c[1] == HUB_GENERATION:
+        return [dict(m) for m in _c[2]], _c[3]   # 返回副本,避免调用方污染缓存
+    # 仅对「同一查询」加锁:持有者计算,其余同键请求等待其结果(防惊群重复排序)
+    with _RANK_LOCK:
+        ev = _RANK_COMPUTING.get(_rk)
+        if ev is None:
+            ev = _RANK_COMPUTING[_rk] = threading.Event()
+            _i_am_computer = True
+        else:
+            _i_am_computer = False
+    if _i_am_computer:
+        try:
+            rows, used = _ranked_uncached(_cq, kind, tag, mode)
+            with _RANK_LOCK:
+                if len(_RANK_CACHE) >= 128:         # 有界,避免大库下无上限增长
+                    _RANK_CACHE.clear()
+                _RANK_CACHE[_rk] = (time.time(), HUB_GENERATION, rows, used)
+        finally:
+            with _RANK_LOCK:
+                _RANK_COMPUTING.pop(_rk, None)
+            ev.set()                            # 即使异常也放行等待者(且此时缓存已写入)
+        return [dict(m) for m in rows], used
+    else:
+        ev.wait()                              # 等持有者算完
+        _c = _RANK_CACHE.get(_rk)
+        if _c and _c[1] == HUB_GENERATION:
+            return [dict(m) for m in _c[2]], _c[3]
+        # 极少:等待后仍无缓存(被清/代际变)→ 退化为自行计算(不加锁,避免死锁)
+        rows, used = _ranked_uncached(_cq, kind, tag, mode)
+        return [dict(m) for m in rows], used
+
+
+def _ranked_uncached(q="", kind="", tag="", mode="auto"):
+    """实际排序逻辑(无缓存)。没有 q 时就是 kind/tag 过滤 + 时间倒序。"""
     if not q:
         return query_materials("", kind, tag), False
     q2 = expand_query(q)                 # 中文问句补上语料英文词汇
@@ -1525,7 +1774,7 @@ def _append_body_hits(q, rows, kind, tag):
     流水线 run 产物(_raw/_progress/_meta/_debug 日志)不进正文通道:它们只是
     撞词的原始记录(实测查「鸡腿」时 multipass_raw.json 凭转写 payload 混入),
     仍可按名称/标签搜到。"""
-    if kind and kind not in ("docs", "subs"):
+    if kind and kind != "docs":
         return rows
     try:
         extra = chunk_search(q, limit=20, kind=kind or "", tag=tag or "")
@@ -1534,7 +1783,7 @@ def _append_body_hits(q, rows, kind, tag):
     have = {m.get("id") for m in rows}
     add = [m for m in extra
            if m.get("id") not in have
-           and m.get("kind") in ("docs", "subs")
+           and m.get("kind") == "docs"
            and not _RAW_BODY_NAME_RE.search(m.get("name") or "")]
     return rows + add if add else rows
 
@@ -1896,7 +2145,7 @@ def _append_clip_hits(q, rows, kind):
     """
     if _hot_intent(q) in ("id", "speech"):
         return rows
-    if kind and kind not in ("images", "videos", "silent", "anim"):
+    if kind and kind not in ("images", "videos"):
         return rows
     if sum(1 for m in rows if _score(_tokens(q), m) > 0) >= 3:
         return rows
@@ -2049,12 +2298,14 @@ def add_favorite(mid):
     con.execute("INSERT OR IGNORE INTO favorites(mid, created_at) VALUES(?,?)",
                 (mid, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())))
     con.commit(); con.close()
+    bump_generation()             # 收藏影响置顶与「仅看收藏」,缓存需失效
 
 
 def remove_favorite(mid):
     con = _con()
     con.execute("DELETE FROM favorites WHERE mid=?", (mid,))
     con.commit(); con.close()
+    bump_generation()
 
 
 def favorite_ids():
@@ -2065,7 +2316,33 @@ def favorite_ids():
     return {r[0] for r in rows}
 
 
-def search(q="", kind="", tag="", limit=None, offset=0, mode="auto", sort="", favorites_only=False):
+def _facet_filter(rows, form="", topic="", usage=""):
+    """受控词表分面筛选(内容形式/题材/用途),与前端历史语义严格一致。
+
+    2026-11-13 起从「前端拉全表再本地 filter」下沉到服务端:大库下不再把整库
+    JSON 拉到浏览器,分页也由服务端在**筛选之后**完成,count 与 list 口径一致。
+    """
+    if not (form or topic or usage):
+        return rows
+    if form:
+        desc = set(FORM_DESCENDANTS.get(form) or [form])
+        rows = [m for m in rows if (m.get("form") or "") in desc]
+    if topic:
+        leaves = TOPIC_DESCENDANTS.get(topic) or [topic]
+        leaves = set(leaves)
+        usage_leaves = leaves & set(USAGES)   # 同名叶子(如「影视」)按 usage 兜底
+        rows = [m for m in rows
+                if any(t.strip() in leaves for t in (m.get("topics") or "").split(","))
+                or (usage_leaves and any(u.strip() in usage_leaves
+                                         for u in (m.get("usage") or "").split(",")))]
+    if usage:
+        rows = [m for m in rows
+                if usage in [u.strip() for u in (m.get("usage") or "").split(",")]]
+    return rows
+
+
+def search(q="", kind="", tag="", limit=None, offset=0, mode="auto", sort="", favorites_only=False,
+           form="", topic="", usage=""):
     """检索:自然语言问句 → 排序后返回,支持分页。
     mode="auto"     有 embedding 模型且素材已建向量 → 稠密+词法混合;
                     否则纯词法加权(与旧行为一致)
@@ -2074,17 +2351,28 @@ def search(q="", kind="", tag="", limit=None, offset=0, mode="auto", sort="", fa
     sort=""         默认相关性/时间序;q 存在时=相关性,无 q=时间倒序。
                     显式指定 "newest"/"oldest"/"name"/"size" 时覆盖相关性排序
                     (DAM 面板的排序控件;在分页之前生效,全库级排序)。
-    favorites_only=True 只看收藏;收藏始终置顶(稳定排序,favorite 在最前)。"""
+    favorites_only=True 只看收藏;收藏始终置顶(稳定排序,favorite 在最前)。
+    form/topic/usage     受控词表分面,在分页**之前**过滤(服务端筛选,不再前端拉全表)。"""
     _t0 = time.perf_counter()
     q = _maybe_translate(q)
-    ck = (q, kind, tag, limit, offset, mode, sort, favorites_only)
-    if os.environ.get("VITUAL_CACHE_SEARCH"):
-        if ck in _SEARCH_CACHE:
-            _hit = _SEARCH_CACHE[ck]
-            obs.record("search", duration_ms=0.0, ok=True,
-                       zero_hit=not _hit, mode=mode, cached=True)
-            return _hit
+    ck = (q, kind, tag, limit, offset, mode, sort, favorites_only, form, topic, usage)
+    # 检索结果缓存:默认开(重复查询省去整条 ranking + embedding 重算),
+    # 受 TTL(默认 30s, VITUAL_CACHE_TTL 可调)与代际(HUB_GENERATION,写操作即失效)双重约束,
+    # 既快又不会在删/增后返回陈旧结果。设 VITUAL_CACHE_SEARCH=0 可关。
+    _cache_on = os.environ.get("VITUAL_CACHE_SEARCH", "1") != "0"
+    _cache_ttl = float(os.environ.get("VITUAL_CACHE_TTL", "30"))
+    if _cache_on:
+        _cached = _SEARCH_CACHE.get(ck)
+        if _cached is not None:
+            _cts, _cgen, _hit = _cached
+            if (time.time() - _cts) < _cache_ttl and _cgen == HUB_GENERATION:
+                obs.record("search", duration_ms=0.0, ok=True,
+                           zero_hit=not _hit, mode=mode, cached=True)
+                # 返回副本:server.py 会给每行补 thumb/missing 字段,直接返回缓存对象
+                # 会让外部修改污染缓存(封面稍后生成时旧标记会残留)。
+                return [dict(m) for m in _hit]
     rows, _ = _ranked(q, kind, tag, mode)
+    rows = _facet_filter(rows, form, topic, usage)   # 分面先过滤,再分页
     fav = favorite_ids()                      # 一次取全部收藏,避免 N+1
     for m in rows:
         m["favorite"] = m.get("id") in fav    # 后端打标,前端据此渲染星标 + 置顶
@@ -2106,9 +2394,9 @@ def search(q="", kind="", tag="", limit=None, offset=0, mode="auto", sort="", fa
     if offset > 0 or limit is not None:
         end = None if limit is None else offset + limit
         rows = rows[offset:end]
-    if os.environ.get("VITUAL_CACHE_SEARCH"):
+    if _cache_on:
         if len(_SEARCH_CACHE) < 2000:        # 简易内存缓存(同查询重复率不低,省重算)
-            _SEARCH_CACHE[ck] = rows
+            _SEARCH_CACHE[ck] = (time.time(), HUB_GENERATION, [dict(m) for m in rows])
             _cache_persist()                 # 开启持久化时落盘
     # 指标埋点:检索延迟 + 零命中率(§8 G 维度)。埋点失败绝不影响检索本身。
     obs.record("search", duration_ms=(time.perf_counter() - _t0) * 1000.0,
@@ -2125,7 +2413,12 @@ def _cache_load():
         return {}
     try:
         with open(_CACHE_PATH, "rb") as f:
-            return pickle.load(f)
+            data = pickle.load(f)
+        # 只保留 (ts, gen, rows) 三元组,旧格式(直接存 rows)丢弃,避免访问时报错
+        if isinstance(data, dict):
+            return {k: v for k, v in data.items()
+                    if isinstance(v, tuple) and len(v) == 3}
+        return {}
     except Exception:
         return {}
 
@@ -2266,8 +2559,36 @@ def chunk_search(q, limit=10, kind="", tag=""):
     return [dict(r) for _, r in hits[:limit]]
 
 
-def count_materials(q="", kind="", tag="", mode="auto", favorites_only=False):
-    """当前条件下的命中总数(配合分页使用;语义模式下与排序结果集一致)。"""
+def count_materials(q="", kind="", tag="", mode="auto", favorites_only=False,
+                    form="", topic="", usage=""):
+    """当前条件下的命中总数(配合分页使用;语义模式下与排序结果集一致)。
+
+    无 q 且非仅收藏、无分面时走轻量 SQL COUNT(*),避免为拿总数而重跑整条 ranking
+    管线(含语义 embedding)——这是 /api/count 此前的主要性能坑。
+    有分面时复用同一条 search/_facet_filter 路径,保证 total 与分页列表口径严格一致
+    (否则前端会出现「有总数但翻页空」)。昂贵的 ranking 由 _RANK_CACHE 共享。
+    """
+    if form or topic or usage:
+        return len(search(q, kind, tag, limit=None, mode=mode,
+                          favorites_only=favorites_only,
+                          form=form, topic=topic, usage=usage))
+    q = (q or "").strip()
+    if not q and not favorites_only:
+        con = _con()
+        try:
+            wheres, params = [], []
+            if kind:
+                wheres.append("kind=?")
+                params.append(kind)
+            if tag:
+                wheres.append("tags LIKE ?")
+                params.append("%" + tag + "%")
+            sql = "SELECT COUNT(*) FROM materials"
+            if wheres:
+                sql += " WHERE " + " AND ".join(wheres)
+            return con.execute(sql, params).fetchone()[0]
+        finally:
+            con.close()
     rows = _ranked(q, kind, tag, mode)[0]
     if favorites_only:
         fav = favorite_ids()
@@ -3209,10 +3530,10 @@ QUERY_SYNONYMS = {
     "片段": ["segments", "segment", "clip"],
     "音频": ["audio", "wav", "m4a"],
     "音轨": ["audio", "wav", "m4a"],
-    "无声": ["silent", "mute", "silent-video"],
-    "无声视频": ["silent"],
-    "静音": ["silent", "mute"],
-    "静音视频": ["silent"],
+    "无声": ["has_audio:0", "mute", "silent"],
+    "无声视频": ["has_audio:0", "silent"],
+    "静音": ["has_audio:0", "mute"],
+    "静音视频": ["has_audio:0", "silent"],
     "视频": ["video", "mp4"],
     "图片": ["image", "png", "jpg"],
     "笔记": ["notes"],
@@ -3523,6 +3844,13 @@ def tag_ui_meta(tag, lang="zh"):
         group = "job"
         label = (("任务·" if zh else "job·") + short)
         hint = t
+    elif t.startswith("album:"):
+        # 用户策展合集(内容标签,非系统面):可批量加入/移出,与流水线 job: 并存不互斥。
+        v = t[6:] or ("未命名" if zh else "untitled")
+        short = v if len(v) <= 16 else (v[:14] + "…")
+        group = "album"
+        label = (("合集·" if zh else "album·") + short)
+        hint = t
     elif t.startswith("parent:"):
         v = t[7:]
         short = v if len(v) <= 10 else (v[:8] + "…")
@@ -3563,8 +3891,12 @@ def scrub_deprecated_from_tags(*, limit=0):
 
 
 def tags_for_ui(*, limit=48, lang="zh"):
-    """面板标签云:带人读 label,隐藏冗余系统面,按 count 倒序。"""
+    """面板标签云:带人读 label,隐藏冗余系统面,按 count 倒序。
+
+    用户 album: 合集(含空合集登记册)始终附带,不受 limit 截断——侧栏「我的合集」依赖这份列表。
+    """
     out = []
+    seen = set()
     for t, c in distinct_tags():
         meta = tag_ui_meta(t, lang=lang)
         if meta["hide"]:
@@ -3573,8 +3905,25 @@ def tags_for_ui(*, limit=48, lang="zh"):
             "tag": t, "count": c,
             "label": meta["label"], "group": meta["group"], "hint": meta["hint"],
         })
+        seen.add(t)
         if limit and len(out) >= limit:
             break
+    # 空合集也要出现:登记册 ∪ 已有 album: 计数覆盖
+    for a in listed_albums():
+        t = a["tag"]
+        if t in seen:
+            # 已在词云里的用真实 count 覆盖(listed 可能更新更准)
+            for row in out:
+                if row["tag"] == t:
+                    row["count"] = a["count"]
+                    break
+            continue
+        meta = tag_ui_meta(t, lang=lang)
+        out.append({
+            "tag": t, "count": a["count"],
+            "label": meta["label"], "group": meta["group"], "hint": meta["hint"],
+        })
+        seen.add(t)
     return out
 
 
@@ -3619,6 +3968,200 @@ def update_description(mid, desc):
                           detail=f"desc: {old!r} -> {desc!r}")
     _sync_material_vector(mid)      # 向量失效闭环:description 是 doc_text 组成部分
     return r
+
+
+def set_material_classify(mid, form=None, topics=None, usage=None):
+    """批量「移动」用:只改结构化分类列 form/topics/usage,绝不碰 tags。
+
+    None = 不改该字段;传空串可清空。返回 {ok,id,...}。
+    """
+    m = get_material(mid)
+    if not m:
+        return {"ok": False, "error": "not found: " + str(mid)}
+    fields = {}
+    if form is not None:
+        fields["form"] = str(form or "").strip()
+    if topics is not None:
+        if isinstance(topics, (list, tuple)):
+            fields["topics"] = ",".join(str(x).strip() for x in topics if str(x).strip())
+        else:
+            fields["topics"] = str(topics or "").strip()
+    if usage is not None:
+        if isinstance(usage, (list, tuple)):
+            fields["usage"] = ",".join(str(x).strip() for x in usage if str(x).strip())
+        else:
+            fields["usage"] = str(usage or "").strip()
+    if not fields:
+        return {"ok": True, "id": mid, "unchanged": True}
+    r = _versioned_update(mid, fields, actor="app", action="set_classify",
+                          log_action="set_classify", detail=str(fields))
+    return {"ok": bool(r.get("ok")), "id": mid, **fields}
+
+
+def _normalize_coll_tag(tag):
+    t = (tag or "").strip()
+    if t.startswith("album:") or t.startswith("job:"):
+        return t
+    return ""
+
+
+# 空合集登记(尚无成员时也要出现在「我的合集」列表)。文件可重建、可删。
+_ALBUM_REG = os.path.join(HUB, "index", "albums.json")
+
+
+def _load_album_registry():
+    try:
+        with open(_ALBUM_REG, encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return [str(x).strip() for x in data if str(x).strip().startswith("album:")]
+    except (OSError, ValueError, TypeError):
+        pass
+    return []
+
+
+def _save_album_registry(tags):
+    os.makedirs(os.path.dirname(_ALBUM_REG), exist_ok=True)
+    uniq, seen = [], set()
+    for t in tags:
+        t = (t or "").strip()
+        if t.startswith("album:") and t not in seen:
+            seen.add(t)
+            uniq.append(t)
+    with open(_ALBUM_REG, "w", encoding="utf-8") as f:
+        json.dump(uniq, f, ensure_ascii=False, indent=2)
+    return uniq
+
+
+def register_album(tag):
+    """登记用户合集(可空)。返回规范化 album: 标签。"""
+    t = _normalize_coll_tag(tag)
+    if not t.startswith("album:"):
+        return ""
+    cur = _load_album_registry()
+    if t not in cur:
+        cur.append(t)
+        _save_album_registry(cur)
+    return t
+
+
+def unregister_album(tag):
+    t = _normalize_coll_tag(tag)
+    if not t.startswith("album:"):
+        return False
+    cur = _load_album_registry()
+    if t not in cur:
+        return False
+    _save_album_registry([x for x in cur if x != t])
+    return True
+
+
+def listed_albums():
+    """侧栏合集 = 登记册 ∪ 素材上已有的 album: 标签。"""
+    found = {}
+    for t in _load_album_registry():
+        found[t] = 0
+    for m in all_materials():
+        for x in (m.get("tags") or "").split(","):
+            x = x.strip()
+            if x.startswith("album:"):
+                found[x] = found.get(x, 0) + 1
+    return [{"tag": t, "count": n, "title": t[6:] or t} for t, n in sorted(found.items())]
+
+
+def materials_with_tag(tag):
+    """含指定完整 tag 的素材(精确匹配 CSV 项)。"""
+    want = (tag or "").strip()
+    if not want:
+        return []
+    out = []
+    for m in all_materials():
+        tags = [x.strip() for x in (m.get("tags") or "").split(",") if x.strip()]
+        if want in tags:
+            out.append(m)
+    return out
+
+
+def leave_collection(mid, coll_tag):
+    """从合集移出单条:去掉 album:/job: 标签,不删文件。job: 需绕过系统面删护栏。"""
+    coll = _normalize_coll_tag(coll_tag)
+    if not coll:
+        return {"ok": False, "error": "invalid collection tag"}
+    m = get_material(mid)
+    if not m:
+        return {"ok": False, "error": "not found: " + str(mid)}
+    cur = [t.strip() for t in (m.get("tags") or "").split(",") if t.strip()]
+    if coll not in cur:
+        return {"ok": True, "id": mid, "unchanged": True}
+    if coll.startswith("album:"):
+        return merge_material_tags(mid, remove=coll)
+    # job: 系统面不可经 merge 删除 → 直接改写
+    new = [t for t in cur if t != coll]
+    r = update_tags(mid, ",".join(new), purge_ai_tags=False)
+    return {"ok": bool(r.get("ok")), "id": mid, "tags": ",".join(new)}
+
+
+def rename_album(old_tag, new_tag):
+    """重命名用户合集 album:旧 → album:新。只改标签,不碰文件。job: 禁止改名。"""
+    old = _normalize_coll_tag(old_tag)
+    new = _normalize_coll_tag(new_tag)
+    if not old.startswith("album:") or not new.startswith("album:"):
+        return {"ok": False, "error": "rename only supports album:"}
+    if old == new:
+        return {"ok": True, "from": old, "to": new, "done": 0, "unchanged": True}
+    rows = materials_with_tag(old)
+    done, errors = 0, []
+    for m in rows:
+        cur = [t.strip() for t in (m.get("tags") or "").split(",") if t.strip()]
+        nxt = []
+        for t in cur:
+            if t == old:
+                if new not in nxt:
+                    nxt.append(new)
+            elif t not in nxt:
+                nxt.append(t)
+        if nxt == cur:
+            continue
+        r = update_tags(m["id"], ",".join(nxt), purge_ai_tags=False)
+        if r.get("ok"):
+            done += 1
+        else:
+            errors.append({"id": m["id"], "error": r.get("error") or "update failed"})
+    # 登记册同步:空合集也能改名后继续出现在侧栏
+    if not errors:
+        unregister_album(old)
+        register_album(new)
+    return {
+        "ok": done > 0 or not rows or not errors,
+        "from": old, "to": new,
+        "done": done, "total": len(rows),
+        "errors": errors[:20],
+    }
+
+
+def dissolve_collection(coll_tag):
+    """解散合集:从全部成员去掉 album:/job: 标签,**绝不删素材文件**。"""
+    coll = _normalize_coll_tag(coll_tag)
+    if not coll:
+        return {"ok": False, "error": "invalid collection tag"}
+    rows = materials_with_tag(coll)
+    done, errors = 0, []
+    for m in rows:
+        r = leave_collection(m["id"], coll)
+        if r.get("ok"):
+            if not r.get("unchanged"):
+                done += 1
+        else:
+            errors.append({"id": m["id"], "error": r.get("error") or "leave failed"})
+    if coll.startswith("album:") and not errors:
+        unregister_album(coll)
+    return {
+        "ok": not errors,
+        "tag": coll,
+        "done": done,
+        "total": len(rows),
+        "errors": errors[:20],
+    }
 
 
 def _purge_material_derived(mid):
@@ -3755,6 +4298,7 @@ def remove_material(mid):
     con.execute("DELETE FROM materials WHERE id=?", (mid,))
     con.commit()
     con.close()
+    bump_generation()               # 素材集合变化 → 统计/检索缓存即时失效
     _purge_material_derived(mid)    # 向量/sidecar/缩略图级联清理,不留孤儿
     mm = m or {}
     log_history("app", "remove", mid,
@@ -3823,6 +4367,7 @@ def ingest_file(src, move=True, source="", form="", topics="", usage=""):
         form=form, topics=topics, usage=usage,
     )
     normalize_name(mid)          # 入库即规范化显示名(只改 name,不动 rel_path/磁盘)
+    bump_generation()             # 新增素材 → 统计/检索缓存即时失效
     return {"status": "added", "id": mid, "path": os.path.relpath(dest, HUB)}
 
 
@@ -3846,23 +4391,23 @@ def split_video_to_silent_and_audio(mid, *, force=False):
     m = get_material(mid)
     if not m:
         return {"status": "error", "reason": "not_found"}
-    if m.get("kind") not in ("videos", "silent"):
+    if m.get("kind") != "videos":
         return {"status": "skipped", "reason": f"kind={m.get('kind')}"}
     if is_role_clip(m) and not force:
         return {"status": "skipped", "reason": "role:clip"}
     src = _material_abs_path(m)
     if not src or not os.path.isfile(src):
         return {"status": "error", "reason": "missing_file"}
-    if m.get("kind") == "silent" and not force:
+    if "role:silent-picture" in _material_tag_set(m) and not force:
+        # 已是静音画面组件(现在 kind 仍是 videos)
         return {"status": "skipped", "reason": "already_silent"}
-    if m.get("kind") == "videos" and not probe_has_audio(src) and not force:
-        # 已无音轨：直接改 kind 即可，不必再拆
+    if not probe_has_audio(src) and not force:
+        # 已无音轨：补 has_audio:0 分面即可（kind 仍是 videos，不再单列 silent）
         _update_material(
             mid,
-            kind="silent",
-            tags=_merge_tag_csv(m.get("tags"), media_facet_tags(src, "silent")),
+            tags=_merge_tag_csv(m.get("tags"), ["has_audio:0"]),
         )
-        return {"status": "reclassified", "id": mid, "kind": "silent"}
+        return {"status": "reclassified", "id": mid, "kind": "videos"}
 
     ff = ffmpeg_path()
     if not ff:
@@ -3911,13 +4456,13 @@ def split_video_to_silent_and_audio(mid, *, force=False):
     else:
         sid = sha_s[:12]
         add_material(
-            id=sid, kind="silent", ext=".mp4",
+            id=sid, kind="videos", ext=".mp4",
             name=os.path.basename(silent_path),
             rel_path=os.path.relpath(silent_path, HUB),
             size=os.path.getsize(silent_path), sha256=sha_s,
             tags=_merge_tag_csv(
                 "sp,demux," + ",".join(relation_tags(mid) + inherit_parent_context_tags(mid)),
-                media_facet_tags(silent_path, "silent"),
+                media_facet_tags(silent_path) + ["role:silent-picture", "has_audio:0"],
             ),
             description=(m.get("description") or "").strip() or f"无声画面 ← {m.get('name')}",
             source="demux-silent", orig_name=os.path.basename(silent_path),
@@ -4026,17 +4571,20 @@ def ingest_external(src, source="", tags="", description="", kind=None):
     con.row_factory = sqlite3.Row
     want_kind = kind or classify(src)
     incoming = [t.strip() for t in (tags or "").split(",") if t.strip()]
-    incoming.extend(media_facet_tags(src, want_kind))
+    incoming.extend(media_facet_tags(src, want_kind, tags))
     by_path = con.execute(
         "SELECT * FROM materials WHERE location='external' AND external_path=?",
         (src,),
     ).fetchone()
     if by_path:
         mid = by_path["id"]
-        fields = {
-            "kind": want_kind,
-            "tags": _merge_tag_csv(by_path["tags"], incoming),
-        }
+        merged = _merge_tag_csv(by_path["tags"], incoming)
+        # 流水线原地重制同名成品时（无声→带声），互斥的 has_audio 面标签必须替换，
+        # 不能只增不删，否则面板会一直挂「静音」。
+        probe = next((t for t in incoming if t.startswith("has_audio:")), "")
+        if probe:
+            merged = reconcile_audio_facets(merged, probe == "has_audio:1")
+        fields = {"kind": want_kind, "tags": merged}
         if by_path["sha256"] != sha:
             fields.update({
                 "sha256": sha,
@@ -4051,6 +4599,8 @@ def ingest_external(src, source="", tags="", description="", kind=None):
             fields["source"] = source
         con.close()
         _update_material(mid, **fields)
+        if by_path["sha256"] != sha:
+            normalize_name(mid)  # 上面把 name 重置成磁盘名，恢复规范显示名
         return {
             "status": "updated" if by_path["sha256"] != sha else "duplicate",
             "id": mid,
@@ -4195,9 +4745,12 @@ def prune_broken_externals():
     return broken
 
 
-def external_stats():
-    """外部引用统计:内部素材数 / 外部引用数 / 其中失效数。"""
-    ms = all_materials()
+def external_stats(ms=None):
+    """外部引用统计:内部素材数 / 外部引用数 / 其中失效数。
+
+    ms 可选:传入已载入的全量列表,避免同一请求内重复全表扫描(/api/stats)。
+    """
+    ms = all_materials() if ms is None else ms
     ext = [m for m in ms if m.get("location") == "external"]
     bad = [m for m in ext
            if not (m.get("external_path") and os.path.exists(m["external_path"]))]
@@ -4231,7 +4784,7 @@ def health():
         size += m.get("size") or 0
     st = thumbs_status()
     ex = external_stats()
-    videos = kinds.get("videos", 0) + kinds.get("silent", 0)
+    videos = kinds.get("videos", 0)
     return {
         "ok": (ex["broken"] == 0),
         "total": len(ms),
@@ -4381,8 +4934,8 @@ def deliver_package(manifest_path=None, ids=None, *, out_dir=None,
       copy_only: True=流拷贝不重编码(仅 remux;res 忽略;clip 仍走重编码)
       overwrite: 目标已存在是否覆盖(否则跳过并标 skipped)
 
-    交付策略按 kind 分流:**视频类**(videos/silent/anim)走 ffmpeg 转码/裁剪;
-    **非视频类**(docs/subs/audio/images)按原样复制、保留原扩展名,不做转码
+    交付策略按 kind 分流:**视频类**(videos)走 ffmpeg 转码/裁剪;
+    **非视频类**(docs/audio/images/project/vector/font 等)按原样复制、保留原扩展名,不做转码
     (实例教训:对 .srt/.ass 硬转 mp4 必然失败)。
     Returns: dict(dry_run, out_dir, plan[], written[], skipped[], errors[])
     """
@@ -4532,7 +5085,7 @@ def make_thumb(mid, retry_failed=False):
     if not retry_failed and os.path.exists(dst + ".fail"):
         return None
     # 图片/动画:PIL 重采样(比原图小得多,卡片加载更快;不依赖 ffmpeg)
-    if kind in ("images", "anim"):
+    if kind == "images":
         return _make_thumb_pil(m, dst)
     if kind not in VIDEO_LIKE_KINDS:
         return None
@@ -4639,7 +5192,7 @@ def understand_record_path(mid):
 
 
 def normalize_lang_tag(code):
-    """把任意语种写法收口到站点的 16 个受控代码(zh-Hant 保留连字符)。
+    """把任意语种写法收口到字幕产物的 20 个受控代码(zh-Hant 保留连字符)。
 
     仅用于 `lang:` 受控词表:模型自由发挥的「中文/Chinese/japanese」一律不认,
     返回 None;只有站点代码或其标准别名才收口成功(见步骤 3)。"""
@@ -4694,7 +5247,7 @@ def srt_cues(text, limit=400):
 
 
 def _subs_prefer_key(m):
-    """同一 job 有多语字幕时,优先源语中文,其次英文。不要把 16 语全挂上。"""
+    """同一 job 有多语字幕时,优先源语中文,其次英文。不要把全部语种子幕挂上。"""
     path = (m.get("external_path") or m.get("rel_path") or "").replace("\\", "/").lower()
     name = (m.get("name") or "").lower()
     base = os.path.basename(path or name)
@@ -4715,7 +5268,7 @@ def attach_job_transcripts(mids=None):
     """
     ms = all_materials()
     want = set(mids) if mids else None
-    subs = [m for m in ms if m.get("kind") == "subs"]
+    subs = [m for m in ms if m.get("kind") == "docs" and "type:subs" in (m.get("tags") or "")]
     by_job = {}
     for s in subs:
         for t in (s.get("tags") or "").split(","):
@@ -4785,7 +5338,7 @@ def _material_job_subs(mid):
     jobs = [t.strip() for t in (m.get("tags") or "").split(",") if t.strip().startswith("job:")]
     if not jobs:
         return []
-    subs = [s for s in all_materials() if s.get("kind") == "subs"]
+    subs = [s for s in all_materials() if s.get("kind") == "docs" and "type:subs" in (s.get("tags") or "")]
     out = []
     for s in subs:
         st = s.get("tags") or ""
@@ -4818,7 +5371,7 @@ def backfill_lang_tags():
     识别不到)。只增不删;已带 lang: 或识别不到语种的跳过。返回 {updated, skipped}。"""
     updated, skipped = 0, 0
     for m in all_materials():
-        if m.get("kind") != "subs":
+        if m.get("kind") != "docs" or "type:subs" not in (m.get("tags") or ""):
             continue
         old = (m.get("tags") or "")
         if any(t.strip().startswith("lang:") for t in old.split(",")):
@@ -5079,7 +5632,7 @@ def ops_summary():
                 source_attached += 1
     per_lang = {c: 0 for c in SITE_LANGS}
     for m in mats:
-        if m.get("kind") != "subs":
+        if m.get("kind") != "docs" or "type:subs" not in (m.get("tags") or ""):
             continue
         lg = _sub_lang(m)
         if lg and lg in per_lang:
@@ -6368,7 +6921,7 @@ def _clip_visual_path(m):
     if m.get("kind") == "images" and src and os.path.isfile(src):
         return src, "source"
     # anim(gif) 也走抽帧:多帧序列直读易失败,此前漏掉该分支导致 GIF 永远 how=missing
-    if (m.get("kind") in VIDEO_LIKE_KINDS or m.get("kind") == "anim") and src and os.path.isfile(src):
+    if m.get("kind") in VIDEO_LIKE_KINDS and src and os.path.isfile(src):
         # 无封面时临时抽一帧(不污染 thumbs 失败标记)
         exe = ffmpeg_path()
         if not exe:
@@ -6507,7 +7060,7 @@ def image_embed_status():
 
 
 def build_image_embeddings(force=False, limit=0, progress=None):
-    """为 videos/silent/images 建 CLIP 图像向量(增量)。无后端 → available=False。"""
+    """为 videos/images 建 CLIP 图像向量(增量)。无后端 → available=False。"""
     info = clip_probe(refresh=True)
     if not info.get("ok"):
         return {"available": False, "embedded": 0, "skipped": 0, "total": 0,
@@ -6673,7 +7226,7 @@ def _extract_frames(m, n=5):
 
 
 def build_clip_frame_embeddings(frames=5, force=False, limit=0, progress=None, kinds=None):
-    """通道 B:为 videos/silent/images 建多帧 CLIP 向量(增量)。无后端 → available=False。
+    """通道 B:为 videos/images 建多帧 CLIP 向量(增量)。无后端 → available=False。
     与原 image_embeddings(单图)分表,互不影响;CLIP 文本搜帧能力由 search_by_text_image 自动启用。"""
     _ensure_frame_table()
     info = clip_probe(refresh=True)
@@ -6875,17 +7428,20 @@ def search_by_image(query, *, max_dist=10, limit=20, mode="auto"):
 
 
 # ---------- 事件驱动自动处理链(封面→OCR→镜头索引→pHash→自动打标→语义索引) ----------
-def pending_processing(mid):
+def pending_processing(mid, m=None):
     """返回该素材还缺哪些自动处理步骤(True=缺)。
 
     判断依据:thumb 看 thumb_path(mid) 的 jpg 是否存在且非空;
     ocr/visual/shots/phash 看各自 sidecar 是否已落盘。
     visual 必须计入缺项:否则入库钩子只补封面/OCR/镜头,画面描述永远不会补
     (实库 16 条视频里 10 条因此没有 index/visual)。
-    非 videos/silent/images/anim 素材不需要画面类派生数据 → 全 False。
+    非 videos/images 素材不需要画面类派生数据 → 全 False。
     物理 clip(role:clip):镜头索引挂在母版上,shots 永不标缺。
-    images:不需要 shots(场景检测只对视频)。"""
-    m = get_material(mid)
+    images:不需要 shots(场景检测只对视频)。
+
+    m 可选:批量调用时传入已载入的素材 dict,避免每条再查一次库(N+1)。"""
+    if m is None:
+        m = get_material(mid)
     if not m or m.get("kind") not in VISUAL_KINDS:
         return {"thumb": False, "ocr": False, "visual": False, "shots": False, "phash": False}
     tp = thumb_path(mid)
@@ -6898,7 +7454,7 @@ def pending_processing(mid):
         need_thumb = not (src and os.path.isfile(src))
     else:
         need_thumb = not (tp and os.path.exists(tp) and os.path.getsize(tp) > 0)
-    need_shots = kind in ("videos", "silent") and not is_role_clip(m)
+    need_shots = kind in ("videos",) and not is_role_clip(m)
     return {
         "thumb": need_thumb,
         "ocr": not (op and os.path.isfile(op)),
@@ -6908,16 +7464,16 @@ def pending_processing(mid):
     }
 
 
-def pending_map():
+def pending_map(ms=None):
     """{id: {thumb,ocr,visual,shots,phash}} — 仅有缺项的素材(面板「理解中」徽章)。
 
-    全库量级扫描(get_material + 若干存在性检查),SQLite 本地无压力;
+    ms 可选:传入已载入列表,批量扫描不再逐条 get_material(N+1 → 0 次额外查询);
     auto 链后台跑完后前端下次 load 即清零。"""
     out = {}
-    for m in all_materials():
+    for m in (all_materials() if ms is None else ms):
         if m.get("kind") not in VISUAL_KINDS:
             continue
-        pd = pending_processing(m["id"])
+        pd = pending_processing(m["id"], m)
         if any(pd.values()):
             out[m["id"]] = pd
     return out
@@ -6929,7 +7485,7 @@ def pending_map():
 # 一等公民元数据,用于筛选(找 4K / h264 / 长片)与分发合规。
 # 与 OCR/镜头/pHash 一致:属**派生数据**,只落 sidecar `index/tech/<id>.json`,可随时重建;
 # 刻意**不写进 DB description**(该列参与主排序,写入派生文本会稀释排序,见 OCR 与命名两次教训)。
-TECH_KINDS = ("videos", "silent", "audio", "anim", "images")
+TECH_KINDS = ("videos", "audio", "images")
 
 
 def tech_path(mid):
@@ -7100,7 +7656,7 @@ def describe_material(mid, dry_run=False, only_missing=True, with_stage=True):
     if only_missing and cur:
         return cur
     src_name = (m.get("orig_name") or "").strip() or (m.get("name") or "")
-    st = naming.stage_zh(src_name, m.get("kind", ""))
+    st = naming.stage_zh(src_name, m.get("kind", ""), m.get("tags", ""))
     tags = m.get("tags") or ""
     job = ""
     for t in tags.split(","):
@@ -7195,18 +7751,18 @@ def auto_process_material(mid, ocr=True, shots=True, phash=True, autotag=False, 
         _attempt("ocr", lambda: ocr_material(mid))
     if visual:
         _attempt("visual", lambda: visual_material(mid))
-    # 物理 clip / 图片 不建镜头表(逻辑片段只在母版 videos/silent shots)
+    # 物理 clip / 图片 不建镜头表(逻辑片段只在母版 videos shots)
     m0 = get_material(mid) or {}
     run_shots = (
         shots
-        and m0.get("kind") in ("videos", "silent")
+        and m0.get("kind") in ("videos",)
         and not is_role_clip(m0)
     )
     if run_shots:
         _attempt("shots", lambda: build_shot_index(mid))
     if phash:
         _attempt("phash", lambda: phash_material(mid))
-    # 步骤 1:镜头之后把同 job 的一条源语字幕挂到母版/音轨(只挂一条,避免 16 语冲散向量)
+    # 步骤 1:镜头之后把同 job 的一条源语字幕挂到母版/音轨(只挂一条,避免全部语种冲散向量)
     if m0.get("kind") in ("videos", "audio"):
         try:
             r = attach_job_transcripts(mids=[mid])
@@ -7370,7 +7926,7 @@ def classify_clear_nonvisual():
 
 
 def auto_process_all(limit=0, autotag=False):
-    """批处理:找出所有还有缺项的 videos/silent/images 素材,逐条跑 auto_process_material,
+    """批处理:找出所有还有缺项的 videos/images 素材,逐条跑 auto_process_material,
     最后调一次 build_embeddings()(增量:只补新素材/文本有变化的向量)。
     limit>0 时只处理前 limit 条。返回 {"processed", "results", "embed"}。"""
     ms = [m for m in all_materials()
@@ -7417,7 +7973,7 @@ def missing_thumbnail_ids(skip_failed=True):
     skip_failed=True 时跳过已知损坏(有 .fail 标记)的,避免每次批量都白跑。"""
     out = []
     for m in all_materials():
-        if m["kind"] not in VIDEO_LIKE_KINDS and m["kind"] not in ("images", "anim"):
+        if m["kind"] != "images" and m["kind"] not in VIDEO_LIKE_KINDS:
             continue
         p = thumb_path(m["id"])
         if os.path.exists(p) and os.path.getsize(p) > 0:
@@ -7429,8 +7985,8 @@ def missing_thumbnail_ids(skip_failed=True):
 
 
 def list_missing_covers(kind="", skip_failed=True, limit=50):
-    """无封面的 videos/silent 清单(Agent/MCP 只读技能用)。
-    kind 可滤 `silent`/`videos`;空=两者。返回 [{id,kind,name,tags},...]。"""
+    """无封面的 videos 清单(Agent/MCP 只读技能用)。静音画面= videos + has_audio:0。
+    kind 可滤 `videos`;空=全部 videos。返回 [{id,kind,name,tags},...]。"""
     want = {kind} if kind in VIDEO_LIKE_KINDS else set(VIDEO_LIKE_KINDS)
     ids = set(missing_thumbnail_ids(skip_failed=skip_failed))
     out = []
@@ -7449,7 +8005,7 @@ def list_missing_covers(kind="", skip_failed=True, limit=50):
 def job_checkup(job_id):
     """某 subtitle_pipeline job 的资产体检(只读,确定性,零幻觉)。
 
-    看 kinds 是否齐(videos/silent/audio/subs/docs)、封面/镜头缺项、asr 音轨标签、
+    看 kinds 是否齐(videos(含静音 has_audio:0)/audio/docs(type:subs))、封面/镜头缺项、asr 音轨标签、
     失效外部引用;并汇总 master/clip/组件关系(方案 A)。
     Agent Prompt「job 体检」与 MCP tool 共用。
     """
@@ -7505,7 +8061,7 @@ def job_checkup(job_id):
     ok = (
         bool(rows)
         and not broken_ids
-        and (kinds.get("videos", 0) + kinds.get("silent", 0)) > 0
+        and kinds.get("videos", 0) > 0
     )
     # 步骤 7:分发就绪——源文件打不开、有声母版无源语挂接都写进说明(但不把整任务判死)
     channel_broken = []
@@ -7522,7 +8078,7 @@ def job_checkup(job_id):
             if info.get("attached_lang") is None and info.get("source_sub_path") is not None:
                 masters_without_transcript.append(m["id"])
     for m in rows:
-        if m.get("kind") == "subs":
+        if m.get("kind") == "docs" and "type:subs" in (m.get("tags") or ""):
             lg = _sub_lang(m)
             if lg:
                 subs_langs.add(lg)
@@ -7533,9 +8089,11 @@ def job_checkup(job_id):
         "tag": tag,
         "count": len(rows),
         "kinds": kinds,
-        "has_silent": kinds.get("silent", 0) > 0,
+        "has_silent": any(m.get("kind") == "videos"
+                          and "has_audio:0" in (m.get("tags") or "") for m in rows),
         "has_audio": kinds.get("audio", 0) > 0,
-        "has_subs": kinds.get("subs", 0) > 0,
+        "has_subs": any(m.get("kind") == "docs"
+                        and "type:subs" in (m.get("tags") or "") for m in rows),
         "has_notes": kinds.get("docs", 0) > 0,
         "master_ids": master_ids,
         "clip_ids": clip_ids,

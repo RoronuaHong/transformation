@@ -1,4 +1,10 @@
-# LLM profiles for subtitle_pipeline (chat = polish/summary, translate = subtitles)
+# LLM profiles for subtitle_pipeline
+#   chat      = polish/summary/glossary
+#   translate = primary subtitle translation
+#   verify    = INDEPENDENT second-opinion model for proofreading (副译/回译/Judge)
+#               Keep it a DIFFERENT model from `translate`, otherwise consensus
+#               can never detect an error. If omitted, `verify` inherits `chat`.
+#               Toggle in production: VITUAL_TRANSLATE_VERIFY=off|consensus|full
 # Copy to llm.yaml to customize. Secrets stay in env — never commit keys.
 #
 # Switch:
@@ -35,7 +41,18 @@ profiles:
       model: translategemma:4b
       base_url: http://127.0.0.1:11434
       temperature: 0.2
+    # 异族异议模型：gemma4 不是 translategemma，共识比对才有意义。
+    verify:
+      provider: ollama
+      model: gemma4:e2b
+      base_url: http://127.0.0.1:11434
+      temperature: 0.1
 
+  # 注意：tokenhub / tokenhub_anthropic / openai 这三个 profile 的 chat 与
+  # translate 是同一个模型。校对必须显式配 `verify` 为**异族模型**，否则
+  # proofread_lines 会检测到同模型并自动 status=skipped（拒绝"假校对"）。
+  # 例如给 tokenhub 加：verify: {provider: ollama, model: gemma4:e2b, base_url: ...}
+  #
   # 腾讯 TokenHub hy3（OpenAI 协议优先，失败再试 Anthropic Messages）
   tokenhub:
     chat:
