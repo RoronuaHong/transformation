@@ -254,6 +254,29 @@ def compare_coverage(
     }
 
 
+def merge_adjacent_intervals(
+    intervals: list[dict],
+    *,
+    gap_max: float = 0.4,
+    sim_thr: float = 0.85,
+) -> list[dict]:
+    """合并「同句闪断重显」的相邻区间：间隔 <gap_max 且文字相似。
+
+    后一条文本**不得比前一条短**："打死他打死他"→"打死他" 是换了新句
+    （子串因字符集相同 sim 恒 1.0，必须靠长度拦），误并成一条长 interval
+    再被 max_dur 截断会吞掉后一句。
+    """
+    merged: list[dict] = []
+    for iv in intervals:
+        if (merged and iv["start"] - merged[-1]["end"] < gap_max
+                and _sim(iv.get("text", ""), merged[-1].get("text", "")) >= sim_thr
+                and len(_norm(iv.get("text", ""))) >= len(_norm(merged[-1].get("text", "")))):
+            merged[-1]["end"] = iv["end"]
+        else:
+            merged.append(dict(iv))
+    return merged
+
+
 def apply_interval_timing(
     cues: list[dict],
     aligned: list[tuple[int, dict | None]],

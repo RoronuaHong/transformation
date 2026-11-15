@@ -44,6 +44,27 @@ def test_normalize_nested_cue_stays_monotonic():
     assert abs((out[1]["end"] - out[1]["start"]) - 1.0) < 0.02
 
 
+def test_merge_rejects_shrinking_new_sentence():
+    """相邻同文但后句变短是新句不是闪断："打死他打死他"→"打死他" 不得并成一条
+    长 interval（否则再被 max_dur 截断会吞掉后一句）。"""
+    ivs = [
+        {"text": "打死他打死他", "start": 8.2, "end": 12.93},
+        {"text": "打死他", "start": 13.33, "end": 16.67},
+    ]
+    out = st.merge_adjacent_intervals(ivs)
+    assert len(out) == 2 and out[1]["start"] == 13.33
+
+
+def test_merge_keeps_equal_text_flicker():
+    """同句闪断重显（等长同文、间隔小）应当合并。"""
+    ivs = [
+        {"text": "绝无二心", "start": 36.27, "end": 36.9},
+        {"text": "绝无二心", "start": 37.0, "end": 37.2},
+    ]
+    out = st.merge_adjacent_intervals(ivs)
+    assert len(out) == 1 and abs(out[0]["end"] - 37.2) < 1e-6
+
+
 def test_parse_srt_with_position_suffix():
     """带坐标后缀(X1:/Y1:)的 SRT 时间轴行不得让 parse_srt 崩溃(用枚举行下标)。"""
     from retime_from_hardsub import parse_srt

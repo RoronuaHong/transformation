@@ -23,6 +23,7 @@ from subtitle_timing import (  # noqa: E402
     _sim,
     align_cues_to_intervals,
     apply_interval_timing,
+    merge_adjacent_intervals,
     normalize_cue_timing,
 )
 
@@ -166,15 +167,9 @@ def extract_hardsub_intervals(video: Path, *, band_top: float = 0.62,
     if cur_text is not None:
         intervals.append({"text": cur_text, "start": cur_start, "end": cur_end})
 
-    # 丢短噪点 + 合并闪烁/切分造成的相邻同文区间
+    # 丢短噪点 + 合并闪烁/切分造成的相邻同文区间（规则见 merge_adjacent_intervals）
     intervals = [iv for iv in intervals if iv["end"] - iv["start"] >= 0.15]
-    merged: list[dict] = []
-    for iv in intervals:
-        if (merged and iv["start"] - merged[-1]["end"] < 0.4
-                and _sim(iv["text"], merged[-1]["text"]) >= 0.85):
-            merged[-1]["end"] = iv["end"]
-        else:
-            merged.append(dict(iv))
+    merged = merge_adjacent_intervals(intervals)
     merged.sort(key=lambda x: x["start"])
     print(f"  [extract] {len(merged)} on-screen subtitle intervals "
           f"(wm_cells={len(wm_cells)})")
