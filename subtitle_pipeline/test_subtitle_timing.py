@@ -53,6 +53,86 @@ def test_parse_srt_with_position_suffix():
     assert cues == [{"start": 1.0, "end": 2.0, "text": "Hello world"}]
 
 
+def test_compare_coverage_detects_missing_hardsub_line():
+    """核心门禁：硬字幕有、SRT 完全没有的漏句必须被抓出（align 抓不到这种）。"""
+    cues = [
+        {"text": "打死他", "start": 1.4, "end": 4.3},
+        {"text": "绝无二心", "start": 36.3, "end": 37.2},
+    ]
+    intervals = [
+        {"text": "打死他打死他", "start": 1.4, "end": 4.3},
+        {"text": "不把我们当人看", "start": 5.5, "end": 6.4},   # 漏句
+        {"text": "只顾自己升官发财", "start": 6.5, "end": 7.8}, # 漏句
+        {"text": "绝无二心", "start": 36.3, "end": 37.2},
+    ]
+    rep = st.compare_coverage(cues, intervals)
+    assert rep["ok"] is False
+    assert len(rep["missing_in_srt"]) == 2
+    texts = [m["text"] for m in rep["missing_in_srt"]]
+    assert "不把我们当人看" in texts and "只顾自己升官发财" in texts
+    assert rep["coverage"] < 1.0
+
+
+def test_compare_coverage_covers_split_cues_and_reports_ok():
+    """一条硬字幕被 ASR 切成两句时，拼接覆盖应算命中，不能误报缺句。"""
+    cues = [
+        {"text": "大人的武功", "start": 37.4},
+        {"text": "威风八面", "start": 37.8},
+    ]
+    intervals = [{"text": "大人的武功威风八面", "start": 37.4, "end": 38.8}]
+    rep = st.compare_coverage(cues, intervals)
+    assert rep["missing_in_srt"] == []
+    assert rep["ok"] is True
+
+
+def test_compare_coverage_flags_drift():
+    """文字对得上但起点偏了很多（没按原片显示时间出轴）要报漂移。"""
+    cues = [{"text": "绝无二心", "start": 40.0}]
+    intervals = [{"text": "绝无二心", "start": 36.3, "end": 37.2}]
+    rep = st.compare_coverage(cues, intervals)
+    assert rep["drift"] and abs(rep["drift"][0]["delta"] - 3.7) < 0.01
+
+
+def test_compare_coverage_repeat_lines_no_false_drift():
+    """重复句（同一句出现多次）必须各配时间最近的区间，不能全配第一条误报漂移。"""
+    cues = [
+        {"text": "打死他", "start": 1.4},
+        {"text": "打死他", "start": 8.2},
+        {"text": "打死他", "start": 13.4},
+    ]
+    intervals = [
+        {"text": "打死他打死他", "start": 1.4, "end": 4.3},
+        {"text": "打死他打死他", "start": 8.2, "end": 12.9},
+        {"text": "打死他", "start": 13.4, "end": 16.6},
+    ]
+    rep = st.compare_coverage(cues, intervals)
+    assert rep["drift"] == []          # 时间就近配对，无漂移
+    assert rep["ok"] is True
+
+
+def test_compare_coverage_minor_filler_not_blocking():
+    """极短叹词（"啊"）缺失只记 minor_missing，不把门禁判失败。"""
+    cues = [{"text": "天下无敌", "start": 44.7}]
+    intervals = [
+        {"text": "啊", "start": 44.7, "end": 45.1},
+        {"text": "天下无敌", "start": 44.7, "end": 45.6},
+    ]
+    rep = st.compare_coverage(cues, intervals)
+    assert rep["missing_in_srt"] == []
+    assert [m["text"] for m in rep["minor_missing"]] == ["啊"]
+    assert rep["ok"] is True
+
+
+def test_compare_coverage_all_present_is_ok():
+    cues = [{"text": "我不在意", "start": 3.7}, {"text": "还不仅仅如此", "start": 5.1}]
+    intervals = [
+        {"text": "我不在意", "start": 3.7, "end": 4.5},
+        {"text": "还不仅仅如此", "start": 5.1, "end": 6.4},
+    ]
+    rep = st.compare_coverage(cues, intervals)
+    assert rep["ok"] is True and rep["missing_in_srt"] == [] and rep["drift"] == []
+
+
 def test_align_repeat_text_by_temporal_proximity():
     # 同一句"我不在意"在片中出现了两次，必须按时间就近匹配，而非有序指针漂移
     cues = [

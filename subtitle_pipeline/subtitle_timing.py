@@ -137,6 +137,123 @@ def align_cues_to_intervals(
     return out
 
 
+def compare_coverage(
+    cues: list[dict],
+    intervals: list[dict],
+    *,
+    sim_thr: float = 0.5,
+    drift_thr: float = 0.6,
+    short_text_max: int = 1,
+) -> dict:
+    """双向覆盖对比：以原片硬字幕 intervals 为真源，检查软字幕 cues 是否
+    完整且不漂移。这是「与原硬字幕对比」门禁的核心——比对齐更严，专门抓
+    「硬字幕有、软字幕没有」的漏句（ASR 整句漏转时 align 不会报 UNMATCHED，
+    因为没有多余 cue；只有反向查 interval 覆盖才能发现）。
+
+    返回 report:
+      - missing_in_srt: 没有任何 cue 覆盖的硬字幕区间（真·缺句）[{start,end,text,reason}]
+      - extra_in_srt:   任何硬字幕区间都不像的 cue（ASR 幻觉/错句，软警告）
+      - drift:          能配上但 start 偏差 > drift_thr 的 cue [{index,delta,...}]
+      - matched / cue_count / interval_count / coverage
+      - ok:             missing_in_srt 为空且 coverage >= 0.95
+
+    一条 interval 只要被「任一 cue 文字相似」或「连续多条 cue 拼起来相似」
+    （无间隙长字幕被 ASR 切碎的情形）覆盖，即视为已覆盖。
+    """
+    n = len(intervals)
+    covered_iv: set[int] = set()
+    covered_cue: set[int] = set()
+
+    # 1) 单条 cue -> interval（文字相似即可，不限时间先后）
+    for i, c in enumerate(cues):
+        ctxt = _norm(c.get("text", ""))
+        if not ctxt:
+            continue
+        for k, iv in enumerate(intervals):
+            if _sim(ctxt, iv.get("text", "")) >= sim_thr:
+                covered_iv.add(k)
+                covered_cue.add(i)
+
+    # 2) 连续多条 cue 拼接 -> 一条 interval（ASR 把无间隙长字幕切成多句）
+    for k, iv in enumerate(intervals):
+        if k in covered_iv:
+            continue
+        ivtxt = _norm(iv.get("text", ""))
+        for i in range(len(cues)):
+            joined = ""
+            for j in range(i, min(i + 6, len(cues))):  # 最多并 6 条，防误吞整段
+                joined += _norm(cues[j].get("text", ""))
+                if joined and _sim(joined, ivtxt) >= sim_thr:
+                    covered_iv.add(k)
+                    covered_cue.update(range(i, j + 1))
+                    break
+            if k in covered_iv:
+                break
+
+    # 极短叹词（"啊"/"嗯"，<=short_text_max 字）单独列为软告警，不阻断门禁。
+    missing, minor_missing = [], []
+    for k, iv in enumerate(intervals):
+        if k in covered_iv:
+            continue
+        txt = (iv.get("text") or "").strip()
+        item = {"start": round(float(iv.get("start", 0) or 0), 3),
+                "end": round(float(iv.get("end", 0) or 0), 3),
+                "text": txt, "reason": "hardsub_line_absent_in_srt"}
+        (minor_missing if len(_norm(txt)) <= short_text_max else missing).append(item)
+    extra = [
+        {"index": i, "start": round(float(c.get("start", 0) or 0), 3),
+         "text": (c.get("text") or "").strip(), "reason": "srt_line_not_in_hardsub"}
+        for i, c in enumerate(cues) if i not in covered_cue
+    ]
+
+    # 3) 时间漂移：对文字高度相似（>=0.8）的 cue/interval 配对照起点。
+    # 重复句（"打死他"×3）必须取「时间最近」的那条 interval，不能都配到第一条，
+    # 否则会误报巨大漂移。用 (相似度, -时间距离) 做排序键。
+    used_iv_drift: set[int] = set()
+    drift = []
+    cand = []
+    for i, c in enumerate(cues):
+        ctxt = _norm(c.get("text", ""))
+        if not ctxt:
+            continue
+        cs = float(c.get("start", 0) or 0)
+        for k, iv in enumerate(intervals):
+            s = _sim(ctxt, iv.get("text", ""))
+            if s >= 0.8:
+                ivs = float(iv.get("start", 0) or 0)
+                cand.append((i, k, s, abs(cs - ivs)))
+    # 每条 cue 取最相似、同相似则时间最近；interval 在漂移配对里只用一次
+    cand.sort(key=lambda x: (-x[2], x[3]))
+    seen_cue: set[int] = set()
+    for i, k, _s, _td in cand:
+        if i in seen_cue or k in used_iv_drift:
+            continue
+        seen_cue.add(i)
+        used_iv_drift.add(k)
+        cs = float(cues[i].get("start", 0) or 0)
+        ivs = float(intervals[k].get("start", 0) or 0)
+        delta = round(cs - ivs, 3)
+        if abs(delta) > drift_thr:
+            drift.append({"index": i, "text": (cues[i].get("text") or "").strip(),
+                          "srt_start": round(cs, 3), "hardsub_start": round(ivs, 3),
+                          "delta": delta})
+
+    # 覆盖率分母排除极短叹词（它们已单列为 minor_missing，不参与门禁判定）
+    effective = n - len(minor_missing)
+    coverage = (len(covered_iv) / effective) if effective > 0 else 1.0
+    return {
+        "cue_count": len(cues),
+        "interval_count": n,
+        "matched": len(covered_iv),
+        "coverage": round(coverage, 4),
+        "missing_in_srt": missing,
+        "minor_missing": minor_missing,
+        "extra_in_srt": extra,
+        "drift": drift,
+        "ok": (not missing) and coverage >= 0.95,
+    }
+
+
 def apply_interval_timing(
     cues: list[dict],
     aligned: list[tuple[int, dict | None]],

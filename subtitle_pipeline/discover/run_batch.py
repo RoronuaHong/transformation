@@ -192,6 +192,70 @@ def _find_source_srt(work_dir: Path, stem: str, source_lang: str) -> Path | None
     return found.get(tag) or next(iter(found.values()), None)
 
 
+def _hardsub_gate(work_dir: Path, stem: str, src_lang: str, *, bvid: str | None) -> dict:
+    """入库前把源 SRT 与原片硬字幕逐条对比（用户强制流程）。
+
+    策略：
+      - `VITUAL_HARDSUB_GATE=off` 关闭；`strict` 缺句/漂移阻断入库；默认 `warn` 只告警。
+      - 无带硬字幕的 source.mp4（纯音频/软字幕源）自动跳过，不误杀。
+      - 报告写到 job media 目录 hardsub_compare.json，随 pack 一起可查。
+    接进主流程是为了杜绝"对比工具存在但从不自动跑 → 反复缺句/不对齐"。
+    """
+    import os
+
+    mode = (os.environ.get("VITUAL_HARDSUB_GATE") or "warn").strip().lower()
+    if mode == "off":
+        return {"ok": True, "skipped": True, "reason": "gate_disabled"}
+    try:
+        from hardsub_compare import compare_job
+    except Exception as e:
+        print(f"[hardsub-gate] import skipped ({type(e).__name__}: {e})")
+        return {"ok": True, "skipped": True, "reason": f"import_error:{e}"}
+
+    # 原片硬字幕源：优先 media/source.mp4；找不到就不做（无硬字幕可比）
+    src_srt = _find_source_srt(work_dir, stem, src_lang)
+    if src_srt is None:
+        return {"ok": True, "skipped": True, "reason": "no_source_srt"}
+    media = job_media_dir(work_dir)
+    candidates = [media / "source.mp4", media / f"{stem}.mp4"]
+    video = next((p for p in candidates if p.is_file()), None)
+    if video is None:
+        return {"ok": True, "skipped": True, "reason": "no_hardsub_source_video"}
+    if bvid:
+        # bvid 批次用规范目录定位（含 dehardsub 子目录），报告随字幕包落盘
+        try:
+            from hardsub_compare import locate
+            v2, s2, subroot = locate(bvid)
+            if v2.is_file() and s2.is_file():
+                video, src_srt = v2, s2
+                report_path = subroot / "hardsub_compare.json"
+            else:
+                report_path = media / "hardsub_compare.json"
+        except Exception:
+            report_path = media / "hardsub_compare.json"
+    else:
+        report_path = media / "hardsub_compare.json"
+
+    rep = compare_job(video, src_srt, report_path)
+    if rep.get("skipped"):
+        return rep
+    missing = [m["text"] for m in rep.get("missing_in_srt", [])]
+    drift = rep.get("drift", [])
+    if not rep.get("ok"):
+        print(f"[hardsub-gate] FAIL coverage={rep['coverage']:.0%} "
+              f"missing={len(missing)} drift={len(drift)} -> {report_path}", flush=True)
+        for t in missing:
+            print(f"[hardsub-gate]   MISSING: {t}")
+        if mode == "strict":
+            raise RuntimeError(
+                f"hardsub gate failed: {len(missing)} missing line(s), "
+                f"{len(drift)} drift(s); see {report_path}"
+            )
+    else:
+        print(f"[hardsub-gate] PASS coverage={rep['coverage']:.0%} -> {report_path}", flush=True)
+    return rep
+
+
 def _load_existing_job_segments(
     work_dir: Path,
     *,
@@ -1169,6 +1233,16 @@ def process_job(
         print(f"[postproc] FAILED ({type(e).__name__}: {e})")
         traceback.print_exc()
         _finish_media_status(queue, job_id, out_dir, media_st)
+
+    # 入库前强制与原片硬字幕对比（用户要求）：缺句/漂移写报告并告警，
+    # VITUAL_HARDSUB_GATE=strict 时阻断入库，避免残缺字幕再次流进内容库/素材中心。
+    if "asr" in enabled:
+        try:
+            _bv = video_id if platform == "bilibili" else None
+            _hardsub_gate(out_dir, stem, src_lang, bvid=_bv)
+        except Exception as e:
+            print(f"[hardsub-gate] raised ({type(e).__name__}: {e})", flush=True)
+            raise
 
     wav_path = existing_wav(out_dir) or (
         Path(wav) if wav and Path(wav).is_file() else None

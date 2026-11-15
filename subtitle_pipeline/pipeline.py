@@ -1748,7 +1748,7 @@ def add_common_args(ap: argparse.ArgumentParser) -> None:
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    cmds = {"run", "transcribe", "translate", "summarize", "keypoints", "url", "shift-srt"}
+    cmds = {"run", "transcribe", "translate", "summarize", "keypoints", "url", "shift-srt", "verify-hardsub"}
     if argv and argv[0] not in cmds and not argv[0].startswith("-"):
         # bare URL → url command
         if re.match(r"https?://", argv[0], re.I):
@@ -1812,11 +1812,23 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p_shift.add_argument("--ms", dest="shift_ms", type=int, required=True)
     p_shift.add_argument("--reason", default="manual_shift")
 
+    p_vh = sub.add_parser(
+        "verify-hardsub",
+        help="gate: compare source SRT against original on-screen hard subtitles",
+    )
+    p_vh.add_argument("--bvid", default=None, help="batch video BV id (auto-locate video/srt)")
+    p_vh.add_argument("--video", type=Path, default=None, help="hard-subtitled source video")
+    p_vh.add_argument("--srt", type=Path, default=None, help="source-language SRT")
+    p_vh.add_argument("--report", type=Path, default=None, help="JSON report path")
+    p_vh.add_argument("--step", type=int, default=2)
+    p_vh.add_argument("--band-top", type=float, default=0.62)
+    p_vh.add_argument("--drift-thr", type=float, default=0.6)
+
     args = ap.parse_args(argv)
     # Resolve model aliases: polish model falls back to chat model
     if hasattr(args, "correct_model") and not getattr(args, "correct_model", None):
         args.correct_model = getattr(args, "chat_model", DEFAULT_CHAT) or DEFAULT_CHAT
-    if getattr(args, "llm_correct", None) is None and args.cmd != "shift-srt":
+    if getattr(args, "llm_correct", None) is None and args.cmd not in ("shift-srt", "verify-hardsub"):
         args.llm_correct = args.cmd in ("run", "transcribe", "url")
     return args
 
@@ -2284,7 +2296,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(list(argv if argv is not None else sys.argv[1:]))
     cmd = args.cmd
 
-    if cmd != "shift-srt":
+    if cmd not in ("shift-srt", "verify-hardsub"):
         from llm.factory import configure_llm
 
         configure_llm(
@@ -2317,6 +2329,25 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[out] {out_srt}")
         print(f"[out] {meta}")
         return 0
+
+    if cmd == "verify-hardsub":
+        from hardsub_compare import compare_job, locate
+
+        if args.bvid:
+            video, srt, media = locate(args.bvid)
+            report = args.report or (media / "hardsub_compare.json")
+        elif args.video and args.srt:
+            video, srt = args.video, args.srt
+            report = args.report or (srt.parent / "hardsub_compare.json")
+        else:
+            print("error: verify-hardsub needs --bvid or --video and --srt", file=sys.stderr)
+            return 1
+        rep = compare_job(video, srt, report, step=args.step,
+                          band_top=args.band_top, drift_thr=args.drift_thr)
+        print(json.dumps(rep, ensure_ascii=False, indent=2))
+        if report:
+            print(f"[out] {report}")
+        return 0 if rep.get("ok", True) else 2
 
     try:
         from llm.factory import get_role_config
