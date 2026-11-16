@@ -491,6 +491,21 @@ def extract_json_array(text: str) -> list:
         parsed = _try_parse_array(match.group(0))
         if parsed is not None:
             return parsed
+    # 小模型常把 "Return ONLY a JSON array" 输出成逐行编号（1. xxx\n2. xxx），
+    # 括号解析全失败时兜底：仅当每个非空行都是严格递增的 "N. " / "N) " 才认，
+    # 避免把普通台词误当成数组。翻译/纠正都要求同长度同序，这里不复排。
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if lines:
+        numbered: list[str] = []
+        ok = True
+        for idx, ln in enumerate(lines, 1):
+            m = re.match(rf"^{idx}\s*[.)、]\s*(.*)$", ln)
+            if not m:
+                ok = False
+                break
+            numbered.append(m.group(1).strip())
+        if ok and numbered:
+            return numbered
     return []
 
 
@@ -1845,44 +1860,67 @@ def target_list(args: argparse.Namespace) -> list[str]:
     return resolve_targets(args.langs, src)
 
 
-def do_translate(
+def translate_step_key(lang: str) -> str:
+    return f"translate.{file_tag(lang)}"
+
+
+def notes_localize_step_key(lang: str) -> str:
+    return f"notes.localize.{file_tag(lang)}"
+
+
+def translate_one_lang(
     args: argparse.Namespace,
     ollama: str,
     segs: list[dict],
     out_dir: Path,
     stem: str,
     glossary: dict,
-) -> None:
-    targets = target_list(args)
-    if not targets:
-        print("[translate] no target languages (pack empty or only source lang)")
-        return
-    # 翻译前：源字幕硬污染（BV id / 占位符）先从 multipass_raw 恢复；
-    # 与源文完全无关的术语表直接丢弃，防止跨 job 串稿进入 20 语提示词。
-    segs, src_qa = ti.repair_source_segments(segs, out_dir)
-    # 时间轴规范化（best-practice：收敛重叠、最小时长、最大时长兜底），
-    # 在翻译前对源 segs 统一处理 → 所有语轨共享同一规范化时间，锁轴 QA 不破。
-    segs = normalize_cue_timing(segs)
-    if src_qa["repaired"]:
-        print(f"[source-qa] restored {src_qa['repaired']} polluted cue(s) from multipass_raw")
-    glossary, gloss_qa = ti.filter_glossary_by_source(
-        glossary, [(s.get("text") or "") for s in segs]
-    )
-    if gloss_qa["dropped"]:
-        print(f"[glossary] dropped {gloss_qa['dropped']} unrelated term(s)")
-    workers = lang_workers(getattr(args, "lang_workers", None))
-    print(
-        f"[translate] {len(targets)} languages via {args.ollama_model} "
-        f"(workers={workers}): {', '.join(targets)}"
-    )
-    job_subs_dir(out_dir)
+    lang: str,
+    *,
+    force: bool | None = None,
+    job_id: int | None = None,
+    queue=None,
+) -> dict:
+    """Translate one target language. Returns status dict for job_steps."""
+    tag = file_tag(lang)
+    step_key = translate_step_key(lang)
+    out_srt = locale_srt_path(out_dir, lang, stem)
+    try:
+        art_rel = str(out_srt.relative_to(out_dir)).replace("\\", "/")
+    except ValueError:
+        art_rel = f"subs/{tag}.srt"
+    do_force = bool(args.force) if force is None else bool(force)
 
-    def _one(lang: str) -> None:
-        tag = file_tag(lang)
-        out_srt = locale_srt_path(out_dir, lang, stem)
-        if out_srt.exists() and not args.force:
+    if queue is not None and job_id is not None:
+        queue.upsert_step(
+            int(job_id),
+            step_key,
+            kind="translate",
+            lang=tag,
+            status="running",
+            artifact_rel=art_rel,
+        )
+        queue.mark_step_running(int(job_id), step_key)
+
+    try:
+        if out_srt.exists() and not do_force:
             locked_print(f"[skip] {out_srt.name} exists")
-            return
+            if queue is not None and job_id is not None:
+                queue.mark_step_done(
+                    int(job_id),
+                    step_key,
+                    status="skipped",
+                    qa_status="ok",
+                    artifact_rel=art_rel,
+                )
+            return {
+                "ok": True,
+                "skipped": True,
+                "lang": tag,
+                "step_key": step_key,
+                "artifact_rel": art_rel,
+            }
+
         proofread: dict = {}
         xx = translate_segments(
             ollama,
@@ -1904,15 +1942,13 @@ def do_translate(
             max_chars=42,
         )
         write_srt(xx, out_srt)
-        # 真实质量报告：格式 QA + 多模型校对 + 译文完整性。
-        # Hub 只按文件名识别 sidecar，不解析内容，扩展字段向后兼容。
         integrity = ti.qa_translation_integrity(segs, xx, target_lang=lang)
         qa: dict = {
-            "bilingual": bi, "readability": read,
-            "proofread": proofread, "integrity": integrity,
+            "bilingual": bi,
+            "readability": read,
+            "proofread": proofread,
+            "integrity": integrity,
         }
-        # readability 是软警告（cps 由源时间轴决定，不是译文错误）→ 只记 advisory；
-        # ok / needs_review 只看硬指标：对齐、多模型校对状态、译文完整性。
         qa["ok"] = (
             bool(bi.get("ok"))
             and bool(integrity.get("ok"))
@@ -1924,7 +1960,9 @@ def do_translate(
         if not qa["ok"]:
             qa["needs_review"] = True
         if integrity.get("issues"):
-            locked_print(f"[integrity {tag}] {len(integrity['issues'])} issue(s) → needs_review")
+            locked_print(
+                f"[integrity {tag}] {len(integrity['issues'])} issue(s) → needs_review"
+            )
         qa_path = job_media_dir(out_dir) / f"translate_qa_{tag}.json"
         qa_path.write_text(
             json.dumps(qa, ensure_ascii=False, indent=2),
@@ -1932,27 +1970,134 @@ def do_translate(
         )
         locked_print(f"[out] {out_srt}")
         locked_print(f"[out] {qa_path}")
+        qa_status = "needs_review" if qa.get("needs_review") else "ok"
+        if queue is not None and job_id is not None:
+            # needs_review keeps parent partial-capable but step is done.
+            queue.mark_step_done(
+                int(job_id),
+                step_key,
+                status="done",
+                qa_status=qa_status,
+                artifact_rel=art_rel,
+            )
+        return {
+            "ok": True,
+            "skipped": False,
+            "lang": tag,
+            "step_key": step_key,
+            "artifact_rel": art_rel,
+            "qa_status": qa_status,
+        }
+    except BaseException as e:
+        locked_print(f"[translate FAIL] {lang}: {type(e).__name__}: {e}")
+        if queue is not None and job_id is not None:
+            queue.mark_step_failed(
+                int(job_id), step_key, f"{type(e).__name__}: {e}"
+            )
+        return {
+            "ok": False,
+            "lang": tag,
+            "step_key": step_key,
+            "error": f"{type(e).__name__}: {e}",
+        }
+
+
+def do_translate(
+    args: argparse.Namespace,
+    ollama: str,
+    segs: list[dict],
+    out_dir: Path,
+    stem: str,
+    glossary: dict,
+    *,
+    job_id: int | None = None,
+    queue=None,
+) -> dict:
+    """Translate all target langs. Returns ``{ok, done, failed, errors}``.
+
+    With ``job_id``+``queue``, records per-lang ``job_steps``. Partial failure
+    does **not** raise — caller should ``aggregate_job_from_steps``.
+    """
+    targets = target_list(args)
+    if not targets:
+        print("[translate] no target languages (pack empty or only source lang)")
+        return {"ok": True, "done": 0, "failed": 0, "errors": []}
+    # 翻译前：源字幕硬污染（BV id / 占位符）先从 multipass_raw 恢复；
+    # 与源文完全无关的术语表直接丢弃，防止跨 job 串稿进入 20 语提示词。
+    segs, src_qa = ti.repair_source_segments(segs, out_dir)
+    # 时间轴规范化（best-practice：收敛重叠、最小时长、最大时长兜底），
+    # 在翻译前对源 segs 统一处理 → 所有语轨共享同一规范化时间，锁轴 QA 不破。
+    segs = normalize_cue_timing(segs)
+    if src_qa["repaired"]:
+        print(f"[source-qa] restored {src_qa['repaired']} polluted cue(s) from multipass_raw")
+    glossary, gloss_qa = ti.filter_glossary_by_source(
+        glossary, [(s.get("text") or "") for s in segs]
+    )
+    if gloss_qa["dropped"]:
+        print(f"[glossary] dropped {gloss_qa['dropped']} unrelated term(s)")
+    workers = lang_workers(getattr(args, "lang_workers", None))
+    print(
+        f"[translate] {len(targets)} languages via {args.ollama_model} "
+        f"(workers={workers}): {', '.join(targets)}"
+    )
+    job_subs_dir(out_dir)
+
+    if queue is not None and job_id is not None:
+        for lang in targets:
+            queue.upsert_step(
+                int(job_id),
+                translate_step_key(lang),
+                kind="translate",
+                lang=file_tag(lang),
+                status="queued",
+            )
+
+    results: list[dict] = []
+
+    def _one(lang: str) -> dict:
+        return translate_one_lang(
+            args,
+            ollama,
+            segs,
+            out_dir,
+            stem,
+            glossary,
+            lang,
+            job_id=job_id,
+            queue=queue,
+        )
 
     if workers <= 1 or len(targets) <= 1:
         for lang in targets:
-            _one(lang)
-        return
+            results.append(_one(lang))
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_one, lang): lang for lang in targets}
+            for fut in as_completed(futures):
+                results.append(fut.result())
 
-    errors: list[tuple[str, BaseException]] = []
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(_one, lang): lang for lang in targets}
-        for fut in as_completed(futures):
-            lang = futures[fut]
-            try:
-                fut.result()
-            except BaseException as e:
-                errors.append((lang, e))
-                locked_print(f"[translate FAIL] {lang}: {type(e).__name__}: {e}")
-    if errors:
-        lang0, err0 = errors[0]
+    errors = [r for r in results if not r.get("ok")]
+    done_n = sum(1 for r in results if r.get("ok"))
+    out = {
+        "ok": len(errors) == 0,
+        "done": done_n,
+        "failed": len(errors),
+        "errors": errors,
+        "results": results,
+    }
+    if errors and job_id is None:
+        # CLI / no steps: keep hard fail so operators notice.
+        lang0 = errors[0].get("lang")
+        err0 = errors[0].get("error")
         raise RuntimeError(
             f"translate failed for {len(errors)} language(s); first={lang0}: {err0}"
-        ) from err0
+        )
+    if errors:
+        print(
+            f"[translate] partial: {done_n} ok, {len(errors)} failed "
+            f"({', '.join(str(e.get('lang')) for e in errors[:8])})"
+        )
+    return out
 
 
 def do_keypoints(

@@ -2734,11 +2734,43 @@ def strip_hardsubs(
     report["clock"] = inherit_clock(src)
     if "box" not in report:
         report["box"] = box
+    quality = str(report.get("quality") or "ok")
+    if quality == "degraded":
+        print(
+            f"[dehardsub] QUALITY degraded: {report.get('quality_note') or 'polish skipped'}",
+            flush=True,
+        )
+    # Keep a durable progress sidecar for UI/ops (include quality).
+    try:
+        progress_path.write_text(
+            json.dumps(
+                {
+                    "kind": f"dehardsub_{engine_s}",
+                    "status": "done",
+                    "quality": quality,
+                    "quality_note": report.get("quality_note") or "",
+                    "polish_applied": bool(report.get("polish_applied")),
+                    "route": report.get("action") or action,
+                    "note": report.get("quality_note")
+                    or (
+                        "residual LaMa polish applied"
+                        if report.get("polish_applied")
+                        else ""
+                    ),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
     _write_meta(meta_path, report)
     print(
         f"[dehardsub] {action} passes={report.get('pass_count') or 1} "
         f"box={box.get('x')},{box.get('y')} {box.get('w')}x{box.get('h')} "
         f"{report.get('src_size')}→{report.get('out_size')} "
+        f"quality={quality} "
         f"→ {dest.name} (score={report.get('score')} hits={report.get('hits')})"
     )
     return dest, report
@@ -4538,10 +4570,19 @@ def copy_derived_to_site(work_dir: Path, slug: str, site_public: Path) -> int:
         "remix.vtt": media / "remix" / "remix.vtt",
     }
     keep: set[str] = set()
+
+    def _atomic_copy(src: Path, dst: Path) -> None:
+        tmp = dst.with_suffix(dst.suffix + f".tmp.{os.getpid()}")
+        try:
+            tmp.write_bytes(src.read_bytes())
+            os.replace(tmp, dst)
+        finally:
+            tmp.unlink(missing_ok=True)
+
     for name, src in mapping.items():
         min_n = 20 if name.endswith((".json", ".vtt")) else 800
         if src.is_file() and src.stat().st_size > min_n:
-            (dest / name).write_bytes(src.read_bytes())
+            _atomic_copy(src, dest / name)
             keep.add(name)
             n += 1
     for old in dest.glob("*.mp4"):
@@ -4553,7 +4594,7 @@ def copy_derived_to_site(work_dir: Path, slug: str, site_public: Path) -> int:
     report = media / "publish" / "report.json"
     report_name = "publish-report.json"
     if report.is_file() and report.stat().st_size > 20:
-        (dest / report_name).write_bytes(report.read_bytes())
+        _atomic_copy(report, dest / report_name)
         n += 1
     else:
         (dest / report_name).unlink(missing_ok=True)

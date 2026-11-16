@@ -5,7 +5,7 @@ description: Keeps subtitle timelines aligned with the source video clock. Use w
 
 # Subtitle sync
 
-> 服务 `trans/工具需求.md`：**WF-01 翻译**、**WF-03 切片**、**WF-07 二创叠层**。文档：`trans/字幕同步保障.md`。
+> 服务 `trans/工具需求.md`：**WF-01 翻译**、**WF-03 切片**、**WF-07 竖屏包装叠层**（Try 入口已置灰；CLI/API 仍可验）。文档：`trans/字幕同步保障.md`。AI Remake（WF-11）见 `trans/AI二创设计.md`，本 skill 不覆盖。
 
 ## Charter
 

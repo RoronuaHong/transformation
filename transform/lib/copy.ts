@@ -141,8 +141,14 @@ export type TryCopy = {
   statusPending: string;
   statusProcessing: string;
   statusDone: string;
+  statusPartial: string;
   statusFailed: string;
   statusCancelled: string;
+  stepLangChips: string;
+  stepRetry: string;
+  stepsSummary: string;
+  waitingDeps: string;
+  laneFull: string;
   openNotes: string;
   hint: string;
   apiDown: string;
@@ -211,10 +217,14 @@ export type TryCopy = {
   workflowRailCompress: string;
   workflowRailConcat: string;
   workflowRailRemix: string;
+  /** Short rail badge when remix is gated (AI remake redesign). */
+  workflowRailRemixSoon: string;
   workflowRailPublish: string;
   workflowRailLangs: string;
   workflowRailSoon: string;
   workflowRailHint: string;
+  workflowRailContentLane: string;
+  workflowRailMediaLane: string;
   inputFromLabel: string;
   inputFromAuto: string;
   inputFromSource: string;
@@ -418,6 +428,8 @@ export type HubCopy = {
   readyReason: string;
   exportTitle: string;
   exportPickLang: string;
+  bulkExport: string;
+  bulkExportHint: string;
   exportOnlySource: string;
   exportPlan: string;
   exportConfirm: string;
@@ -475,6 +487,11 @@ export type HubCopy = {
   selHint: string;
   collMode: string;
   collModeHint: string;
+  collFlat: string;
+  collSection: string;
+  collLooseSection: string;
+  collEmpty: string;
+  collLooseEmpty: string;
   collTitle: string;
   collCount: string;
   collExpand: string;
@@ -501,6 +518,8 @@ export type HubCopy = {
   jobDissolve: string;
   jobDissolveConfirm: string;
   leaveColl: string;
+  leaveCollHint: string;
+  leaveCollEmpty: string;
   leaveCollConfirm: string;
   leftColl: string;
   collManage: string;
@@ -578,7 +597,7 @@ const en: UiCopy = {
     unlocking: "Ad playing",
     lockedHint: "Core points and watch-outs unlock after the ad.",
     morePoints: "{n} more points",
-    remixPlay: "9:16 remix (captions overlay, not burned in)",
+    remixPlay: "9:16 vertical pack (captions overlay, not burned in)",
     dehardsubPlay: "Cleaned video (captions removed)",
   },
   nav: {
@@ -618,15 +637,15 @@ const en: UiCopy = {
     cookiesPlatformReady: "{platform} · {n} links · ready",
     cookiesBlockBatch: "This batch needs login cookies for: {platforms}",
     cookiesLocalDetected: "Local cookies.txt detected on this machine.",
-    batchQueued: "{n} items queued — processing one at a time.",
+    batchQueued: "{n} items queued — dual-lane will fill free slots.",
     batchJobsTitle: "Batch jobs",
     batchSummary: "{total} jobs · {running} running · {queued} queued",
     progressNow: "Now: {stage}",
-    jobCancel: "Cancel",
+    jobCancel: "Cancel pack",
     jobRetry: "Retry",
     queuePause: "Pause queue",
     queueResume: "Resume queue",
-    queuePaused: "Queue paused — current job finishes, then no new jobs start.",
+    queuePaused: "Queue paused — running jobs finish, then no new jobs start.",
     modulesSection: "Workflows",
     moduleTranslate: "Subtitles",
     moduleNotes: "Notes",
@@ -648,7 +667,7 @@ const en: UiCopy = {
     intentPost: "This run: re-translate {n} languages (reuse transcription).",
     intentClips: "This run: re-cut MP4 only (no ASR).",
     intentMedia: "This run: refresh GIF / MP4 only (no ASR).",
-    intentPostproc: "This run: enhance / compress / concat / remix / publish only (no ASR).",
+    intentPostproc: "This run: enhance / compress / concat / publish only (no ASR; remix entry gated).",
     intentNoop: "Already done — nothing to change. Open notes below.",
     intentCached: "Notes already exist for this link.",
     mediaSection: "Clips per item",
@@ -657,14 +676,20 @@ const en: UiCopy = {
     reset: "Reset",
     submitting: "Queued…",
     processing: "Processing…",
-    busy: "Only one try job runs at a time. Yours is queued — please wait.",
+    busy: "Lane slots are full right now. Yours is queued — content∥media will start when a slot frees.",
     queueAhead: "Running now: {title} · {stage} {percent}%",
-    queuePosition: "Your job is #{n} in line — starts automatically when the current task finishes.",
+    queuePosition: "Your job is #{n} in line — starts when a dual-lane slot frees.",
     statusPending: "Queued",
     statusProcessing: "Processing",
     statusDone: "Done",
+    statusPartial: "Partial",
     statusFailed: "Failed",
     statusCancelled: "Cancelled",
+    stepLangChips: "Languages",
+    stepRetry: "Retry language",
+    stepsSummary: "{done}/{total} languages",
+    waitingDeps: "Waiting on {dep} before this job can start.",
+    laneFull: "Your lane is full — starts when a slot frees.",
     openNotes: "Open notes",
     hint: "We publish written notes and short clips only — not the full original video.",
     apiDown: "Backend offline. Start subtitle_pipeline with yarn api on port 8901.",
@@ -735,10 +760,14 @@ const en: UiCopy = {
     workflowRailCompress: "Compress",
     workflowRailConcat: "Concat",
     workflowRailRemix: "Remix",
+    workflowRailRemixSoon: "Redesign · edit / dub / cast swap",
     workflowRailPublish: "Publish",
     workflowRailLangs: "Languages",
     workflowRailSoon: "Soon",
-    workflowRailHint: "Tap to enable workflows for this run.",
+    workflowRailHint:
+      "Two lanes: content (translate/notes) can run beside media (unburn → clips∥post).",
+    workflowRailContentLane: "Content",
+    workflowRailMediaLane: "Media",
     inputFromLabel: "Input from",
     inputFromAuto: "Auto (previous step)",
     inputFromSource: "Source video",
@@ -749,22 +778,22 @@ const en: UiCopy = {
     enhanceMedium: "Medium",
     enhanceStrong: "Strong (1.5× then cap)",
     compressSection: "Compress",
-    compressHint: "Re-encode with H.264 for a smaller file. Runs after concat/enhance, before remix.",
+    compressHint: "Re-encode with H.264 for a smaller file. Runs after concat/enhance (remix/remake entry gated).",
     compressHeight: "Max height",
     compressKeep: "Keep size",
     compressCrf: "Quality (CRF, lower = larger)",
     concatHint: "Joins this item’s MP4 ranges in order. Need at least two ranges.",
     concatNeedTwo: "Concat needs at least two MP4 ranges on each item.",
-    remixSection: "Remix",
+    remixSection: "Vertical pack",
     remixHint:
-      "Makes a 9:16 vertical cut (1080×1920): notes one-liner as an overlay title, then the working clip. Captions follow the player clock — they are not burned into the file. No TTS.",
+      "Entry gated (AI remake redesign). Was: 9:16 cut with notes one-liner overlay; captions not burned in; no TTS.",
     derivedTitle: "Processed video",
     packZipDownload: "Download Job Pack (.zip)",
     packageSection: "Package",
     packageCourse: "Course pack",
     packageCourseHint: "Subtitles + structured notes (20 langs)",
     packageRemix: "Remix pack",
-    packageRemixHint: "Unburn → clips from notes → 9:16 remix",
+    packageRemixHint: "Paused on workbench — see AI remake design doc",
     packageAdvanced: "Advanced",
     packageAdvancedHint: "Pick every workflow yourself",
     packageDailyHint: "Daily site feed uses Discover + batch — not this form.",
@@ -777,12 +806,12 @@ const en: UiCopy = {
     derivedEnhance: "Download enhanced MP4",
     derivedCompress: "Download compressed MP4",
     derivedConcat: "Download concatenated MP4",
-    derivedRemix: "Download 9:16 remix MP4",
+    derivedRemix: "Download 9:16 vertical-pack MP4",
     derivedRemixVtt: "Download overlay captions (.vtt)",
     stageEnhance: "Enhancing video",
     stageCompress: "Compressing video",
     stageConcat: "Concatenating clips",
-    stageRemix: "Making 9:16 remix",
+    stageRemix: "Vertical pack",
     stagePublish: "Publishing",
     accountsSection: "Publish accounts",
     accountsHint:
@@ -800,7 +829,7 @@ const en: UiCopy = {
     accountNeedBind: "Bind at least one valid Douyin or Kuaishou account before publishing.",
     publishSection: "Publish",
     publishHint:
-      "Writes a per-platform ledger from the remix (or working video). v1 stages files locally — Douyin/Kuaishou have no official third-party upload API.",
+      "Writes a per-platform ledger from the working video (vertical-pack entry gated). v1 stages files locally — Douyin/Kuaishou have no official third-party upload API.",
     derivedPublish: "Download publish report",
   },
   ask: {
@@ -955,6 +984,8 @@ const en: UiCopy = {
     readyReason: "Ready because",
     exportTitle: "Export",
     exportPickLang: "Subtitle language",
+    bulkExport: "Export",
+    bulkExportHint: "Deliver the selected items: choose a subtitle language, preview, then confirm.",
     exportOnlySource: "Source only (no subtitle)",
     exportPlan: "Preview plan",
     exportConfirm: "Confirm export",
@@ -998,7 +1029,12 @@ const en: UiCopy = {
     pvReasonNoRenderer: "No browser renderer for this format; the file header is shown below.",
     pvReasonParseErr: "Preview parsing failed; showing the file header instead.",
     collMode: "Collections",
-    collModeHint: "Group a video's source and its multilingual subtitle pack together",
+    collModeHint: "Browse as collections, ungrouped items, or a flat list",
+    collFlat: "All",
+    collSection: "Collections",
+    collLooseSection: "Ungrouped",
+    collEmpty: "No collections in the current results",
+    collLooseEmpty: "No ungrouped items in the current results",
     collTitle: "Video set",
     collCount: "{n} items",
     collExpand: "Expand",
@@ -1025,7 +1061,9 @@ const en: UiCopy = {
     jobDissolve: "Dissolve set",
     jobDissolveConfirm: "Dissolve video set “{name}”? Files stay; job: tags are cleared from members.",
     leaveColl: "Remove from set",
-    leaveCollConfirm: "Remove {n} item(s) from this set?",
+    leaveCollHint: "Pick the set to remove the selected items from",
+    leaveCollEmpty: "The selected items are not in any set",
+    leaveCollConfirm: "Remove {n} item(s) from “{name}”?",
     leftColl: "Removed from set",
     collManage: "Manage",
     moveMany: "Move",
@@ -1093,7 +1131,7 @@ const zh: UiCopy = {
     unlocking: "广告播放中",
     lockedHint: "重点和难点在广告后开放。",
     morePoints: "还有 {n} 条",
-    remixPlay: "9:16 二创（字幕叠在画面上，不烧进视频）",
+    remixPlay: "9:16 竖屏包装（字幕叠在画面上，不烧进视频）",
     dehardsubPlay: "去烧录字幕版（干净画面）",
   },
   nav: {
@@ -1133,15 +1171,15 @@ const zh: UiCopy = {
     cookiesPlatformReady: "{platform} · {n} 条 · 已就绪",
     cookiesBlockBatch: "本批需要以下平台的登录态：{platforms}",
     cookiesLocalDetected: "已检测到本机 cookies.txt。",
-    batchQueued: "已排队 {n} 条 — 将依次处理。",
+    batchQueued: "已排队 {n} 条 — 双轨有空位会并行开跑。",
     batchJobsTitle: "批量任务",
     batchSummary: "共 {total} 条 · {running} 进行中 · {queued} 排队",
     progressNow: "当前：{stage}",
-    jobCancel: "取消",
+    jobCancel: "取消整包",
     jobRetry: "重跑",
     queuePause: "暂停队列",
     queueResume: "继续队列",
-    queuePaused: "队列已暂停 — 当前任务完成后不再启动新任务。",
+    queuePaused: "队列已暂停 — 进行中的任务跑完后不再启动新任务。",
     modulesSection: "本次工作流",
     moduleTranslate: "字幕翻译",
     moduleNotes: "结构化笔记",
@@ -1162,7 +1200,7 @@ const zh: UiCopy = {
     intentPost: "本次：重翻 {n} 种语言（复用转写，不重跑 Whisper）。",
     intentClips: "本次：只重切 MP4（不跑转写）。",
     intentMedia: "本次：只刷新 GIF / MP4（不跑转写）。",
-    intentPostproc: "本次：只跑增强 / 压缩 / 拼接 / 二创 / 发布（不跑转写）。",
+    intentPostproc: "本次：只跑增强 / 压缩 / 拼接 / 发布（不跑转写；二创入口暂关）。",
     intentNoop: "已完成且无变更 — 可直接查看笔记。",
     intentCached: "该链接已生成过笔记。",
     mediaSection: "逐条裁剪",
@@ -1171,14 +1209,20 @@ const zh: UiCopy = {
     reset: "重置",
     submitting: "提交中…",
     processing: "处理中…",
-    busy: "本机同时只处理一条任务。你的视频已排队，请稍候。",
+    busy: "当前双轨槽位已满，你的任务已排队，有空位会自动开跑。",
     queueAhead: "前方正在处理：{title} · {stage} {percent}%",
-    queuePosition: "你的任务排在第 {n} 位，前方任务完成后会自动开始。",
+    queuePosition: "你的任务排在第 {n} 位，双轨有空位时会自动开始。",
     statusPending: "排队中",
     statusProcessing: "处理中",
     statusDone: "完成",
+    statusPartial: "部分完成",
     statusFailed: "失败",
     statusCancelled: "已取消",
+    stepLangChips: "语言",
+    stepRetry: "重试该语",
+    stepsSummary: "语言 {done}/{total}",
+    waitingDeps: "等待依赖 {dep} 就绪后才会开始。",
+    laneFull: "本轨槽位已满，有空位会自动开跑。",
     openNotes: "查看笔记",
     hint: "本站只整理文字步骤与短片段，不托管完整原视频。",
     apiDown: "后台未启动。请在 subtitle_pipeline 目录运行 yarn api（8901 端口）。",
@@ -1250,10 +1294,14 @@ const zh: UiCopy = {
     workflowRailCompress: "压缩",
     workflowRailConcat: "拼接",
     workflowRailRemix: "二创",
+    workflowRailRemixSoon: "待重立 · 剪辑/配音/换人",
     workflowRailPublish: "发布",
     workflowRailLangs: "语言",
     workflowRailSoon: "待上线",
-    workflowRailHint: "点选本轮要跑的工作流。",
+    workflowRailHint:
+      "双轨：内容轨（翻译/笔记）可与媒体轨（去烧录 → 切片∥后处理）并行。",
+    workflowRailContentLane: "内容轨",
+    workflowRailMediaLane: "媒体轨",
     inputFromLabel: "输入来自",
     inputFromAuto: "自动（上一步产物）",
     inputFromSource: "源片",
@@ -1264,22 +1312,22 @@ const zh: UiCopy = {
     enhanceMedium: "中",
     enhanceStrong: "强（先放大再限高）",
     compressSection: "缩小体积",
-    compressHint: "H.264 重编码压体积，接在增强或拼接之后、二创之前。",
+    compressHint: "H.264 重编码压体积，接在增强或拼接之后（竖屏包装/AI 二创入口暂关）。",
     compressHeight: "高度上限",
     compressKeep: "保持原分辨率",
     compressCrf: "质量 CRF（越小越大）",
     concatHint: "按顺序拼接本条的 MP4 区间，至少两段。",
     concatNeedTwo: "拼接需要每条至少两段 MP4 区间。",
-    remixSection: "竖屏二创",
+    remixSection: "竖屏包装",
     remixHint:
-      "做成 9:16（1080×1920）成片：片头用笔记一句话叠在画面上，正片为当前工作视频。字幕跟播放时钟走，不烧进文件。不做配音。",
+      "入口暂关（待 AI 二创重立）。原能力：9:16 成片，片头叠笔记一句话，字幕外挂不烧录，不做配音。",
     derivedTitle: "处理后的视频",
     packZipDownload: "下载 Job Pack（.zip）",
     packageSection: "套餐",
     packageCourse: "跟课包",
     packageCourseHint: "20 语字幕 + 结构化笔记",
     packageRemix: "二创包",
-    packageRemixHint: "去硬字幕 → 要点切片 → 9:16 成片",
+    packageRemixHint: "工作台已置灰；口径见 AI 二创设计文档",
     packageAdvanced: "高级",
     packageAdvancedHint: "自行勾选每一个工作流",
     packageDailyHint: "日更站走发现 + batch，不在本表单。",
@@ -1292,12 +1340,12 @@ const zh: UiCopy = {
     derivedEnhance: "下载增强版 MP4",
     derivedCompress: "下载压缩版 MP4",
     derivedConcat: "下载拼接 MP4",
-    derivedRemix: "下载 9:16 二创 MP4",
+    derivedRemix: "下载 9:16 竖屏包装 MP4",
     derivedRemixVtt: "下载叠加字幕（.vtt）",
     stageEnhance: "画质增强",
     stageCompress: "压缩体积",
     stageConcat: "拼接片段",
-    stageRemix: "竖屏二创",
+    stageRemix: "竖屏包装",
     stagePublish: "发布台账",
     accountsSection: "发布账号",
     accountsHint: "与下载 cookies 分开。只存在本机，不会进站点导出。",
@@ -1314,7 +1362,7 @@ const zh: UiCopy = {
     accountNeedBind: "发布前请先绑定至少一个有效的抖音或快手账号。",
     publishSection: "一键发布",
     publishHint:
-      "把二创（或当前工作视频）写入已绑定且有效的平台台账。v1 只做本机分发记录，不向抖音/快手服务器投稿（没有官方第三方上传接口）。",
+      "把当前工作视频写入已绑定且有效的平台台账（竖屏包装入口暂关）。v1 只做本机分发记录，不向抖音/快手服务器投稿（没有官方第三方上传接口）。",
     derivedPublish: "下载发布报告",
   },
   ask: {
@@ -1469,6 +1517,8 @@ const zh: UiCopy = {
     readyReason: "就绪原因",
     exportTitle: "导出",
     exportPickLang: "字幕语言",
+    bulkExport: "导出",
+    bulkExportHint: "交付所选素材：选字幕语言 → 预览计划 → 确认导出",
     exportOnlySource: "仅源视频(无字幕)",
     exportPlan: "预览计划",
     exportConfirm: "确认导出",
@@ -1512,7 +1562,12 @@ const zh: UiCopy = {
     pvReasonNoRenderer: "此格式没有浏览器内置渲染器，下方展示文件头字节",
     pvReasonParseErr: "预览解析失败，已降级为文件头视图",
     collMode: "合集",
-    collModeHint: "同一视频的源片与多语字幕折成一个合集",
+    collModeHint: "用 Tab 切换：合集 / 散件 / 全部平铺",
+    collFlat: "全部",
+    collSection: "合集",
+    collLooseSection: "散件",
+    collEmpty: "当前结果里没有合集",
+    collLooseEmpty: "当前结果里没有散件",
     collTitle: "视频合集",
     collCount: "{n} 项",
     collExpand: "展开",
@@ -1539,7 +1594,9 @@ const zh: UiCopy = {
     jobDissolve: "解散合集",
     jobDissolveConfirm: "解散视频合集「{name}」？文件保留，仅清除成员上的 job: 归属。",
     leaveColl: "移出合集",
-    leaveCollConfirm: "将 {n} 个素材移出当前合集？",
+    leaveCollHint: "选择要把所选素材移出的合集",
+    leaveCollEmpty: "所选素材不在任何合集中",
+    leaveCollConfirm: "将 {n} 个素材移出合集「{name}」？",
     leftColl: "已移出合集",
     collManage: "管理",
     moveMany: "移动",
@@ -1607,7 +1664,7 @@ const zhHant: UiCopy = {
     unlocking: "廣告播放中",
     lockedHint: "重點和難點在廣告後開放。",
     morePoints: "還有 {n} 條",
-    remixPlay: "9:16 二創（字幕疊在畫面上，不燒進影片）",
+    remixPlay: "9:16 豎屏包裝（字幕疊在畫面上，不燒進影片）",
   },
   nav: {
     language: "語言",
@@ -1638,12 +1695,18 @@ const zhHant: UiCopy = {
     batchJobsTitle: "批量任務",
     batchSummary: "共 {total} 條 · {running} 進行中 · {queued} 排隊",
     progressNow: "當前：{stage}",
-    jobCancel: "取消",
+    jobCancel: "取消整包",
     jobRetry: "重跑",
     queuePause: "暫停佇列",
     queueResume: "繼續佇列",
-    queuePaused: "佇列已暫停 — 當前任務完成後不再啟動新任務。",
+    queuePaused: "佇列已暫停 — 進行中的任務跑完後不再啟動新任務。",
     statusCancelled: "已取消",
+    statusPartial: "部分完成",
+    stepLangChips: "語言",
+    stepRetry: "重試該語",
+    stepsSummary: "語言 {done}/{total}",
+    waitingDeps: "等待依賴 {dep} 就緒後才會開始。",
+    laneFull: "本軌槽位已滿，有空位會自動開跑。",
     stageFailed: "失敗",
     stageCancelled: "已取消",
     modulesSection: "本次工作流",
@@ -1661,9 +1724,13 @@ const zhHant: UiCopy = {
     workflowRailCompress: "壓縮",
     workflowRailConcat: "拼接",
     workflowRailRemix: "二創",
+    workflowRailRemixSoon: "待重立 · 剪輯/配音/換人",
     workflowRailPublish: "發布",
     workflowRailSoon: "待上線",
-    workflowRailHint: "點選本輪要跑的工作流。",
+    workflowRailHint:
+      "雙軌：內容軌（翻譯/筆記）可與媒體軌（去燒錄 → 切片∥後處理）並行。",
+    workflowRailContentLane: "內容軌",
+    workflowRailMediaLane: "媒體軌",
     inputFromLabel: "輸入來自",
     inputFromAuto: "自動（上一步產物）",
     inputFromSource: "源片",
@@ -1677,7 +1744,12 @@ const zhHant: UiCopy = {
   hub: {
     ...zh.hub,
     collMode: "合集",
-    collModeHint: "同一影片的源片與多語字幕折成一個合集",
+    collModeHint: "用 Tab 切換：合集 / 散件 / 全部平鋪",
+    collFlat: "全部",
+    collSection: "合集",
+    collLooseSection: "散件",
+    collEmpty: "目前結果裡沒有合集",
+    collLooseEmpty: "目前結果裡沒有散件",
     collTitle: "影片合集",
     collCount: "{n} 項",
     collExpand: "展開",
@@ -1704,7 +1776,9 @@ const zhHant: UiCopy = {
     jobDissolve: "解散合集",
     jobDissolveConfirm: "解散影片合集「{name}」？檔案保留，僅清除成員上的 job: 歸屬。",
     leaveColl: "移出合集",
-    leaveCollConfirm: "將 {n} 個素材移出目前合集？",
+    leaveCollHint: "選擇要把所選素材移出的合集",
+    leaveCollEmpty: "所選素材不在任何合集中",
+    leaveCollConfirm: "將 {n} 個素材移出合集「{name}」？",
     leftColl: "已移出合集",
     collManage: "管理",
     moveMany: "移動",
@@ -1843,6 +1917,8 @@ const zhHant: UiCopy = {
     readyReason: "就緒原因",
     exportTitle: "匯出",
     exportPickLang: "字幕語言",
+    bulkExport: "匯出",
+    bulkExportHint: "交付所選素材：選字幕語言 → 預覽計劃 → 確認匯出",
     exportOnlySource: "僅源視頻(無字幕)",
     exportPlan: "預覽計劃",
     exportConfirm: "確認匯出",

@@ -61,6 +61,16 @@ type Poll = {
   busy?: boolean;
   paused?: boolean;
   active_job_id?: number | null;
+  active_job_ids?: { content?: number[]; media?: number[] };
+  waiting_for_depends_on?: boolean;
+  lane_full?: boolean;
+  blocked_on?: string | null;
+  schedule?: {
+    lane?: string;
+    lane_full?: boolean;
+    blocked_on?: string | null;
+    waiting_for_depends_on?: boolean;
+  };
   progress?: Progress;
   queue_position?: number;
   queue_ahead?: {
@@ -71,8 +81,16 @@ type Poll = {
   cached?: boolean;
   duration_sec?: number | null;
   workflow?: string;
+  lane?: string;
   pack_id?: string;
   pack_zip_url?: string | null;
+  steps_summary?: {
+    total: number;
+    done: number;
+    label?: string;
+    failed_keys?: string[];
+    review_keys?: string[];
+  };
   pack_tasks?: {
     job_id: number;
     workflow: string;
@@ -80,6 +98,13 @@ type Poll = {
     error?: string | null;
     input_from?: string | null;
     depends_on?: string[];
+    steps_summary?: {
+      total: number;
+      done: number;
+      label?: string;
+      failed_keys?: string[];
+      review_keys?: string[];
+    };
     progress?: Progress;
     download_url?: string | null;
     pack_zip_url?: string | null;
@@ -218,9 +243,74 @@ const STAGE_KEYS: Record<string, keyof TryCopy> = {
   cancelled: "stageCancelled",
 };
 
+// Must match subtitle_pipeline/workflows.py WORKFLOW_ORDER (serial handoff).
+// Dual-lane runs content∥media; rail + batch list still sort by this order.
+const WORKFLOW_ORDER = [
+  "translate",
+  "notes",
+  "dehardsub",
+  "clips",
+  "frames",
+  "concat",
+  "deblur",
+  "enhance",
+  "compress",
+  "remix",
+  "publish",
+] as const;
+
+// Independent-workflow ids → localized rail label. Lets batch-job rows show
+// WHICH workflow each queued/processing item is, not just the shared video id.
+const WORKFLOW_KEYS: Record<string, keyof TryCopy> = {
+  translate: "workflowRailTranslate",
+  notes: "workflowRailNotes",
+  dehardsub: "workflowRailDehardsub",
+  clips: "workflowRailClips",
+  frames: "stageGif",
+  concat: "workflowRailConcat",
+  deblur: "workflowRailDeblur",
+  enhance: "workflowRailEnhance",
+  compress: "workflowRailCompress",
+  remix: "workflowRailRemix",
+  publish: "workflowRailPublish",
+  all: "workflowRailSource",
+};
+
+function workflowLabel(copy: TryCopy, workflow?: string): string {
+  if (!workflow) return "";
+  const key = WORKFLOW_KEYS[workflow];
+  return key ? String(copy[key]) : workflow;
+}
+
+function workflowSortIndex(workflow?: string): number {
+  if (!workflow) return WORKFLOW_ORDER.length + 1;
+  const i = (WORKFLOW_ORDER as readonly string[]).indexOf(workflow);
+  return i >= 0 ? i : WORKFLOW_ORDER.length;
+}
+
+function sortBatchJobsByWorkflow<T extends { workflow?: string; job_id: number }>(
+  jobs: T[]
+): T[] {
+  return [...jobs].sort((a, b) => {
+    const d = workflowSortIndex(a.workflow) - workflowSortIndex(b.workflow);
+    return d !== 0 ? d : a.job_id - b.job_id;
+  });
+}
+
+type JobStep = {
+  step_key: string;
+  kind?: string;
+  lang?: string | null;
+  status: string;
+  attempts?: number;
+  qa_status?: string | null;
+  error?: string | null;
+};
+
 function isTerminalStatus(status?: string) {
   return (
     status === "done" ||
+    status === "partial" ||
     status === "failed" ||
     status === "dead" ||
     status === "cancelled"
@@ -230,6 +320,7 @@ function isTerminalStatus(status?: string) {
 function badgeClass(status?: string) {
   if (status === "processing") return "is-processing";
   if (status === "done") return "is-done";
+  if (status === "partial") return "is-partial";
   if (status === "failed" || status === "dead") return "is-failed";
   if (status === "cancelled") return "is-cancelled";
   return "is-pending";
@@ -243,10 +334,28 @@ function stageLabel(copy: TryCopy, stage?: string) {
 
 function jobStatusLabel(copy: TryCopy, status?: string) {
   if (status === "done") return copy.statusDone;
+  if (status === "partial") return copy.statusPartial;
   if (status === "cancelled") return copy.statusCancelled;
   if (status === "failed" || status === "dead") return copy.statusFailed;
   if (status === "processing") return copy.statusProcessing;
   return copy.statusPending;
+}
+
+function stepChipMark(step: JobStep): string {
+  if (step.status === "done" || step.status === "skipped") {
+    return step.qa_status === "needs_review" ? "!" : "✓";
+  }
+  if (step.status === "failed" || step.status === "partial") return "!";
+  if (step.status === "running") return "…";
+  return "↻";
+}
+
+function stepChipClass(step: JobStep): string {
+  if (step.status === "failed") return "is-failed";
+  if (step.qa_status === "needs_review" || step.status === "partial") return "is-review";
+  if (step.status === "done" || step.status === "skipped") return "is-done";
+  if (step.status === "running") return "is-running";
+  return "is-queued";
 }
 
 /** Client-side: quick hint before server probe. */
@@ -394,6 +503,8 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
       status: string;
       path?: string;
       title?: string;
+      workflow?: string;
+      lane?: string;
       error?: string | null;
       progress?: Progress;
     }>
@@ -401,6 +512,8 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
   const [err, setErr] = useState<string | null>(null);
   const [queuePaused, setQueuePaused] = useState(false);
   const [jobActionBusy, setJobActionBusy] = useState<number | null>(null);
+  const [jobStepsById, setJobStepsById] = useState<Record<number, JobStep[]>>({});
+  const [stepRetryBusy, setStepRetryBusy] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
   const probeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollFailRef = useRef(0);
@@ -550,7 +663,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     wantEnhance,
     wantCompress,
     wantConcat,
-    wantRemix,
+    wantRemix: false, // rail gated — see trans/AI二创设计.md
     wantPublish,
   });
   const plannedIntent: TryIntentKind =
@@ -858,8 +971,31 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     setSubmitting(false);
     setPoll(null);
     setBatchJobs([]);
+    setJobStepsById({});
+    setStepRetryBusy(null);
     setErr(null);
   }, [stopPoll]);
+
+  const loadJobSteps = useCallback(async (jobIds: number[]) => {
+    const uniq = [...new Set(jobIds.filter((n) => Number.isFinite(n) && n > 0))];
+    if (!uniq.length) return;
+    const next: Record<number, JobStep[]> = {};
+    await Promise.all(
+      uniq.map(async (id) => {
+        try {
+          const r = await fetch(`${API}/api/try/${id}/steps`);
+          if (!r.ok) return;
+          const data = (await r.json()) as { steps?: JobStep[] };
+          if (data.steps && data.steps.length) next[id] = data.steps;
+        } catch {
+          /* ignore */
+        }
+      })
+    );
+    if (Object.keys(next).length) {
+      setJobStepsById((prev) => ({ ...prev, ...next }));
+    }
+  }, []);
 
   const refreshJobs = useCallback(async () => {
     const current = batchJobsRef.current;
@@ -892,6 +1028,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
           pack_zip_url: data.pack_zip_url,
           queue_position: data.queue_position,
           busy: data.busy,
+          steps_summary: data.steps_summary,
         });
         lastUpdated = data;
         if (data.paused != null) setQueuePaused(Boolean(data.paused));
@@ -903,6 +1040,18 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
         if (data.duration_sec != null && data.duration_sec > 0) {
           applyVideoDuration(data.duration_sec);
         }
+        const stepJobIds = [
+          j.job_id,
+          ...((data.pack_tasks || [])
+            .filter(
+              (t) =>
+                t.workflow === "translate" ||
+                t.workflow === "notes" ||
+                (t.steps_summary?.total || 0) > 0
+            )
+            .map((t) => t.job_id) || []),
+        ];
+        void loadJobSteps(stepJobIds);
       }
     } catch (e) {
       pollFailRef.current += 1;
@@ -934,7 +1083,46 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     if (!stillActive) {
       stopPoll();
     }
-  }, [stopPoll, copy.apiDown]);
+  }, [stopPoll, copy.apiDown, loadJobSteps]);
+
+  const retryJobStep = useCallback(
+    async (jobId: number, stepKey: string) => {
+      const busyKey = `${jobId}:${stepKey}`;
+      setStepRetryBusy(busyKey);
+      try {
+        const r = await fetch(
+          `${API}/api/try/${jobId}/steps/${encodeURIComponent(stepKey)}/retry`,
+          { method: "POST" }
+        );
+        if (!r.ok) {
+          const body = (await r.json().catch(() => ({}))) as { detail?: string };
+          throw new Error(body.detail || r.statusText);
+        }
+        const data = (await r.json()) as { steps?: JobStep[]; job_status?: string };
+        if (data.steps) {
+          setJobStepsById((prev) => ({ ...prev, [jobId]: data.steps || [] }));
+        }
+        setBatchJobs((prev) =>
+          prev.map((j) =>
+            j.job_id === jobId
+              ? { ...j, status: data.job_status || "processing", error: null }
+              : j
+          )
+        );
+        if (!timer.current) {
+          timer.current = setInterval(() => {
+            void refreshJobs();
+          }, 3000);
+        }
+        void refreshJobs();
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : String(e));
+      } finally {
+        setStepRetryBusy(null);
+      }
+    },
+    [refreshJobs]
+  );
 
   const toggleQueuePause = useCallback(async () => {
     const path = queuePaused ? "/api/try/queue/resume" : "/api/try/queue/pause";
@@ -958,23 +1146,34 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
           const body = (await r.json().catch(() => ({}))) as { detail?: string };
           throw new Error(body.detail || r.statusText);
         }
-        const data = (await r.json()) as Poll;
+        const data = (await r.json()) as Poll & { cancelled_job_ids?: number[] };
         if (data.paused != null) setQueuePaused(Boolean(data.paused));
-        setBatchJobs((prev) =>
-          prev.map((j) =>
-            j.job_id === jobId
-              ? {
-                  ...j,
-                  status: data.status || j.status,
-                  path: data.path ?? j.path,
-                  title: data.title ?? j.title,
-                  error: data.error ?? null,
-                  progress: data.progress ?? j.progress,
-                }
-              : j
-          )
+        const cancelledSet = new Set<number>(
+          (data.cancelled_job_ids || []).map((n) => Number(n)).filter((n) => Number.isFinite(n))
         );
-        setPoll((prev) => (prev?.job_id === jobId ? { ...prev, ...data } : prev));
+        if (action === "cancel") cancelledSet.add(jobId);
+        setBatchJobs((prev) =>
+          prev.map((j) => {
+            if (!cancelledSet.has(j.job_id) && j.job_id !== jobId) return j;
+            const hit = j.job_id === jobId;
+            return {
+              ...j,
+              status: hit ? data.status || j.status : action === "cancel" ? "cancelled" : j.status,
+              path: hit ? data.path ?? j.path : j.path,
+              title: hit ? data.title ?? j.title : j.title,
+              error: hit ? data.error ?? null : j.error,
+              progress: hit ? data.progress ?? j.progress : j.progress,
+            };
+          })
+        );
+        setPoll((prev) => {
+          if (!prev) return prev;
+          if (prev.job_id === jobId) return { ...prev, ...data };
+          if (action === "cancel" && cancelledSet.has(prev.job_id)) {
+            return { ...prev, status: "cancelled" };
+          }
+          return prev;
+        });
         if (action === "retry" && !timer.current) {
           timer.current = setInterval(() => {
             void refreshJobs();
@@ -1014,6 +1213,8 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
           status: j.status,
           path: j.path,
           title: j.title,
+          workflow: j.workflow,
+          lane: j.lane,
           error: j.error ?? null,
           progress: j.progress,
         }));
@@ -1275,7 +1476,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
             want_enhance: wantEnhance,
             want_compress: wantCompress,
             want_concat: wantConcat,
-            want_remix: wantRemix,
+            want_remix: false, // rail gated — see trans/AI二创设计.md
             want_publish: wantPublish,
             media_opts: {
               enhance_strength: enhanceStrength,
@@ -1314,7 +1515,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
         fd.append("want_enhance", wantEnhance ? "true" : "false");
         fd.append("want_compress", wantCompress ? "true" : "false");
         fd.append("want_concat", wantConcat ? "true" : "false");
-        fd.append("want_remix", wantRemix ? "true" : "false");
+        fd.append("want_remix", "false"); // rail gated — see trans/AI二创设计.md
         fd.append("want_publish", wantPublish ? "true" : "false");
         fd.append(
           "media_opts",
@@ -1346,6 +1547,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
         tasks?: Array<{
           job_id: number;
           workflow: string;
+          lane?: string;
           stages?: string;
           enqueue?: string;
         }>;
@@ -1356,6 +1558,8 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
           status?: string;
           path?: string;
           title?: string;
+          workflow?: string;
+          lane?: string;
           error?: string | null;
           progress?: Progress;
           frame_opts?: FrameOptsLike;
@@ -1363,6 +1567,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
           tasks?: Array<{
             job_id: number;
             workflow: string;
+            lane?: string;
             stages?: string;
             enqueue?: string;
           }>;
@@ -1384,6 +1589,8 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
         status: string;
         path?: string;
         title?: string;
+        workflow?: string;
+        lane?: string;
         error?: string | null;
         progress?: Progress;
       }> = [];
@@ -1399,6 +1606,8 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                 status: j.status || (j.ok === false ? "failed" : "pending"),
                 path: j.path,
                 title: j.title,
+                workflow: t.workflow,
+                lane: t.lane,
                 error: j.error ?? null,
                 progress: j.progress,
               });
@@ -1410,6 +1619,8 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
               status: j.status || (j.ok === false ? "failed" : "pending"),
               path: j.path,
               title: j.title,
+              workflow: j.workflow,
+              lane: j.lane,
               error: j.error ?? null,
               progress: j.progress,
             });
@@ -1424,6 +1635,8 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
             status: data.status || "pending",
             path: data.path,
             title: data.title,
+            workflow: t.workflow,
+            lane: t.lane,
             error: data.error ?? null,
             progress: data.progress,
           }));
@@ -1435,6 +1648,8 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
             status: data.status || "pending",
             path: data.path,
             title: data.title,
+            workflow: data.workflow,
+            lane: data.lane,
             error: data.error ?? null,
             progress: data.progress,
           },
@@ -1581,90 +1796,131 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
   return (
     <div className="try-panel">
       <div className="try-workflow-rail-wrap">
-      <ol className="try-workflow-rail" aria-label={copy.modulesSection}>
-        <li
-          className={sourceItems.length ? "is-done" : "is-active"}
-          aria-current={!sourceItems.length ? "step" : undefined}
-        >
-          <span className="try-workflow-rail-n" aria-hidden="true">
-            1
-          </span>
-          <span className="try-workflow-rail-label">{copy.workflowRailSource}</span>
-        </li>
-        {(
-          [
-            {
-              id: "translate",
-              on: wantTranslate,
-              toggle: () => setWantTranslate((v) => !v),
-              label: copy.workflowRailTranslate,
-            },
-            {
-              id: "notes",
-              on: wantNotes,
-              toggle: () => setWantNotes((v) => !v),
-              label: copy.workflowRailNotes,
-            },
-            {
-              id: "clips",
-              on: wantClips,
-              toggle: () => setWantClips((v) => !v),
-              label: copy.workflowRailClips,
-            },
-            {
-              id: "dehardsub",
-              on: wantDehardsub,
-              toggle: () => setWantDehardsub((v) => !v),
-              label: copy.workflowRailDehardsub,
-            },
-            {
-              id: "deblur",
-              on: wantDeblur,
-              toggle: () => setWantDeblur((v) => !v),
-              label: copy.workflowRailDeblur,
-            },
-            {
-              id: "enhance",
-              on: wantEnhance,
-              toggle: () => setWantEnhance((v) => !v),
-              label: copy.workflowRailEnhance,
-            },
-            {
-              id: "compress",
-              on: wantCompress,
-              toggle: () => setWantCompress((v) => !v),
-              label: copy.workflowRailCompress,
-            },
-            {
-              id: "concat",
-              on: wantConcat,
-              toggle: () => setWantConcat((v) => !v),
-              label: copy.workflowRailConcat,
-            },
-            {
-              id: "remix",
-              on: wantRemix,
-              toggle: () => setWantRemix((v) => !v),
-              label: copy.workflowRailRemix,
-            },
-          ] as const
-        ).map((wf) => (
-          <li key={wf.id} className={wf.on ? "is-on" : "is-off"}>
+      <div className="try-workflow-lanes" aria-label={copy.modulesSection}>
+        <ol className="try-workflow-rail try-workflow-rail-content" aria-label={copy.workflowRailContentLane}>
+          <li className="try-workflow-rail-lane-tag" aria-hidden="true">
+            <span className="try-workflow-rail-label">{copy.workflowRailContentLane}</span>
+          </li>
+          <li
+            className={sourceItems.length ? "is-done" : "is-active"}
+            aria-current={!sourceItems.length ? "step" : undefined}
+          >
+            <span className="try-workflow-rail-n" aria-hidden="true">
+              1
+            </span>
+            <span className="try-workflow-rail-label">{copy.workflowRailSource}</span>
+          </li>
+          {(
+            [
+              {
+                id: "translate",
+                on: wantTranslate,
+                toggle: () => setWantTranslate((v) => !v),
+                label: copy.workflowRailTranslate,
+              },
+              {
+                id: "notes",
+                on: wantNotes,
+                toggle: () => setWantNotes((v) => !v),
+                label: copy.workflowRailNotes,
+              },
+            ] as const
+          ).map((wf) => (
+            <li key={wf.id} className={wf.on ? "is-on" : "is-off"}>
+              <button
+                type="button"
+                className="try-workflow-rail-toggle"
+                aria-pressed={wf.on}
+                disabled={submitting}
+                onClick={wf.toggle}
+              >
+                <span className="try-workflow-rail-n" aria-hidden="true">
+                  {wf.on ? "✓" : "–"}
+                </span>
+                <span className="try-workflow-rail-label">{wf.label}</span>
+              </button>
+            </li>
+          ))}
+        </ol>
+        <ol className="try-workflow-rail try-workflow-rail-media" aria-label={copy.workflowRailMediaLane}>
+          <li className="try-workflow-rail-lane-tag" aria-hidden="true">
+            <span className="try-workflow-rail-label">{copy.workflowRailMediaLane}</span>
+          </li>
+          {(
+            [
+              {
+                id: "dehardsub",
+                on: wantDehardsub,
+                toggle: () => setWantDehardsub((v) => !v),
+                label: copy.workflowRailDehardsub,
+              },
+              {
+                id: "clips",
+                on: wantClips,
+                toggle: () => setWantClips((v) => !v),
+                label: copy.workflowRailClips,
+              },
+              {
+                id: "concat",
+                on: wantConcat,
+                toggle: () => setWantConcat((v) => !v),
+                label: copy.workflowRailConcat,
+              },
+              {
+                id: "deblur",
+                on: wantDeblur,
+                toggle: () => setWantDeblur((v) => !v),
+                label: copy.workflowRailDeblur,
+              },
+              {
+                id: "enhance",
+                on: wantEnhance,
+                toggle: () => setWantEnhance((v) => !v),
+                label: copy.workflowRailEnhance,
+              },
+              {
+                id: "compress",
+                on: wantCompress,
+                toggle: () => setWantCompress((v) => !v),
+                label: copy.workflowRailCompress,
+              },
+            ] as const
+          ).map((wf) => (
+            <li key={wf.id} className={wf.on ? "is-on" : "is-off"}>
+              <button
+                type="button"
+                className="try-workflow-rail-toggle"
+                aria-pressed={wf.on}
+                disabled={submitting}
+                onClick={wf.toggle}
+              >
+                <span className="try-workflow-rail-n" aria-hidden="true">
+                  {wf.on ? "✓" : "–"}
+                </span>
+                <span className="try-workflow-rail-label">{wf.label}</span>
+              </button>
+            </li>
+          ))}
+          {/* WF-07 rail gated: AI remake redesign — see trans/AI二创设计.md */}
+          <li className="is-soon" title={copy.workflowRailRemixSoon}>
             <button
               type="button"
               className="try-workflow-rail-toggle"
-              aria-pressed={wf.on}
-              disabled={submitting}
-              onClick={wf.toggle}
+              aria-pressed={false}
+              aria-disabled="true"
+              disabled
             >
               <span className="try-workflow-rail-n" aria-hidden="true">
-                {wf.on ? "✓" : "–"}
+                –
               </span>
-              <span className="try-workflow-rail-label">{wf.label}</span>
+              <span className="try-workflow-rail-label">
+                {copy.workflowRailRemix}
+                <span className="try-workflow-rail-soon">{copy.workflowRailRemixSoon}</span>
+              </span>
             </button>
           </li>
-        ))}
-      </ol>
+        </ol>
+      </div>
       <p className="try-workflow-rail-hint">{copy.workflowRailHint}</p>
       </div>
       <div className="try-tabs" role="tablist">
@@ -2006,9 +2262,12 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
             <header className="try-section-head">
               <h2 className="try-section-title">
                 {[
+                  wantDehardsub ? copy.workflowRailDehardsub : null,
+                  wantClips ? copy.workflowRailClips : null,
+                  wantConcat ? copy.workflowRailConcat : null,
+                  wantDeblur ? copy.workflowRailDeblur : null,
                   wantEnhance ? copy.enhanceSection : null,
                   wantCompress ? copy.compressSection : null,
-                  wantConcat ? copy.workflowRailConcat : null,
                   wantRemix ? copy.workflowRailRemix : null,
                   wantPublish ? copy.workflowRailPublish : null,
                 ]
@@ -2016,17 +2275,20 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                   .join(" · ") || copy.modulesSection}
               </h2>
             </header>
-            {(wantEnhance || wantCompress || wantDeblur || wantClips || wantRemix) ? (
+            {(wantEnhance || wantCompress || wantDeblur || wantClips || wantConcat || wantRemix) ? (
               <div className="try-field">
                 <span>{copy.inputFromLabel}</span>
                 {(
                   [
                     ...(wantClips ? (["clips"] as const) : []),
+                    ...(wantConcat ? (["concat"] as const) : []),
                     ...(wantDeblur ? (["deblur"] as const) : []),
                     ...(wantEnhance ? (["enhance"] as const) : []),
                     ...(wantCompress ? (["compress"] as const) : []),
                     ...(wantRemix ? (["remix"] as const) : []),
-                  ] as Array<"clips" | "deblur" | "enhance" | "compress" | "remix">
+                  ] as Array<
+                    "clips" | "concat" | "deblur" | "enhance" | "compress" | "remix"
+                  >
                 ).map((wf) => (
                     <label key={wf} className="try-select-row">
                       <span>{wf}</span>
@@ -2368,12 +2630,30 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
           {poll.pack_tasks && poll.pack_tasks.length > 0 ? (
             <ul className="try-pack-tasks" aria-label="workflows">
               {poll.pack_tasks.map((t) => {
-                const pct = t.progress?.percent ?? (t.status === "done" ? 100 : 0);
+                const pct =
+                  t.progress?.percent ??
+                  (t.status === "done" || t.status === "partial" ? 100 : 0);
+                const steps = jobStepsById[t.job_id] || [];
+                const langSteps = steps.filter(
+                  (s) => s.kind === "translate" || s.kind === "notes_localize"
+                );
+                const summaryLabel =
+                  t.steps_summary && t.steps_summary.total > 0
+                    ? fillCopy(copy.stepsSummary, {
+                        done: t.steps_summary.done,
+                        total: t.steps_summary.total,
+                      })
+                    : null;
                 return (
                   <li key={t.job_id} className={`try-pack-task is-${t.status}`}>
                     <div className="try-pack-task-head">
                       <span className="try-pack-task-wf">{t.workflow}</span>
-                      <span className="try-pack-task-st">{t.status}</span>
+                      <span className="try-pack-task-st">
+                        {jobStatusLabel(copy, t.status)}
+                      </span>
+                      {summaryLabel ? (
+                        <span className="try-pack-task-steps">{summaryLabel}</span>
+                      ) : null}
                       {t.input_from ? (
                         <span className="try-pack-task-in">←{t.input_from}</span>
                       ) : null}
@@ -2392,6 +2672,34 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                     >
                       <span style={{ width: `${pct}%` }} />
                     </div>
+                    {langSteps.length > 0 ? (
+                      <div className="try-step-chips" aria-label={copy.stepLangChips}>
+                        {langSteps.map((s) => {
+                          const mark = stepChipMark(s);
+                          const canRetry =
+                            s.status === "failed" ||
+                            s.status === "queued" ||
+                            s.qa_status === "needs_review";
+                          const busy = stepRetryBusy === `${t.job_id}:${s.step_key}`;
+                          const label = s.lang || s.step_key.split(".").pop() || s.step_key;
+                          return (
+                            <button
+                              key={s.step_key}
+                              type="button"
+                              className={`try-step-chip ${stepChipClass(s)}`}
+                              title={
+                                s.error ||
+                                (canRetry ? copy.stepRetry : s.step_key)
+                              }
+                              disabled={!canRetry || busy || t.status === "processing"}
+                              onClick={() => void retryJobStep(t.job_id, s.step_key)}
+                            >
+                              {label} {mark}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : null}
                     {t.products && t.products.length > 0 ? (
                       <ul className="try-pack-task-products">
                         {t.products.slice(0, 6).map((p) => (
@@ -2416,9 +2724,22 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
             </ul>
           ) : null}
 
-          {poll.busy && poll.status === "pending" ? (
+          {poll.status === "pending" &&
+          (poll.waiting_for_depends_on ||
+            poll.lane_full ||
+            poll.schedule?.waiting_for_depends_on ||
+            poll.schedule?.lane_full ||
+            poll.busy) ? (
             <>
-              {poll.queue_position && poll.queue_position > 1 ? (
+              {poll.waiting_for_depends_on || poll.schedule?.waiting_for_depends_on ? (
+                <p className="try-hint">
+                  {fillCopy(copy.waitingDeps, {
+                    dep: String(poll.blocked_on || poll.schedule?.blocked_on || "deps"),
+                  })}
+                </p>
+              ) : poll.lane_full || poll.schedule?.lane_full ? (
+                <p className="try-hint">{copy.laneFull}</p>
+              ) : poll.queue_position && poll.queue_position > 1 ? (
                 <p className="try-hint">
                   {fillCopy(copy.queuePosition, { n: poll.queue_position })}
                 </p>
@@ -2611,8 +2932,21 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
             <p className="try-hint try-queue-paused">{copy.queuePaused}</p>
           ) : null}
           <ul className="try-batch-jobs" aria-label={copy.batchJobsTitle}>
-            {batchJobs.map((j) => {
-              const label = formatBatchJobLabel(j.title || j.label, locale);
+            {sortBatchJobsByWorkflow(batchJobs).map((j) => {
+              const wf = workflowLabel(copy, j.workflow);
+              const laneTag =
+                j.lane === "media"
+                  ? copy.workflowRailMediaLane
+                  : j.lane === "content"
+                    ? copy.workflowRailContentLane
+                    : "";
+              const label = [
+                formatBatchJobLabel(j.title || j.label, locale),
+                wf,
+                laneTag,
+              ]
+                .filter(Boolean)
+                .join(" · ");
               const stage = stageLabel(copy, j.progress?.stage);
               const detail = progressDetail(copy, j.progress);
               const pct = j.progress?.percent ?? 0;

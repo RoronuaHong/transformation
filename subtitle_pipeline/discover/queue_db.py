@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -48,6 +49,25 @@ CREATE TABLE IF NOT EXISTS jobs (
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status_score
   ON jobs(status, priority, score DESC);
+
+CREATE TABLE IF NOT EXISTS job_steps (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL,
+  step_key TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  lang TEXT,
+  status TEXT NOT NULL DEFAULT 'queued',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  qa_status TEXT,
+  error TEXT,
+  artifact_rel TEXT,
+  started_at REAL,
+  finished_at REAL,
+  UNIQUE(job_id, step_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_steps_job
+  ON job_steps(job_id, status);
 """
 
 # Columns added after first Phase-0 schema; migrate safely.
@@ -69,8 +89,12 @@ class QueueDB:
     def __init__(self, path: Path | None = None) -> None:
         self.path = Path(path) if path else DEFAULT_DB
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.path)
+        # Language workers share one QueueDB for job_steps; allow cross-thread
+        # use and serialize writes with ``_lock``.
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(SCHEMA)
         self._migrate()
         self._conn.commit()
@@ -227,8 +251,13 @@ class QueueDB:
         status: str = "pending",
         workflow: str = "all",
         pack_id: str | None = None,
+        meta: dict | None = None,
     ) -> str:
-        """Insert job. Returns inserted | ignored | skipped_done."""
+        """Insert job. Returns inserted | ignored | skipped_done.
+
+        When ``meta`` is provided it is written in the same INSERT commit so
+        schedulers cannot claim a pending row before depends_on gates exist.
+        """
         wf = (workflow or "all").strip() or "all"
         pack = (pack_id or f"{c.platform}_{c.video_id}").strip()
         row = self._conn.execute(
@@ -242,7 +271,14 @@ class QueueDB:
             return "ignored"
 
         now = time.time()
-        meta = json.dumps(c.raw or {}, ensure_ascii=False) if c.raw else None
+        if isinstance(meta, dict) and meta:
+            base = dict(c.raw) if isinstance(c.raw, dict) else {}
+            base.update(meta)
+            meta_json = json.dumps(base, ensure_ascii=False)
+        elif c.raw:
+            meta_json = json.dumps(c.raw, ensure_ascii=False)
+        else:
+            meta_json = None
         try:
             self._conn.execute(
                 """
@@ -278,7 +314,7 @@ class QueueDB:
                     priority,
                     0,
                     c.url,
-                    meta,
+                    meta_json,
                     c.original_url or c.url,
                     wf,
                     pack,
@@ -400,32 +436,338 @@ class QueueDB:
         *,
         source_wav: str | None = None,
         canonical_url: str | None = None,
-    ) -> None:
+    ) -> bool:
+        """Mark done only from ``processing`` (or already done). Never overwrite cancelled."""
         now = time.time()
-        self._conn.execute(
+        cur = self._conn.execute(
             """
             UPDATE jobs
             SET status='done', updated_at=?, last_error=NULL,
                 source_wav=COALESCE(?, source_wav),
                 canonical_url=COALESCE(?, canonical_url)
-            WHERE id=?
+            WHERE id=? AND status IN ('processing', 'done', 'partial')
             """,
             (now, source_wav, canonical_url, job_id),
         )
         self._conn.commit()
+        return cur.rowcount == 1
 
-    def mark_failed(self, job_id: int, error: str, *, dead: bool = False) -> None:
+    def mark_failed(self, job_id: int, error: str, *, dead: bool = False) -> bool:
+        """Fail only non-cancelled/finished rows (cancel must stick).
+
+        ``pending`` is allowed for step-aggregate paths; submit/retry must not
+        reopen a row while its lane slot is still held (zombie guard).
+        """
         now = time.time()
         status = "dead" if dead else "failed"
-        self._conn.execute(
+        cur = self._conn.execute(
             """
             UPDATE jobs
             SET status=?, last_error=?, updated_at=?
-            WHERE id=?
+            WHERE id=? AND status NOT IN ('cancelled', 'done', 'published')
             """,
             (status, (error or "")[:2000], now, job_id),
         )
         self._conn.commit()
+        return cur.rowcount == 1
+
+    def mark_partial(self, job_id: int, *, error: str | None = None) -> bool:
+        """Parent job finished with some usable artifacts but failed/review steps."""
+        now = time.time()
+        cur = self._conn.execute(
+            """
+            UPDATE jobs
+            SET status='partial', last_error=?, updated_at=?
+            WHERE id=? AND status NOT IN ('cancelled', 'done', 'published')
+            """,
+            ((error or "")[:2000] or None, now, job_id),
+        )
+        self._conn.commit()
+        return cur.rowcount == 1
+
+    # --- job_steps (P2 language-level accounting) ---
+
+    def upsert_step(
+        self,
+        job_id: int,
+        step_key: str,
+        *,
+        kind: str,
+        lang: str | None = None,
+        status: str = "queued",
+        qa_status: str | None = None,
+        error: str | None = None,
+        artifact_rel: str | None = None,
+    ) -> None:
+        now = time.time()
+        key = (step_key or "").strip()
+        if not key:
+            return
+        with self._lock:
+            row = self.get_step(job_id, key)
+            if row is None:
+                self._conn.execute(
+                    """
+                    INSERT INTO job_steps(
+                      job_id, step_key, kind, lang, status, attempts,
+                      qa_status, error, artifact_rel, started_at, finished_at
+                    ) VALUES (?,?,?,?,?,0,?,?,?,?,?)
+                    """,
+                    (
+                        int(job_id),
+                        key,
+                        (kind or "translate").strip() or "translate",
+                        (lang or None),
+                        status,
+                        qa_status,
+                        (error or None),
+                        artifact_rel,
+                        now if status == "running" else None,
+                        now
+                        if status in ("done", "failed", "skipped", "partial")
+                        else None,
+                    ),
+                )
+            else:
+                if status == "running" and self._job_is_cancelled(job_id):
+                    return
+                self._conn.execute(
+                    """
+                    UPDATE job_steps
+                    SET kind=?, lang=COALESCE(?, lang), status=?,
+                        qa_status=COALESCE(?, qa_status),
+                        error=?, artifact_rel=COALESCE(?, artifact_rel),
+                        started_at=CASE
+                          WHEN ?='running' THEN COALESCE(started_at, ?)
+                          ELSE started_at
+                        END,
+                        finished_at=CASE
+                          WHEN ? IN ('done','failed','skipped','partial') THEN ?
+                          ELSE finished_at
+                        END
+                    WHERE job_id=? AND step_key=?
+                    """,
+                    (
+                        (kind or row["kind"] or "translate"),
+                        lang,
+                        status,
+                        qa_status,
+                        (error or None),
+                        artifact_rel,
+                        status,
+                        now,
+                        status,
+                        now,
+                        int(job_id),
+                        key,
+                    ),
+                )
+            self._conn.commit()
+
+    def get_step(self, job_id: int, step_key: str) -> sqlite3.Row | None:
+        with self._lock:
+            return self._conn.execute(
+                "SELECT * FROM job_steps WHERE job_id=? AND step_key=?",
+                (int(job_id), (step_key or "").strip()),
+            ).fetchone()
+
+    def list_steps(self, job_id: int) -> list[sqlite3.Row]:
+        with self._lock:
+            return list(
+                self._conn.execute(
+                    """
+                    SELECT * FROM job_steps
+                    WHERE job_id=?
+                    ORDER BY id ASC
+                    """,
+                    (int(job_id),),
+                )
+            )
+
+    def mark_step_running(self, job_id: int, step_key: str) -> None:
+        if self._job_is_cancelled(job_id):
+            return
+        now = time.time()
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE job_steps
+                SET status='running', started_at=COALESCE(started_at, ?),
+                    finished_at=NULL, error=NULL
+                WHERE job_id=? AND step_key=?
+                """,
+                (now, int(job_id), (step_key or "").strip()),
+            )
+            self._conn.commit()
+
+    def mark_step_done(
+        self,
+        job_id: int,
+        step_key: str,
+        *,
+        qa_status: str | None = None,
+        artifact_rel: str | None = None,
+        status: str = "done",
+    ) -> None:
+        if self._job_is_cancelled(job_id):
+            return
+        now = time.time()
+        st = status if status in ("done", "skipped", "partial") else "done"
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE job_steps
+                SET status=?, qa_status=COALESCE(?, qa_status),
+                    artifact_rel=COALESCE(?, artifact_rel),
+                    error=NULL, finished_at=?
+                WHERE job_id=? AND step_key=?
+                """,
+                (
+                    st,
+                    qa_status,
+                    artifact_rel,
+                    now,
+                    int(job_id),
+                    (step_key or "").strip(),
+                ),
+            )
+            self._conn.commit()
+
+    def mark_step_failed(
+        self, job_id: int, step_key: str, error: str, *, qa_status: str | None = None
+    ) -> None:
+        if self._job_is_cancelled(job_id):
+            return
+        now = time.time()
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE job_steps
+                SET status='failed', error=?, qa_status=COALESCE(?, qa_status),
+                    finished_at=?
+                WHERE job_id=? AND step_key=?
+                """,
+                (
+                    (error or "")[:2000],
+                    qa_status,
+                    now,
+                    int(job_id),
+                    (step_key or "").strip(),
+                ),
+            )
+            self._conn.commit()
+
+    def requeue_step(self, job_id: int, step_key: str) -> bool:
+        """Reset one step to queued and bump attempts. Returns True if found."""
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                UPDATE job_steps
+                SET status='queued', attempts=attempts+1, error=NULL,
+                    qa_status=NULL, started_at=NULL, finished_at=NULL
+                WHERE job_id=? AND step_key=?
+                """,
+                (int(job_id), (step_key or "").strip()),
+            )
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def delete_steps_for_job(self, job_id: int) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM job_steps WHERE job_id=?", (int(job_id),)
+            )
+            self._conn.commit()
+            return int(cur.rowcount)
+
+    def reset_running_steps_to_queued(self, *, job_id: int | None = None) -> int:
+        """Crash recovery: orphan running steps → queued."""
+        with self._lock:
+            if job_id is None:
+                cur = self._conn.execute(
+                    """
+                    UPDATE job_steps
+                    SET status='queued', started_at=NULL, finished_at=NULL
+                    WHERE status='running'
+                    """
+                )
+            else:
+                cur = self._conn.execute(
+                    """
+                    UPDATE job_steps
+                    SET status='queued', started_at=NULL, finished_at=NULL
+                    WHERE status='running' AND job_id=?
+                    """,
+                    (int(job_id),),
+                )
+            self._conn.commit()
+            return int(cur.rowcount)
+
+    def steps_summary(self, job_id: int) -> dict:
+        rows = self.list_steps(job_id)
+        total = len(rows)
+        by_status: dict[str, int] = {}
+        failed_keys: list[str] = []
+        review_keys: list[str] = []
+        done = 0
+        for r in rows:
+            st = str(r["status"] or "")
+            by_status[st] = by_status.get(st, 0) + 1
+            if st in ("done", "skipped"):
+                done += 1
+            if st == "failed":
+                failed_keys.append(str(r["step_key"]))
+            if str(r["qa_status"] or "") == "needs_review":
+                review_keys.append(str(r["step_key"]))
+        return {
+            "total": total,
+            "done": done,
+            "by_status": by_status,
+            "failed_keys": failed_keys,
+            "review_keys": review_keys,
+            "label": f"{done}/{total}" if total else "0/0",
+        }
+
+    def aggregate_job_from_steps(self, job_id: int) -> str | None:
+        """Set parent job status from steps. Returns new status or None if no steps."""
+        if self._job_is_cancelled(job_id):
+            return "cancelled"
+        with self._lock:
+            rows = list(
+                self._conn.execute(
+                    "SELECT * FROM job_steps WHERE job_id=? ORDER BY id ASC",
+                    (int(job_id),),
+                )
+            )
+        if not rows:
+            return None
+        statuses = [str(r["status"] or "") for r in rows]
+        if any(s == "running" for s in statuses):
+            return "processing"
+        if any(s == "queued" for s in statuses):
+            return None
+        n_done = sum(1 for s in statuses if s in ("done", "skipped"))
+        n_fail = sum(1 for s in statuses if s == "failed")
+        n_partial = sum(1 for s in statuses if s == "partial")
+        # needs_review stays on the step/chip only — does not demote the parent.
+        if n_fail == 0 and n_partial == 0:
+            self.mark_done(job_id)
+            return "done"
+        if n_done == 0 and n_fail > 0:
+            keys = [str(r["step_key"]) for r in rows if r["status"] == "failed"]
+            self.mark_failed(
+                job_id, f"all language steps failed: {', '.join(keys[:8])}"
+            )
+            return "failed"
+        bad = [
+            str(r["step_key"])
+            for r in rows
+            if r["status"] in ("failed", "partial")
+        ]
+        self.mark_partial(
+            job_id, error=f"partial: {', '.join(bad[:12])}" if bad else None
+        )
+        return "partial"
 
     def requeue_failed(self, *, limit: int = 20) -> int:
         """Move failed → pending for retry. Returns count."""
@@ -442,6 +784,28 @@ class QueueDB:
         self._conn.commit()
         return int(cur.rowcount)
 
+    def seal_cancelled_steps(self, job_id: int, *, reason: str = "用户取消") -> int:
+        """Force unfinished steps to failed after cancel (even if job already cancelled)."""
+        now = time.time()
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                UPDATE job_steps
+                SET status='failed', error=?, finished_at=?
+                WHERE job_id=? AND status IN ('queued', 'running')
+                """,
+                ((reason or "用户取消")[:2000], now, int(job_id)),
+            )
+            self._conn.commit()
+            return int(cur.rowcount)
+
+    def _job_is_cancelled(self, job_id: int) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT status FROM jobs WHERE id=?", (int(job_id),)
+            ).fetchone()
+        return bool(row) and str(row["status"] or "") == "cancelled"
+
     def cancel_job(self, job_id: int, *, reason: str = "用户取消") -> bool:
         """Mark pending/processing job as cancelled."""
         now = time.time()
@@ -449,11 +813,13 @@ class QueueDB:
             """
             UPDATE jobs
             SET status='cancelled', last_error=?, updated_at=?
-            WHERE id=? AND status IN ('pending', 'processing')
+            WHERE id=? AND status IN ('pending', 'processing', 'partial')
             """,
             ((reason or "用户取消")[:2000], now, job_id),
         )
         self._conn.commit()
+        # Always seal steps — even when the row was already cancelled.
+        self.seal_cancelled_steps(job_id, reason=reason or "用户取消")
         return cur.rowcount == 1
 
     def requeue_job(self, job_id: int, *, allow_done: bool = False) -> bool:
@@ -462,9 +828,9 @@ class QueueDB:
         With ``allow_done=True``, also reopens done/published (e.g. change langs).
         """
         now = time.time()
-        allowed = ("failed", "dead", "cancelled")
+        allowed = ("failed", "dead", "cancelled", "partial")
         if allow_done:
-            allowed = ("failed", "dead", "cancelled", "done", "published")
+            allowed = ("failed", "dead", "cancelled", "partial", "done", "published")
         cur = self._conn.execute(
             f"""
             UPDATE jobs
@@ -474,6 +840,9 @@ class QueueDB:
             (now, job_id, *allowed),
         )
         self._conn.commit()
+        if cur.rowcount == 1:
+            # Fresh run: clear language steps so resume/skip logic is clean.
+            self.delete_steps_for_job(job_id)
         return cur.rowcount == 1
 
     def set_meta(self, job_id: int, meta: dict) -> None:

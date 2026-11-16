@@ -1707,8 +1707,22 @@ def run_multipass_cleanup(
             *,
             mask_mode: str = "glyph",
             ) -> dict[str, Any] | None:
+            # Dialogue inpaint may be TELEA, but watermark/title residual polish
+            # still needs LaMa. Only skip non-polish LaMa when TELEA is forced.
+            inpaint = (os.environ.get("VITUAL_DEHARDSUB_INPAINT") or "").strip().lower()
+            if tag != "polish" and inpaint == "telea":
+                return None
+            polish_mode = (os.environ.get("VITUAL_DEHARDSUB_POLISH") or "auto").strip().lower()
+            if tag == "polish" and polish_mode in ("0", "false", "no", "off", "skip"):
+                print("[cleanup] residual polish disabled (VITUAL_DEHARDSUB_POLISH)", flush=True)
+                return None
             if LamaUnavailable is None:
                 return None
+            # Prefer CPU EP for polish to avoid CUDA/cuDNN process aborts that
+            # cannot be caught in-process (dialogue path stays on TELEA).
+            prev_require = os.environ.get("VITUAL_REQUIRE_GPU")
+            if tag == "polish" and polish_mode in ("auto", "cpu", "lama", ""):
+                os.environ["VITUAL_REQUIRE_GPU"] = "0"
             try:
                 stats = encode_lama_boxes(
                     inp, outp, boxes_l, dilate=2, mask_mode=mask_mode,
@@ -1719,6 +1733,12 @@ def run_multipass_cleanup(
             except Exception as exc:  # noqa: BLE001
                 print(f"[cleanup] lama {tag} skipped ({exc})", flush=True)
                 return None
+            finally:
+                if tag == "polish":
+                    if prev_require is None:
+                        os.environ.pop("VITUAL_REQUIRE_GPU", None)
+                    else:
+                        os.environ["VITUAL_REQUIRE_GPU"] = prev_require
 
         try:
             for i, hb in enumerate(boxes_run):
@@ -1995,6 +2015,12 @@ def run_multipass_cleanup(
                         band=box_run,
                         watermark=None,
                         use_brightness=ocr_use_brightness,
+                        # OCR+TELEA is the documented hybrid route. LaMa is
+                        # opt-in because its ONNX CUDA session can abort the
+                        # whole process on cuDNN ABI mismatch.
+                        inpaint_method=(
+                            os.environ.get("VITUAL_DEHARDSUB_INPAINT") or "telea"
+                        ).strip().lower(),
                     )
                     used = dict(used)
                     used["role"] = role
@@ -2087,6 +2113,18 @@ def run_multipass_cleanup(
             else:
                 pass_stats.append(polish)
 
+            polish_needed = bool(polish_boxes)
+            polish_applied = bool(polish is not None)
+            quality = "ok"
+            quality_note = ""
+            if polish_needed and not polish_applied:
+                quality = "degraded"
+                quality_note = (
+                    "residual LaMa polish skipped/failed for watermark|title; "
+                    "dialogue TELEA path kept"
+                )
+                print(f"[cleanup] QUALITY degraded: {quality_note}", flush=True)
+
             sttn_stats = {
                 "engine": "hybrid",
                 "regions": len(boxes_run),
@@ -2094,7 +2132,10 @@ def run_multipass_cleanup(
                 "mode": "cleanplate+lama",
                 "polish_probe": polish_probe,
                 "polish_residual_floor": float(polish_residual_floor),
-                "polish_applied": bool(polish is not None),
+                "polish_applied": polish_applied,
+                "polish_needed": polish_needed,
+                "quality": quality,
+                "quality_note": quality_note,
                 "frames": pass_stats[-1].get("frames") if pass_stats else 0,
                 "device": pass_stats[0].get("device") if pass_stats else "cpu",
                 "bytes": sttn_out.stat().st_size if sttn_out.is_file() else 0,
@@ -2134,6 +2175,9 @@ def run_multipass_cleanup(
             "demosaic": demosaic,
             "dehardsub": dehardsub,
             "src_size": f"{width}x{height}",
+            "quality": sttn_stats.get("quality") or "ok",
+            "quality_note": sttn_stats.get("quality_note") or "",
+            "polish_applied": bool(sttn_stats.get("polish_applied")),
             **locate_meta,
             "encode": sttn_stats,
         }

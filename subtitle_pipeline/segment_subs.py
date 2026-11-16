@@ -3,10 +3,37 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from job_layout import list_locale_srts, locale_srt_path
 from pipeline import parse_srt
+
+
+def _segment_langs(srts: dict[str, Path]) -> dict[str, Path]:
+    """Default: only source-ish langs for segment packs (avoid 20×N hub spam).
+
+    Set ``VITUAL_SEGMENT_ALL_LANGS=1`` to restore full fununion20 per segment.
+    """
+    if (os.environ.get("VITUAL_SEGMENT_ALL_LANGS") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return srts
+    prefer = ("zh", "zh-Hant", "en")
+    out: dict[str, Path] = {}
+    for key in prefer:
+        if key in srts:
+            out[key] = srts[key]
+    if out:
+        return out
+    # fall back to first available locale only
+    if srts:
+        k = next(iter(srts))
+        return {k: srts[k]}
+    return srts
 
 
 def _srt_timestamp(sec: float) -> str:
@@ -135,7 +162,7 @@ def enrich_segment_cues(
     lang_map: dict[str, str] = {}
 
     span = (float(start_sec), float(end_sec))
-    for lang, path in srts.items():
+    for lang, path in _segment_langs(srts).items():
         segs = parse_srt(path)
         if not segs:
             continue

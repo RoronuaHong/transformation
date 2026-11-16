@@ -18,8 +18,12 @@ from fetch_media import ensure_source_video, find_ffmpeg, _looks_like_netscape
 from job_layout import existing_wav, job_media_dir, list_locale_srts
 from langs import DEFAULT_PACK, PACKS, coalesce_source_lang, normalize_lang, resolve_targets
 from workflows import (
+    ARTIFACT_SOURCE_SRT,
+    LANE_CONTENT,
+    LANE_MEDIA,
     expand_workflow_tasks,
     infer_workflow_progress,
+    lane_for_workflow,
     list_pack_artifacts,
     pack_id_for,
     workflow_products,
@@ -96,7 +100,7 @@ def apply_batch_cookies(pasted: str | None, urls: list[str]) -> None:
 
 
 def schedule_next_try_job(*, skip_job_id: int | None = None) -> None:
-    """Chain the next runnable high-priority pending try job when idle."""
+    """Fill free lane slots with the next runnable high-priority pending jobs."""
 
     def _runner() -> None:
         time.sleep(0.25)
@@ -111,6 +115,7 @@ def schedule_next_try_job(*, skip_job_id: int | None = None) -> None:
                 ORDER BY created_at ASC
                 """
             ).fetchall()
+            started = 0
             for row in rows:
                 jid = int(row["id"])
                 if skip_job_id is not None and jid == skip_job_id:
@@ -120,12 +125,39 @@ def schedule_next_try_job(*, skip_job_id: int | None = None) -> None:
                     continue
                 if not _deps_satisfied(q, job):
                     continue
-                run_try_job(jid)
-                return
+                lane = _lane_for_job(job)
+                if not _try_acquire_slot(lane, jid):
+                    continue
+                # Slot reserved; worker thread runs the job (releases in finally).
+                threading.Thread(
+                    target=run_try_job,
+                    kwargs={"job_id": jid, "_slot_held": True, "_slot_lane": lane},
+                    daemon=True,
+                ).start()
+                started += 1
+                # Cap how many we launch per wake to avoid stampede.
+                if started >= _max_active_total():
+                    break
         finally:
             q.close()
 
     threading.Thread(target=_runner, daemon=True).start()
+
+
+def kick_try_scheduler() -> dict:
+    """Public entry after enqueue/retry: fill every free dual-lane slot.
+
+    Submits used to call ``run_try_job(starter)`` only — that left the media
+    lane idle until the content job finished. Always kick the scheduler instead.
+    """
+    schedule_next_try_job()
+    return try_status()
+
+
+def notify_artifact_ready(work_dir: Path | str, *, artifact: str = ARTIFACT_SOURCE_SRT) -> None:
+    """Called when a pack artifact appears mid-job (e.g. source.srt after ASR)."""
+    _ = (work_dir, artifact)
+    schedule_next_try_job()
 
 
 def _job_meta_dict(job) -> dict:
@@ -143,21 +175,101 @@ def _job_meta_dict(job) -> dict:
         return {}
 
 
+def _pack_has_source_srt(platform: str, video_id: str) -> bool:
+    """True when a *detected* source-language SRT exists.
+
+    Without ``sync_meta`` / notes source_lang, only accept literal
+    ``source``/``src``/``auto`` stems — never treat leftover ``en.srt`` /
+    ``zh.srt`` alone as proof that ASR already ran (that skipped fetch/asr).
+    """
+    work = _work_dir(platform, video_id)
+    if not work.is_dir():
+        return False
+    stems: set[str] = {"source", "src", "auto"}
+    detected = ""
+    try:
+        sync = work / "media" / "sync_meta.json"
+        if sync.is_file():
+            meta = json.loads(sync.read_text(encoding="utf-8-sig"))
+            for key in ("source_lang", "detected_lang", "lang"):
+                raw = str(meta.get(key) or "").strip()
+                if raw:
+                    detected = raw
+                    break
+    except Exception:
+        pass
+    if not detected:
+        try:
+            from pipeline import load_notes_summary
+
+            for probe in ("zh", "ja", "en", "ko"):
+                summary = load_notes_summary(work, "full_16k", probe)
+                if summary and summary.get("source_lang"):
+                    detected = str(summary["source_lang"]).strip()
+                    break
+        except Exception:
+            pass
+    if detected:
+        stems.add(detected)
+        try:
+            from langs import file_tag
+
+            stems.add(file_tag(detected))
+        except Exception:
+            pass
+    candidates: list[Path] = []
+    for stem in stems:
+        if not stem:
+            continue
+        candidates.append(work / "subs" / f"{stem}.srt")
+        candidates.append(work / f"full_16k_{stem}.srt")
+        candidates.append(work / f"full_16k_{stem}_fixed.srt")
+    for p in candidates:
+        try:
+            if p.is_file() and p.stat().st_size > 32:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _apply_cancel(queue: QueueDB, job_id: int, *, reason: str = "用户已取消") -> None:
+    """Discard sticky cancel flag and seal the job/steps (idempotent)."""
+    _cancel_requested.discard(int(job_id))
+    job = queue.get_job(int(job_id))
+    st = str(job["status"] or "") if job else ""
+    if st in ("pending", "processing", "partial"):
+        queue.cancel_job(int(job_id), reason=reason)
+    else:
+        queue.seal_cancelled_steps(int(job_id), reason=reason)
+
+
 def _deps_satisfied(queue: QueueDB, job) -> bool:
-    """REQ-A03: do not run a WF until its depends_on workflows are done."""
+    """REQ-A03: workflow deps + optional artifact gates (e.g. source_srt)."""
     meta = _job_meta_dict(job)
-    deps = meta.get("depends_on") or []
-    if not isinstance(deps, list) or not deps:
-        return True
     platform = job["platform"]
     video_id = job["video_id"]
-    for dep in deps:
-        name = str(dep or "").strip()
-        if not name:
-            continue
-        row = queue.get_job_by_workflow(platform, video_id, name)
-        if row is None or row["status"] not in ("done", "published"):
-            return False
+    deps = meta.get("depends_on") or []
+    if isinstance(deps, list):
+        for dep in deps:
+            name = str(dep or "").strip()
+            if not name:
+                continue
+            row = queue.get_job_by_workflow(platform, video_id, name)
+            # partial = usable artifacts exist; dependents may proceed.
+            if row is None or row["status"] not in ("done", "published", "partial"):
+                return False
+    arts = meta.get("depends_on_artifacts") or []
+    if isinstance(arts, list):
+        for art in arts:
+            key = str(art or "").strip()
+            if not key:
+                continue
+            if key == ARTIFACT_SOURCE_SRT:
+                if not _pack_has_source_srt(platform, video_id):
+                    return False
+            else:
+                return False
     return True
 
 
@@ -189,9 +301,19 @@ def _cascade_fail_dependents(
         for row in rows:
             meta = _job_meta_dict(row)
             deps = meta.get("depends_on") or []
-            if not isinstance(deps, list):
-                continue
-            if any(str(d or "").strip() in failed_wfs for d in deps):
+            hit = isinstance(deps, list) and any(
+                str(d or "").strip() in failed_wfs for d in deps
+            )
+            # Notes waiting on source_srt must fail if translate died before SRT.
+            if not hit and "translate" in failed_wfs:
+                arts = meta.get("depends_on_artifacts") or []
+                if (
+                    isinstance(arts, list)
+                    and ARTIFACT_SOURCE_SRT in [str(a or "").strip() for a in arts]
+                    and not _pack_has_source_srt(platform, video_id)
+                ):
+                    hit = True
+            if hit:
                 newly.append(int(row["id"]))
         if not newly:
             break
@@ -715,12 +837,110 @@ WORK_ROOT = ROOT / "downloads" / "batch"
 SITE_PUBLIC = ROOT.parent / "transform" / "public"
 SITE_FRAMES = SITE_PUBLIC / "frames"
 
-_try_lock = threading.Lock()
-_busy = False
 _queue_paused = False
 _cancel_requested: set[int] = set()
-_active_try_job_id: int | None = None
 _STALE_SEC = 300
+
+# Dual-lane scheduler: content (translate/notes/frames) ∥ media (dehardsub…).
+# VITUAL_MAX_ACTIVE_JOBS=1 restores legacy single-flight behaviour.
+_run_lock = threading.Lock()
+_active_jobs: dict[str, list[int]] = {LANE_CONTENT: [], LANE_MEDIA: []}
+_export_lock = threading.Lock()
+
+
+def _max_active_total() -> int:
+    import os
+
+    try:
+        return max(1, int(os.environ.get("VITUAL_MAX_ACTIVE_JOBS", "3")))
+    except (TypeError, ValueError):
+        return 3
+
+
+def _lane_cap(lane: str) -> int:
+    import os
+
+    if _max_active_total() <= 1:
+        return 1
+    key = (
+        "VITUAL_CONTENT_LANE_CAP"
+        if lane == LANE_CONTENT
+        else "VITUAL_MEDIA_LANE_CAP"
+    )
+    default = "2" if lane == LANE_CONTENT else "1"
+    try:
+        return max(1, int(os.environ.get(key, default)))
+    except (TypeError, ValueError):
+        return 2 if lane == LANE_CONTENT else 1
+
+
+def _active_job_count() -> int:
+    with _run_lock:
+        return sum(len(v) for v in _active_jobs.values())
+
+
+def _busy_flag() -> bool:
+    return _active_job_count() > 0
+
+
+def _primary_active_job_id() -> int | None:
+    with _run_lock:
+        for lane in (LANE_CONTENT, LANE_MEDIA):
+            if _active_jobs[lane]:
+                return int(_active_jobs[lane][0])
+    return None
+
+
+def _active_by_lane_snapshot() -> dict[str, list[int]]:
+    with _run_lock:
+        return {k: list(v) for k, v in _active_jobs.items()}
+
+
+def _lane_for_job(job) -> str:
+    meta = _job_meta_dict(job)
+    lane = str(meta.get("lane") or "").strip()
+    if lane in (LANE_CONTENT, LANE_MEDIA):
+        return lane
+    return lane_for_workflow(_job_workflow(job))
+
+
+def _try_acquire_slot(lane: str, job_id: int) -> bool:
+    """Reserve a lane slot. Returns True only when *this* call appended the id.
+
+    A second wake for the same job_id must get False — otherwise two workers
+    both think they own the slot and the loser's ``finally`` releases the
+    winner mid-``process_job``.
+    """
+    with _run_lock:
+        if int(job_id) in _active_jobs[lane]:
+            return False
+        total = sum(len(v) for v in _active_jobs.values())
+        if _max_active_total() <= 1:
+            if total >= 1:
+                return False
+        else:
+            if len(_active_jobs[lane]) >= _lane_cap(lane):
+                return False
+            if total >= _max_active_total():
+                return False
+        _active_jobs[lane].append(int(job_id))
+        return True
+
+
+def _release_slot(lane: str, job_id: int) -> None:
+    with _run_lock:
+        try:
+            _active_jobs[lane].remove(int(job_id))
+        except ValueError:
+            pass
+
+
+def _is_active_job(job_id: int | None) -> bool:
+    if job_id is None:
+        return False
+    jid = int(job_id)
+    with _run_lock:
+        return any(jid in ids for ids in _active_jobs.values())
 
 
 def _work_dir(platform: str, video_id: str) -> Path:
@@ -908,15 +1128,37 @@ def infer_try_progress(
             "updated_sec_ago": int(now - latest) if latest else None,
         }
     if status == "pending":
-        if _busy and job_id is not None and _active_try_job_id is not None and job_id != _active_try_job_id:
-            return {
-                "percent": 0,
-                "stage": "queued",
-                "detail": None,
-                "active": False,
-                "stale": False,
-                "updated_sec_ago": updated_sec_ago,
-            }
+        # Prefer schedule-aware queued hint only when this job's lane is full
+        # or deps block it — not merely because the other lane is busy.
+        if job_id is not None and not _is_active_job(job_id):
+            try:
+                q = QueueDB()
+                try:
+                    row = q.get_job(int(job_id))
+                    if row is not None:
+                        hint = _schedule_hint(q, row)
+                        if hint.get("waiting_for_depends_on") or hint.get("lane_full"):
+                            detail = hint.get("blocked_on")
+                            return {
+                                "percent": 0,
+                                "stage": "queued",
+                                "detail": detail,
+                                "active": False,
+                                "stale": False,
+                                "updated_sec_ago": updated_sec_ago,
+                            }
+                finally:
+                    q.close()
+            except Exception:
+                if _busy_flag():
+                    return {
+                        "percent": 0,
+                        "stage": "queued",
+                        "detail": None,
+                        "active": False,
+                        "stale": False,
+                        "updated_sec_ago": updated_sec_ago,
+                    }
         media = work / "media"
         src_mp4 = media / "source.mp4"
         has_activity = latest is not None and (now - latest) < _STALE_SEC
@@ -1050,10 +1292,13 @@ def infer_try_progress(
 
 
 def try_status() -> dict:
+    by_lane = _active_by_lane_snapshot()
     return {
-        "busy": _busy,
+        "busy": _busy_flag(),
         "paused": _queue_paused,
-        "active_job_id": _active_try_job_id,
+        "active_job_id": _primary_active_job_id(),
+        "active_job_ids": by_lane,
+        "max_active_jobs": _max_active_total(),
     }
 
 
@@ -1071,8 +1316,16 @@ def resume_try_queue() -> dict:
 
 
 def cancel_try_job(job_id: int) -> dict:
-    """Cancel a pending job, or request interrupt on the active worker."""
+    """Cancel a try job and its unfinished pack siblings.
+
+    Dual-lane packs leave several pending WFs; cancelling only the clicked
+    row used to orphan notes/media forever. Cancel every pending/processing
+    sibling for the same (platform, video_id), request interrupt on any that
+    are running, then kick the scheduler so other packs can fill free slots.
+    """
     queue = QueueDB()
+    cancelled_ids: list[int] = []
+    cancelling = False
     try:
         job = queue.get_job(job_id)
         if job is None:
@@ -1080,27 +1333,52 @@ def cancel_try_job(job_id: int) -> dict:
         st = str(job["status"] or "")
         if st in ("done", "published", "cancelled"):
             return {"ok": False, "error": f"job is {st}", "job_id": job_id}
-        if st == "pending":
-            if not queue.cancel_job(job_id, reason="用户取消"):
-                return {"ok": False, "error": "could not cancel", "job_id": job_id}
-            return {"ok": True, **job_snapshot(job_id)}
-        if st == "processing":
-            _cancel_requested.add(job_id)
-            queue.cancel_job(job_id, reason="用户已取消")
-            snap = job_snapshot(job_id)
+
+        platform = str(job["platform"] or "")
+        video_id = str(job["video_id"] or "")
+        siblings = queue.list_video_jobs(platform, video_id) if platform and video_id else [job]
+        for row in siblings:
+            sid = int(row["id"])
+            sst = str(row["status"] or "")
+            if sst in ("done", "published", "cancelled", "failed", "dead"):
+                # Allow explicit cancel of a failed/dead primary row.
+                if sid == job_id and sst in ("failed", "dead"):
+                    if queue.cancel_job(sid, reason="用户取消"):
+                        cancelled_ids.append(sid)
+                continue
+            if sst == "processing":
+                _cancel_requested.add(sid)
+                cancelling = True
+            if queue.cancel_job(sid, reason="用户取消" if sst == "pending" else "用户已取消"):
+                cancelled_ids.append(sid)
+
+        if not cancelled_ids:
+            return {"ok": False, "error": "could not cancel", "job_id": job_id}
+
+        snap = job_snapshot(job_id)
+        snap["ok"] = True
+        snap["cancelled_job_ids"] = cancelled_ids
+        if cancelling:
             snap["cancelling"] = True
-            return {"ok": True, **snap}
-        if st in ("failed", "dead"):
-            if not queue.cancel_job(job_id, reason="用户取消"):
-                return {"ok": False, "error": "could not cancel", "job_id": job_id}
-            return {"ok": True, **job_snapshot(job_id)}
-        return {"ok": False, "error": f"unsupported status {st}", "job_id": job_id}
+        return snap
     finally:
         queue.close()
+        # Free dual-lane slots for other packs.
+        kick_try_scheduler()
 
 
 def retry_try_job(job_id: int) -> dict:
-    """Re-queue a failed/cancelled try job and start when idle."""
+    """Re-queue a failed/cancelled try job and start when idle.
+
+    Pack cancel fans out to siblings; retry mirrors that for cancelled/failed
+    siblings on the same (platform, video_id) so notes/media are not orphaned.
+    """
+    if _is_active_job(int(job_id)):
+        return {
+            "ok": False,
+            "error": "job still holds a lane slot — wait for worker exit",
+            "job_id": job_id,
+        }
     queue = QueueDB()
     try:
         job = queue.get_job(job_id)
@@ -1111,18 +1389,77 @@ def retry_try_job(job_id: int) -> dict:
             return {"ok": False, "error": "job is running", "job_id": job_id}
         if st in ("done", "published"):
             return {"ok": False, "error": f"job is {st}", "job_id": job_id}
-        if not queue.requeue_job(job_id):
-            return {"ok": False, "error": "could not requeue", "job_id": job_id}
-        _cancel_requested.discard(job_id)
+
+        platform = str(job["platform"] or "")
+        video_id = str(job["video_id"] or "")
+        siblings = (
+            queue.list_video_jobs(platform, video_id) if platform and video_id else [job]
+        )
+        # Refuse partial pack reopen while any terminal sibling still holds a
+        # lane — otherwise dependents become pending forever behind cancelled.
+        winding = [
+            int(r["id"])
+            for r in siblings
+            if str(r["status"] or "") in ("failed", "dead", "cancelled", "partial")
+            and _is_active_job(int(r["id"]))
+        ]
+        if winding:
+            return {
+                "ok": False,
+                "error": "pack sibling still winding down — wait for worker exit",
+                "job_id": job_id,
+                "active_job_ids": winding,
+            }
+        requeued_ids: list[int] = []
+        for row in siblings:
+            sid = int(row["id"])
+            sst = str(row["status"] or "")
+            if sst not in ("failed", "dead", "cancelled", "partial"):
+                continue
+            if not queue.requeue_job(sid):
+                continue
+            _cancel_requested.discard(sid)
+            requeued_ids.append(sid)
+            sjob = queue.get_job(sid) or row
+            meta = _job_meta_dict(sjob)
+            stages = str(meta.get("stages") or "")
+            if "asr" in {p.strip() for p in stages.split(",") if p.strip()}:
+                queue.set_meta(sid, {"depends_on_artifacts": []})
+
+        if int(job_id) not in requeued_ids:
+            if queue.requeue_job(job_id):
+                _cancel_requested.discard(int(job_id))
+                requeued_ids.append(int(job_id))
+                meta = _job_meta_dict(queue.get_job(job_id) or job)
+                stages = str(meta.get("stages") or "")
+                if "asr" in {p.strip() for p in stages.split(",") if p.strip()}:
+                    queue.set_meta(int(job_id), {"depends_on_artifacts": []})
+            elif not requeued_ids:
+                return {"ok": False, "error": "could not requeue", "job_id": job_id}
+
+        job = queue.get_job(job_id) or job
+        blocked = not _deps_satisfied(queue, job)
+        snap = job_snapshot(job_id)
+        snap["ok"] = True
+        snap["requeued_job_ids"] = requeued_ids
+        if blocked:
+            snap["waiting_for_depends_on"] = True
+            snap["depends_on"] = list(_job_meta_dict(job).get("depends_on") or [])
+            snap["depends_on_artifacts"] = list(
+                _job_meta_dict(job).get("depends_on_artifacts") or []
+            )
+        return snap
     finally:
         queue.close()
-    return {"ok": True, **job_snapshot(job_id)}
+        kick_try_scheduler()
 
 
 def reap_stale_try_jobs(*, stale_sec: int = _STALE_SEC) -> int:
-    """Mark orphaned processing try jobs as failed after API restart or timeout."""
-    if _busy:
-        return 0
+    """Mark orphaned processing try jobs as failed after API restart or timeout.
+
+    Skip only jobs that still hold an in-process lane slot — do not bail out
+    when *another* lane is busy (legacy single-flight guard).
+    """
     queue = QueueDB()
     reaped = 0
     try:
@@ -1135,6 +1472,8 @@ def reap_stale_try_jobs(*, stale_sec: int = _STALE_SEC) -> int:
         now = time.time()
         for row in rows:
             jid = int(row["id"])
+            if _is_active_job(jid):
+                continue
             platform = row["platform"]
             video_id = row["video_id"]
             latest = _latest_mtime(_work_dir(platform, video_id))
@@ -1165,10 +1504,11 @@ def list_active_try_jobs(*, limit: int = 10) -> dict:
     reap_stale_try_jobs()
     queue = QueueDB()
     try:
+        queue.reset_running_steps_to_queued()
         rows = queue._conn.execute(
             """
             SELECT id FROM jobs
-            WHERE status IN ('pending', 'processing') AND priority='high'
+            WHERE status IN ('pending', 'processing', 'partial') AND priority='high'
             ORDER BY CASE status WHEN 'processing' THEN 0 ELSE 1 END, updated_at DESC
             LIMIT ?
             """,
@@ -1185,6 +1525,321 @@ def list_active_try_jobs(*, limit: int = 10) -> dict:
             "count": len(jobs),
             **try_status(),
         }
+    finally:
+        queue.close()
+
+
+def list_try_job_steps(job_id: int) -> dict:
+    queue = QueueDB()
+    try:
+        job = queue.get_job(int(job_id))
+        if job is None:
+            return {"ok": False, "error": "job not found", "job_id": job_id}
+        rows = queue.list_steps(int(job_id))
+        steps = []
+        for r in rows:
+            steps.append(
+                {
+                    "step_key": r["step_key"],
+                    "kind": r["kind"],
+                    "lang": r["lang"],
+                    "status": r["status"],
+                    "attempts": int(r["attempts"] or 0),
+                    "qa_status": r["qa_status"],
+                    "error": r["error"],
+                    "artifact_rel": r["artifact_rel"],
+                    "started_at": r["started_at"],
+                    "finished_at": r["finished_at"],
+                }
+            )
+        summary = queue.steps_summary(int(job_id))
+        return {
+            "ok": True,
+            "job_id": int(job_id),
+            "workflow": _job_workflow(job),
+            "job_status": job["status"],
+            "steps": steps,
+            "summary": summary,
+        }
+    finally:
+        queue.close()
+
+
+def retry_try_job_step(job_id: int, step_key: str) -> dict:
+    """Re-run one language step when the parent job is not processing."""
+    key = (step_key or "").strip()
+    if not key:
+        return {"ok": False, "error": "step_key required", "job_id": job_id}
+    if key == "notes.source" or key.startswith("notes.source"):
+        return {
+            "ok": False,
+            "error": "notes.source retry not supported — use job retry",
+            "job_id": job_id,
+        }
+    lane = LANE_CONTENT
+    # Acquire first — never leave a queued orphan step if the lane is busy.
+    if not _try_acquire_slot(lane, int(job_id)):
+        return {
+            "ok": False,
+            "error": "content lane busy — retry later",
+            "job_id": job_id,
+        }
+    queue = QueueDB()
+    prev_status = "done"
+    try:
+        job = queue.get_job(int(job_id))
+        if job is None:
+            _release_slot(lane, int(job_id))
+            return {"ok": False, "error": "job not found", "job_id": job_id}
+        st = str(job["status"] or "")
+        prev_status = st
+        if st in ("cancelled", "processing", "pending"):
+            _release_slot(lane, int(job_id))
+            return {
+                "ok": False,
+                "error": f"step retry not allowed while job is {st}",
+                "job_id": job_id,
+            }
+        if st not in ("done", "published", "partial", "failed"):
+            _release_slot(lane, int(job_id))
+            return {
+                "ok": False,
+                "error": f"step retry not allowed for status {st}",
+                "job_id": job_id,
+            }
+        step = queue.get_step(int(job_id), key)
+        if step is None:
+            _release_slot(lane, int(job_id))
+            return {"ok": False, "error": f"step not found: {key}", "job_id": job_id}
+        kind = str(step["kind"] or "")
+        if kind == "notes_source":
+            _release_slot(lane, int(job_id))
+            return {
+                "ok": False,
+                "error": "notes.source retry not supported — use job retry",
+                "job_id": job_id,
+            }
+        if not queue.requeue_step(int(job_id), key):
+            _release_slot(lane, int(job_id))
+            return {"ok": False, "error": "could not requeue step", "job_id": job_id}
+        cur = queue._conn.execute(
+            """
+            UPDATE jobs SET status='processing', last_error=NULL, updated_at=?
+            WHERE id=? AND status IN ('done', 'published', 'partial', 'failed')
+            """,
+            (time.time(), int(job_id)),
+        )
+        queue._conn.commit()
+        if cur.rowcount != 1:
+            _release_slot(lane, int(job_id))
+            return {
+                "ok": False,
+                "error": "could not claim job for step retry",
+                "job_id": job_id,
+            }
+    except Exception:
+        _release_slot(lane, int(job_id))
+        raise
+    finally:
+        queue.close()
+
+    def _runner() -> None:
+        try:
+            _execute_step_retry(int(job_id), key, prev_status=prev_status)
+        finally:
+            _release_slot(lane, int(job_id))
+            schedule_next_try_job(skip_job_id=int(job_id))
+
+    threading.Thread(target=_runner, daemon=True).start()
+    return {
+        "ok": True,
+        "job_id": int(job_id),
+        "step_key": key,
+        "status": "processing",
+        **list_try_job_steps(int(job_id)),
+    }
+
+
+def _execute_step_retry(
+    job_id: int, step_key: str, *, prev_status: str = "done"
+) -> None:
+    """Run one translate.* or notes.localize.* step with force=True."""
+    from types import SimpleNamespace
+
+    from discover.run_batch import (
+        _load_existing_glossary,
+        _load_existing_job_segments,
+        translate_summary_locale,
+    )
+    from job_layout import job_media_dir
+    from langs import coalesce_source_lang, file_tag
+    from llm.factory import configure_llm
+    from pipeline import (
+        find_ollama,
+        load_notes_summary,
+        locked_print,
+        translate_one_lang,
+        write_locale_notes,
+        write_notes_index,
+    )
+
+    configure_llm(profile="local")
+    queue = QueueDB()
+    try:
+        job = queue.get_job(job_id)
+        if job is None:
+            return
+        if str(job["status"] or "") == "cancelled" or job_id in _cancel_requested:
+            _apply_cancel(queue, job_id)
+            return
+        step = queue.get_step(job_id, step_key)
+        if step is None:
+            return
+        platform = job["platform"]
+        video_id = job["video_id"]
+        work = _work_dir(platform, video_id)
+        kind = str(step["kind"] or "")
+        lang = str(step["lang"] or "").strip()
+        if not lang and "." in step_key:
+            lang = step_key.rsplit(".", 1)[-1]
+
+        if kind == "translate" or step_key.startswith("translate."):
+            segs, out_dir, stem, src_lang, _src = _load_existing_job_segments(
+                work, source_lang="auto"
+            )
+            glossary = _load_existing_glossary(out_dir)
+            ollama = find_ollama()
+            langs_pack = job_langs(job)
+            args = SimpleNamespace(
+                ollama_model="translategemma:4b",
+                source_lang=src_lang,
+                langs=langs_pack,
+                target_lang=None,
+                force=True,
+            )
+            # Force re-translate this lang only.
+            srt = None
+            try:
+                from job_layout import locale_srt_path
+
+                srt = locale_srt_path(out_dir, lang, stem)
+                if srt.is_file():
+                    srt.unlink()
+            except OSError:
+                pass
+            translate_one_lang(
+                args,
+                ollama,
+                segs,
+                out_dir,
+                stem,
+                glossary,
+                lang,
+                force=True,
+                job_id=job_id,
+                queue=queue,
+            )
+        elif kind == "notes_localize" or step_key.startswith("notes.localize."):
+            src_lang = coalesce_source_lang("auto")
+            summary = load_notes_summary(work, "full_16k", src_lang)
+            if not summary:
+                # Try detect from existing notes.
+                summary = load_notes_summary(work, "full_16k", "zh")
+            if not summary:
+                queue.mark_step_failed(job_id, step_key, "source notes missing")
+            else:
+                ollama = find_ollama()
+                queue.mark_step_running(job_id, step_key)
+                try:
+                    proofread: dict = {}
+                    loc_data = translate_summary_locale(
+                        ollama,
+                        "translategemma:4b",
+                        summary,
+                        source_lang=str(summary.get("summary_lang") or "zh"),
+                        target_lang=lang,
+                        proofread_report=proofread,
+                    )
+                    loc_data["source_lang"] = loc_data.get("source_lang") or "zh"
+                    loc_data["summary_lang"] = lang
+                    _js, md = write_locale_notes(loc_data, work, lang)
+                    tag = file_tag(lang)
+                    qa_path = job_media_dir(work) / f"notes_qa_{tag}.json"
+                    qa_path.write_text(
+                        json.dumps(
+                            {"proofread": proofread}, ensure_ascii=False, indent=2
+                        ),
+                        encoding="utf-8",
+                    )
+                    try:
+                        art = str(Path(md).relative_to(work)).replace("\\", "/")
+                    except ValueError:
+                        art = f"notes/{tag}.md"
+                    qa_status = (
+                        "needs_review"
+                        if proofread.get("human_review", 0)
+                        or proofread.get("status")
+                        not in ("ok", "disabled", None, "")
+                        else "ok"
+                    )
+                    if proofread.get("status") in (None, "", "disabled"):
+                        qa_status = "ok"
+                    queue.mark_step_done(
+                        job_id,
+                        step_key,
+                        status="done",
+                        qa_status=qa_status,
+                        artifact_rel=art,
+                    )
+                    try:
+                        write_notes_index(work)
+                    except Exception:
+                        pass
+                    locked_print(f"[step-retry] {step_key} -> {md}")
+                except BaseException as e:
+                    queue.mark_step_failed(
+                        job_id, step_key, f"{type(e).__name__}: {e}"
+                    )
+        else:
+            queue.mark_step_failed(job_id, step_key, f"unsupported step kind: {kind}")
+
+        agg = queue.aggregate_job_from_steps(job_id)
+        if agg is None:
+            # Step-retry must not leave parent processing forever when other
+            # langs remain queued (those are not auto-started by this path).
+            rows = queue.list_steps(job_id)
+            terminal = [
+                r
+                for r in rows
+                if str(r["status"] or "")
+                not in ("queued", "running")
+            ]
+            if terminal and any(str(r["status"]) == "failed" for r in terminal):
+                bad = [
+                    str(r["step_key"])
+                    for r in terminal
+                    if str(r["status"]) == "failed"
+                ]
+                queue.mark_partial(
+                    job_id, error=f"partial: {', '.join(bad[:12])}" if bad else None
+                )
+            elif prev_status == "published":
+                queue._conn.execute(
+                    "UPDATE jobs SET status='published', updated_at=? WHERE id=? AND status='processing'",
+                    (time.time(), int(job_id)),
+                )
+                queue._conn.commit()
+            elif prev_status == "partial":
+                queue.mark_partial(job_id)
+            else:
+                queue.mark_done(job_id)
+        with _export_lock:
+            try:
+                from discover.export_site import main as export_main
+
+                export_main([])
+            except Exception as e:
+                print(f"[step-retry] export skipped ({type(e).__name__}: {e})")
     finally:
         queue.close()
 
@@ -1232,30 +1887,58 @@ def _upsert_workflow_job(
     workflow: str,
     pack_id: str,
     force_requeue: bool = False,
+    meta: dict | None = None,
 ) -> tuple[int | None, str]:
-    """Insert or reopen one independent workflow job. Returns (job_id, enqueue)."""
+    """Insert or reopen one independent workflow job. Returns (job_id, enqueue).
+
+    ``meta`` (depends_on / stages / lane) is written before the row becomes
+    claimable pending whenever we insert or requeue.
+    """
     result = queue.enqueue(
-        c, priority="high", workflow=workflow, pack_id=pack_id
+        c, priority="high", workflow=workflow, pack_id=pack_id, meta=meta
     )
     job_id = _job_id(queue, c.platform, c.video_id, workflow)
     if job_id is None:
         return None, "enqueue_failed"
     if result == "ignored":
         job = queue.get_job(job_id)
-        if job and job["status"] in ("dead", "failed", "cancelled"):
-            if queue.requeue_job(job_id):
-                result = "requeued"
+        if job and job["status"] in ("dead", "failed", "cancelled", "partial"):
+            # Cancelled/failed rows can still hold a lane while the worker
+            # winds down — never requeue or clear cancel under a live slot.
+            if _is_active_job(int(job_id)):
+                result = "already_processing"
+            else:
+                # Meta first while still terminal — then open as pending.
+                if meta:
+                    queue.set_meta(job_id, meta)
+                if queue.requeue_job(job_id):
+                    _cancel_requested.discard(int(job_id))
+                    result = "requeued"
         elif job and job["status"] == "pending":
+            if meta:
+                queue.set_meta(job_id, meta)
             result = "already_pending"
         elif job and job["status"] in ("done", "published"):
             result = "already_done"
         elif job and job["status"] == "processing":
             result = "already_processing"
     elif result == "skipped_done":
-        result = "already_done"
+        # enqueue() lumps processing with done — split them so Try does not
+        # treat an in-flight job as finished (noop / frames refresh).
+        job = queue.get_job(job_id)
+        if job and job["status"] == "processing":
+            result = "already_processing"
+        else:
+            result = "already_done"
     if force_requeue and result in ("already_done", "already_pending"):
+        if meta:
+            queue.set_meta(job_id, meta)
         if queue.requeue_job(job_id, allow_done=True):
+            _cancel_requested.discard(int(job_id))
             result = "requeued"
+    elif result == "inserted" and meta:
+        # INSERT already stored meta; merge again only if caller patches later.
+        pass
     return job_id, result
 
 
@@ -1298,11 +1981,51 @@ def _jobs_ahead(queue: QueueDB, job_id: int) -> int:
     return int(proc or 0) + int(pend or 0)
 
 
+def _schedule_hint(queue: QueueDB, job) -> dict:
+    """Explain why a pending job is not running yet (deps vs lane full)."""
+    jid = int(job["id"])
+    st = str(job["status"] or "")
+    lane = _lane_for_job(job)
+    hint: dict = {
+        "lane": lane,
+        "lane_full": False,
+        "blocked_on": None,
+        "waiting_for_depends_on": False,
+    }
+    if st != "pending":
+        return hint
+    if not _deps_satisfied(queue, job):
+        meta = _job_meta_dict(job)
+        arts = [str(a) for a in (meta.get("depends_on_artifacts") or []) if a]
+        deps = [str(d) for d in (meta.get("depends_on") or []) if d]
+        if arts:
+            hint["blocked_on"] = arts[0]
+        elif deps:
+            hint["blocked_on"] = deps[0]
+        else:
+            hint["blocked_on"] = "depends"
+        hint["waiting_for_depends_on"] = True
+        hint["depends_on"] = deps
+        hint["depends_on_artifacts"] = arts
+        return hint
+    # Deps OK — check whether this lane has free capacity.
+    with _run_lock:
+        lane_n = len(_active_jobs.get(lane) or [])
+        total = sum(len(v) for v in _active_jobs.values())
+    if _max_active_total() <= 1:
+        hint["lane_full"] = total >= 1
+    else:
+        hint["lane_full"] = lane_n >= _lane_cap(lane) or total >= _max_active_total()
+    if hint["lane_full"]:
+        hint["blocked_on"] = "lane_full"
+    return hint
+
+
 def _queue_ahead(queue: QueueDB, job_id: int, status: str) -> dict | None:
     """When pending behind a busy worker, describe the job currently running."""
-    if status != "pending" or not _busy:
+    if status != "pending" or not _busy_flag():
         return None
-    ahead_id = _active_try_job_id
+    ahead_id = _primary_active_job_id()
     if ahead_id is None or ahead_id == job_id:
         row = queue._conn.execute(
             """
@@ -1350,7 +2073,7 @@ def job_snapshot(job_id: int) -> dict:
         video_id = job["video_id"]
         article = _article_for_job(content, platform, video_id)
         st = job["status"]
-        if st == "processing" and not _busy:
+        if st == "processing" and not _is_active_job(job_id):
             latest = _latest_mtime(_work_dir(platform, video_id))
             now = time.time()
             if latest is None or (now - latest) >= _STALE_SEC:
@@ -1384,6 +2107,7 @@ def job_snapshot(job_id: int) -> dict:
                     title = str(meta["title"])
             except (TypeError, ValueError, json.JSONDecodeError, OSError):
                 pass
+        steps_summary = queue.steps_summary(int(job_id))
         out: dict = {
             "ok": True,
             "job_id": job_id,
@@ -1395,14 +2119,24 @@ def job_snapshot(job_id: int) -> dict:
             "title": title,
             "topic": job["topic_id"],
             "error": job["last_error"],
-            "busy": _busy,
+            "busy": _busy_flag(),
             "duration_sec": duration_sec,
             "frame_opts": job_frame_opts(job),
+            "lane": _lane_for_job(job),
+            "steps_summary": steps_summary,
+            "active_job_ids": _active_by_lane_snapshot(),
         }
-        pack_rows = queue.list_pack_jobs(out["pack_id"])
+        hint = _schedule_hint(queue, job)
+        out["schedule"] = hint
+        if hint.get("waiting_for_depends_on"):
+            out["waiting_for_depends_on"] = True
+            out["blocked_on"] = hint.get("blocked_on")
+        elif hint.get("lane_full"):
+            out["lane_full"] = True
+            out["blocked_on"] = "lane_full"
         pack_rows = queue.list_pack_jobs(out["pack_id"])
         derived_urls: dict[str, str] = {}
-        if article or st == "done":
+        if article or st in ("done", "partial", "published"):
             try:
                 from discover.content_db import public_slug
                 from media_ops import copy_derived_to_site, derived_public_urls
@@ -1411,7 +2145,8 @@ def job_snapshot(job_id: int) -> dict:
                 slug_early = str(
                     (article or {}).get("slug") or public_slug(video_id, title)
                 )
-                copy_derived_to_site(work_early, slug_early, SITE_PUBLIC)
+                with _export_lock:
+                    copy_derived_to_site(work_early, slug_early, SITE_PUBLIC)
                 derived_urls = derived_public_urls(slug_early, SITE_PUBLIC)
             except Exception:
                 derived_urls = {}
@@ -1421,21 +2156,22 @@ def job_snapshot(job_id: int) -> dict:
                 wf = _job_workflow(r)
                 r_status = str(r["status"])
                 r_meta = _job_meta_dict(r)
-                r_active = (
-                    _busy
-                    and _active_try_job_id is not None
-                    and int(r["id"]) == int(_active_try_job_id)
-                )
+                r_active = _is_active_job(int(r["id"]))
                 products = workflow_products(_work_dir(platform, video_id), wf)
                 download = derived_urls.get(wf)
                 pack_task_rows.append(
                     {
                         "job_id": int(r["id"]),
                         "workflow": wf,
+                        "lane": r_meta.get("lane")
+                        or lane_for_workflow(wf),
                         "status": r_status,
                         "error": r["last_error"],
                         "input_from": r_meta.get("input_from"),
                         "depends_on": r_meta.get("depends_on") or [],
+                        "depends_on_artifacts": r_meta.get("depends_on_artifacts")
+                        or [],
+                        "steps_summary": queue.steps_summary(int(r["id"])),
                         "progress": infer_workflow_progress(
                             wf,
                             r_status,
@@ -1490,7 +2226,8 @@ def job_snapshot(job_id: int) -> dict:
 
             work = _work_dir(platform, video_id)
             slug = str((article or {}).get("slug") or public_slug(video_id, title))
-            copy_derived_to_site(work, slug, SITE_PUBLIC)
+            with _export_lock:
+                copy_derived_to_site(work, slug, SITE_PUBLIC)
             derived = derived_public_urls(slug, SITE_PUBLIC)
             if derived:
                 out["derived"] = derived
@@ -1508,11 +2245,7 @@ def job_snapshot(job_id: int) -> dict:
                 wf_now,
                 st,
                 _work_dir(platform, video_id),
-                active=bool(
-                    _busy
-                    and _active_try_job_id is not None
-                    and int(job_id) == int(_active_try_job_id)
-                ),
+                active=_is_active_job(int(job_id)),
             )
         elif st in ("pending", "processing", "done", "failed", "dead", "cancelled"):
             out["progress"] = infer_try_progress(
@@ -1944,7 +2677,7 @@ def submit_url(
         has_gif or (mode in ("auto", "gif", "jpg") and want_notes)
     )
     work = _work_dir(platform, video_id)
-    has_srt = bool(list_locale_srts(work))
+    has_srt = _pack_has_source_srt(platform, video_id)
     opts_map = media_opts if isinstance(media_opts, dict) else {}
     raw_if = opts_map.get("input_from")
     if not isinstance(raw_if, dict):
@@ -1983,16 +2716,6 @@ def submit_url(
             if existing and existing["status"] in ("done", "published"):
                 # Re-run when user explicitly toggled this module again.
                 force = True
-            jid, result = _upsert_workflow_job(
-                queue, c, workflow=wf_name, pack_id=pack, force_requeue=force
-            )
-            if jid is None:
-                return {"ok": False, "error": f"enqueue failed for {wf_name}"}
-            job = queue.get_job(jid)
-            if job:
-                prev_langs = job_langs(job)
-                prev_frame_opts = job_frame_opts(job)
-                job_status = str(job["status"])
             meta_patch: dict = {
                 "frame_opts": frame_opts,
                 "langs": langs_pack,
@@ -2004,8 +2727,11 @@ def submit_url(
             }
             if spec.get("input_from") is not None:
                 meta_patch["input_from"] = spec["input_from"]
-            if spec.get("depends_on"):
-                meta_patch["depends_on"] = list(spec["depends_on"])
+            meta_patch["depends_on"] = list(spec.get("depends_on") or [])
+            meta_patch["depends_on_artifacts"] = list(
+                spec.get("depends_on_artifacts") or []
+            )
+            meta_patch["lane"] = spec.get("lane") or lane_for_workflow(wf_name)
             meta_patch.update(
                 _media_workflow_fields(
                     want_translate=want_translate,
@@ -2026,8 +2752,46 @@ def submit_url(
             meta_patch["stages"] = spec["stages"]
             if spec.get("input_from") is not None:
                 meta_patch["input_from"] = spec["input_from"]
-            if spec.get("depends_on"):
-                meta_patch["depends_on"] = list(spec["depends_on"])
+            meta_patch["depends_on"] = list(spec.get("depends_on") or [])
+            meta_patch["depends_on_artifacts"] = list(
+                spec.get("depends_on_artifacts") or []
+            )
+            meta_patch["lane"] = spec.get("lane") or lane_for_workflow(wf_name)
+            jid, result = _upsert_workflow_job(
+                queue,
+                c,
+                workflow=wf_name,
+                pack_id=pack,
+                force_requeue=force,
+                meta=meta_patch,
+            )
+            if jid is None:
+                return {"ok": False, "error": f"enqueue failed for {wf_name}"}
+            job = queue.get_job(jid)
+            if job:
+                prev_langs = job_langs(job)
+                prev_frame_opts = job_frame_opts(job)
+                job_status = str(job["status"])
+            if result == "already_processing":
+                # Do not mutate meta under a live worker.
+                task_results.append(
+                    {
+                        "job_id": jid,
+                        "workflow": wf_name,
+                        "stages": spec["stages"],
+                        "enqueue": result,
+                        "input_from": spec.get("input_from"),
+                        "depends_on": list(spec.get("depends_on") or []),
+                        "depends_on_artifacts": list(
+                            spec.get("depends_on_artifacts") or []
+                        ),
+                        "lane": spec.get("lane") or lane_for_workflow(wf_name),
+                    }
+                )
+                # Prefer a newly inserted sibling as starter — never sticky-409
+                # the whole pack just because translate is already running.
+                continue
+            # Refresh meta after upsert (covers already_pending / force paths).
             queue.set_meta(jid, meta_patch)
             task_results.append(
                 {
@@ -2037,6 +2801,8 @@ def submit_url(
                     "enqueue": result,
                     "input_from": spec.get("input_from"),
                     "depends_on": list(spec.get("depends_on") or []),
+                    "depends_on_artifacts": list(spec.get("depends_on_artifacts") or []),
+                    "lane": meta_patch["lane"],
                 }
             )
             if starter is None and result in (
@@ -2045,16 +2811,30 @@ def submit_url(
                 "already_pending",
             ):
                 starter = jid
-        if starter is None and task_results:
-            starter = int(task_results[0]["job_id"])
-        primary = next(
-            (t for t in task_results if t["job_id"] == starter),
-            task_results[0] if task_results else None,
+        runnable = next(
+            (
+                t
+                for t in task_results
+                if t.get("enqueue") in ("inserted", "requeued", "already_pending")
+            ),
+            None,
         )
+        if runnable is not None:
+            starter = int(runnable["job_id"])
+            enqueue_status = str(runnable.get("enqueue") or "inserted")
+        else:
+            if starter is None and task_results:
+                starter = int(task_results[0]["job_id"])
+            enqueue_status = (
+                "already_processing"
+                if task_results
+                and all(t.get("enqueue") == "already_processing" for t in task_results)
+                else (task_results[0].get("enqueue") if task_results else "inserted")
+            )
         return {
             "ok": True,
             "job_id": starter,
-            "enqueue": (primary or {}).get("enqueue", "inserted"),
+            "enqueue": enqueue_status,
             "platform": platform,
             "video_id": video_id,
             "pack_id": pack,
@@ -2204,13 +2984,6 @@ def submit_upload(
         task_results: list[dict] = []
         starter: int | None = None
         for spec in tasks_spec:
-            jid, result = _upsert_workflow_job(
-                queue, c, workflow=spec["workflow"], pack_id=pack
-            )
-            if jid is None:
-                return {"ok": False, "error": f"enqueue failed for {spec['workflow']}"}
-            if wav:
-                queue.set_source_wav(jid, str(wav))
             meta_patch = {
                 "frame_opts": frame_opts,
                 "langs": langs_pack,
@@ -2222,8 +2995,11 @@ def submit_upload(
             }
             if spec.get("input_from") is not None:
                 meta_patch["input_from"] = spec["input_from"]
-            if spec.get("depends_on"):
-                meta_patch["depends_on"] = list(spec["depends_on"])
+            meta_patch["depends_on"] = list(spec.get("depends_on") or [])
+            meta_patch["depends_on_artifacts"] = list(
+                spec.get("depends_on_artifacts") or []
+            )
+            meta_patch["lane"] = spec.get("lane") or lane_for_workflow(spec["workflow"])
             meta_patch.update(
                 _media_workflow_fields(
                     want_translate=want_translate,
@@ -2243,8 +3019,22 @@ def submit_upload(
             meta_patch["stages"] = spec["stages"]
             if spec.get("input_from") is not None:
                 meta_patch["input_from"] = spec["input_from"]
-            if spec.get("depends_on"):
-                meta_patch["depends_on"] = list(spec["depends_on"])
+            meta_patch["depends_on"] = list(spec.get("depends_on") or [])
+            meta_patch["depends_on_artifacts"] = list(
+                spec.get("depends_on_artifacts") or []
+            )
+            meta_patch["lane"] = spec.get("lane") or lane_for_workflow(spec["workflow"])
+            jid, result = _upsert_workflow_job(
+                queue,
+                c,
+                workflow=spec["workflow"],
+                pack_id=pack,
+                meta=meta_patch,
+            )
+            if jid is None:
+                return {"ok": False, "error": f"enqueue failed for {spec['workflow']}"}
+            if wav:
+                queue.set_source_wav(jid, str(wav))
             queue.set_meta(jid, meta_patch)
             task_results.append(
                 {
@@ -2254,6 +3044,8 @@ def submit_upload(
                     "enqueue": result,
                     "input_from": spec.get("input_from"),
                     "depends_on": list(spec.get("depends_on") or []),
+                    "depends_on_artifacts": list(spec.get("depends_on_artifacts") or []),
+                    "lane": meta_patch["lane"],
                 }
             )
             if starter is None and result in (
@@ -2371,13 +3163,27 @@ def submit_uploads(
 
 def refresh_try_frames(job_id: int, *, stages: str | None = None) -> dict:
     """Re-cut GIF/MP4 on an already-done job (no ASR). Delegates to batch media-only."""
-    global _busy, _active_try_job_id
-    if not _try_lock.acquire(blocking=False):
-        return {"ok": False, "error": "another try job is running"}
-    _busy = True
-    _active_try_job_id = job_id
+    prev_status = "done"
+    queue_probe = QueueDB()
+    try:
+        job_probe = queue_probe.get_job(int(job_id))
+        if job_probe is None:
+            return {"ok": False, "error": "job not found"}
+        st = str(job_probe["status"] or "")
+        prev_status = st
+        if st not in ("done", "published", "partial"):
+            return {
+                "ok": False,
+                "error": f"refresh only for finished jobs (got {st})",
+            }
+        lane = _lane_for_job(job_probe)
+    finally:
+        queue_probe.close()
+    if not _try_acquire_slot(lane, job_id):
+        return {"ok": False, "error": "lane slot busy — retry later"}
     try:
         from discover.run_batch import (
+            JobCancelled,
             _process_media_only,
             resolve_media_refresh_stages,
         )
@@ -2399,7 +3205,10 @@ def refresh_try_frames(job_id: int, *, stages: str | None = None) -> dict:
             )
 
             queue._conn.execute(
-                "UPDATE jobs SET status='processing', updated_at=? WHERE id=?",
+                """
+                UPDATE jobs SET status='processing', updated_at=?
+                WHERE id=? AND status IN ('done', 'published', 'partial')
+                """,
                 (time.time(), job_id),
             )
             queue._conn.commit()
@@ -2407,46 +3216,93 @@ def refresh_try_frames(job_id: int, *, stages: str | None = None) -> dict:
             if "frames" in enabled:
                 clear_keypoint_images(work_dir)
 
-            _process_media_only(
-                job,
-                queue=queue,
-                content=content,
-                work_dir=work_dir,
-                enabled=enabled,
-                frame_mode=opts.get("frames"),
-                gif_duration=opts.get("gif_sec"),
-                frame_clips=list(opts.get("clips") or []),
-            )
-            export_main([])
+            try:
+                _process_media_only(
+                    job,
+                    queue=queue,
+                    content=content,
+                    work_dir=work_dir,
+                    enabled=enabled,
+                    frame_mode=opts.get("frames"),
+                    gif_duration=opts.get("gif_sec"),
+                    frame_clips=list(opts.get("clips") or []),
+                    should_cancel=lambda: int(job_id) in _cancel_requested,
+                )
+            except JobCancelled:
+                _apply_cancel(queue, int(job_id))
+                return job_snapshot(job_id)
+            if int(job_id) in _cancel_requested:
+                _apply_cancel(queue, int(job_id))
+                return job_snapshot(job_id)
+            with _export_lock:
+                export_main([])
             snap = job_snapshot(job_id)
             snap["stages"] = sorted(enabled)
             snap["clips_only"] = enabled == frozenset({"clips"})
             return snap
         except Exception as e:
+            # Never demote a finished job to failed on a refresh glitch.
+            # Never revive a cancelled row back to published/done.
             try:
-                queue.mark_failed(job_id, str(e)[:2000])
+                cur = queue.get_job(int(job_id))
+                if cur and str(cur["status"] or "") == "cancelled":
+                    return {"ok": False, "error": "cancelled", "job_id": job_id}
+                if int(job_id) in _cancel_requested:
+                    _apply_cancel(queue, int(job_id))
+                    return {"ok": False, "error": "cancelled", "job_id": job_id}
+                if prev_status == "partial":
+                    queue.mark_partial(job_id, error=str(e)[:2000])
+                elif prev_status == "published":
+                    queue._conn.execute(
+                        """
+                        UPDATE jobs SET status='published', last_error=?, updated_at=?
+                        WHERE id=? AND status NOT IN ('cancelled')
+                        """,
+                        (str(e)[:2000], time.time(), int(job_id)),
+                    )
+                    queue._conn.commit()
+                else:
+                    queue.mark_done(job_id)
+                    queue._conn.execute(
+                        """
+                        UPDATE jobs SET last_error=?, updated_at=?
+                        WHERE id=? AND status NOT IN ('cancelled')
+                        """,
+                        (f"refresh failed: {str(e)[:500]}", time.time(), int(job_id)),
+                    )
+                    queue._conn.commit()
             except Exception:
                 pass
-            raise
+            return {"ok": False, "error": str(e)[:2000], "job_id": job_id}
         finally:
             queue.close()
             content.close()
     finally:
-        _busy = False
-        _active_try_job_id = None
-        _try_lock.release()
+        _release_slot(lane, job_id)
         schedule_next_try_job(skip_job_id=job_id)
 
 
-def run_try_job(job_id: int) -> dict:
+def run_try_job(
+    job_id: int,
+    *,
+    _slot_held: bool = False,
+    _slot_lane: str | None = None,
+) -> dict:
     """Background: process one queued job, export site."""
-    global _busy, _active_try_job_id
-    if not _try_lock.acquire(blocking=False):
-        return {"ok": False, "error": "another try job is running"}
-    _busy = True
-    _active_try_job_id = job_id
+    queue_probe = QueueDB()
     try:
-        from discover.run_batch import process_job
+        job_probe = queue_probe.get_job(job_id)
+        lane = _slot_lane or (
+            _lane_for_job(job_probe) if job_probe is not None else LANE_CONTENT
+        )
+    finally:
+        queue_probe.close()
+
+    if not _slot_held:
+        if not _try_acquire_slot(lane, job_id):
+            return {"ok": False, "error": "another try job is running"}
+    try:
+        from discover.run_batch import JobCancelled, process_job
         from llm.factory import configure_llm
 
         configure_llm(profile="local")
@@ -2457,7 +3313,8 @@ def run_try_job(job_id: int) -> dict:
             if job is None:
                 return {"ok": False, "error": "job not found"}
             if job["status"] == "done":
-                export_main([])
+                with _export_lock:
+                    export_main([])
                 return job_snapshot(job_id)
             if job["status"] in ("dead", "failed"):
                 return job_snapshot(job_id)
@@ -2468,6 +3325,9 @@ def run_try_job(job_id: int) -> dict:
                     "waiting_for_depends_on": True,
                     "job_id": job_id,
                     "depends_on": list(_job_meta_dict(job).get("depends_on") or []),
+                    "depends_on_artifacts": list(
+                        _job_meta_dict(job).get("depends_on_artifacts") or []
+                    ),
                 }
 
             claimed = queue.claim_next(max_attempts=5, job_id=job_id)
@@ -2507,13 +3367,20 @@ def run_try_job(job_id: int) -> dict:
             if platform in ("bilibili", "youtube", "hls"):
                 work_dir = WORK_ROOT / f"{platform}_{video_id}"
                 try:
+                    if job_id in _cancel_requested:
+                        _apply_cancel(queue, job_id)
+                        return job_snapshot(job_id)
                     ensure_source_video(url, work_dir, cookies_from_browser=None)
                 except Exception as e:
                     print(f"[try] video prefetch skip ({e})")
+                # Cancel during long prefetch must not leave a sticky flag.
+                if job_id in _cancel_requested:
+                    _apply_cancel(queue, job_id)
+                    return job_snapshot(job_id)
 
             try:
                 if job_id in _cancel_requested:
-                    queue.cancel_job(job_id, reason="用户已取消")
+                    _apply_cancel(queue, job_id)
                     return job_snapshot(job_id)
                 print(
                     f"[try] workflow={workflow} langs={langs_pack} stages={stages} "
@@ -2543,11 +3410,14 @@ def run_try_job(job_id: int) -> dict:
                     gif_duration=frame_opts["gif_sec"],
                     frame_clips=frame_opts.get("clips") or None,
                     stages=stages,
+                    should_cancel=lambda: job_id in _cancel_requested,
                 )
+            except JobCancelled:
+                _apply_cancel(queue, job_id)
+                return job_snapshot(job_id)
             except Exception as e:
                 if job_id in _cancel_requested:
-                    _cancel_requested.discard(job_id)
-                    queue.cancel_job(job_id, reason="用户已取消")
+                    _apply_cancel(queue, job_id)
                     return job_snapshot(job_id)
                 queue.mark_failed(job_id, str(e)[:2000])
                 _cascade_fail_dependents(
@@ -2560,26 +3430,17 @@ def run_try_job(job_id: int) -> dict:
                 raise
 
             if job_id in _cancel_requested:
-                _cancel_requested.discard(job_id)
-                now = time.time()
-                queue._conn.execute(
-                    """
-                    UPDATE jobs
-                    SET status='cancelled', last_error=?, updated_at=?
-                    WHERE id=?
-                    """,
-                    ("用户已取消", now, job_id),
-                )
-                queue._conn.commit()
+                _apply_cancel(queue, job_id)
                 return job_snapshot(job_id)
 
-            export_main([])
+            with _export_lock:
+                export_main([])
             return job_snapshot(job_id)
         finally:
+            # Always drop sticky cancel so a later requeue of this id is clean.
+            _cancel_requested.discard(int(job_id))
             queue.close()
             content.close()
     finally:
-        _busy = False
-        _active_try_job_id = None
-        _try_lock.release()
+        _release_slot(lane, job_id)
         schedule_next_try_job(skip_job_id=job_id)

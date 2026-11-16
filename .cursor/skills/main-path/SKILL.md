@@ -7,7 +7,7 @@ description: Orchestrates the full inbox → batch → export-site → Next.js b
 
 > 产品总需求：`trans/工具需求.md`。  
 > **本文只编排已实现验收**：WF-01 翻译 + WF-02 笔记 + 导出/SEO 旁路（N0–N8）。  
-> 不是「全部工作流」总编排；增强/压缩/拼接/二创/发布另立 skill。
+> 不是「全部工作流」总编排；增强/压缩/拼接/竖屏包装/发布另立 skill。AI Remake（WF-11）未实现，见 `trans/AI二创设计.md`。
 
 Stage manuals：`daily-discover`、`batch-local-first`、`sync-subs`。  
 全链路最佳实践：`subtitle_pipeline/PIPELINE_BEST_PRACTICES.md`。  
@@ -82,7 +82,7 @@ Optional MCP gate（API 已启时）：`yarn mcp:smoke` — 通过 `/health` + e
 - `npm run build` lists `/{locale}/topics/ai_monetize/<slug>` for the 16 locales.
 - `media/media_status.json` may show `postproc=skipped` / `remix=skipped` — that is OK for content smoke.
 
-**Remix green (optional WF-07)** — only when stages include `remix` (Try `want_remix`, or `--stages …,remix`):
+**Remix green (optional WF-07 vertical pack)** — only when stages include `remix` (API/CLI `want_remix` or `--stages …,remix`; **Try UI gated 2026-11-16**):
 
 - `media/remix/remix.mp4` + `remix.vtt` + `remix_cues.json` (`audio_clock: true`).
 - `media_status.remix=ok` (job can still be `done` if content succeeded while remix failed — check this file).

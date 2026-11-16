@@ -205,8 +205,10 @@ export function composeTryStages(opts: {
     wantRemix = false,
     wantPublish = false,
   } = opts;
+  // Match workflows.py WORKFLOW_ORDER / VIDEO_INPUT_CHAIN (serial).
   const post: string[] = [];
   if (wantDehardsub) post.push("dehardsub");
+  if (hasMedia || wantConcat) post.push("clips");
   if (wantConcat) post.push("concat");
   if (wantDeblur) post.push("deblur");
   if (wantEnhance) post.push("enhance");
@@ -223,9 +225,6 @@ export function composeTryStages(opts: {
   if (text) parts.push("asr");
   if (wantTranslate) parts.push("translate");
   if (wantNotes) parts.push("notes", "localize");
-  // Clips independent of frames (notes GIFs).
-  if (hasMedia) parts.push("clips");
-  else if (wantConcat) parts.push("clips");
   if (!wantTranslate && !wantNotes && !hasMedia && !post.length) {
     parts.push("fetch", "asr", "notes", "localize");
   }

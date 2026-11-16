@@ -51,10 +51,14 @@ def locate(bvid: str) -> tuple[Path, Path, Path]:
 
 def compare_job(video: Path, srt: Path, report_path: Path | None = None, *,
                 step: int = 2, band_top: float = 0.62,
-                drift_thr: float = 0.6) -> dict:
+                drift_thr: float = 0.6,
+                truth: Path | None = None) -> dict:
     """跑一次「原片硬字幕 vs 源 SRT」覆盖对比，写 JSON 报告并返回。
 
     缺原片/缺 SRT 时返回 ok=True + skipped 说明（不让无硬字幕的纯音频任务被门禁误杀）。
+
+    truth: 可选的真源 JSON（hardsub_layers.py 产出的 media/hardsub_truth.json）。
+        多字幕层视频用它替代粗糙 OCR 真源，避免水印/落款行被算成「缺句」。
     """
     skip = None
     if not video.is_file():
@@ -71,11 +75,22 @@ def compare_job(video: Path, srt: Path, report_path: Path | None = None, *,
 
     cues = parse_srt(srt.read_text(encoding="utf-8"))
     require_cjk = any(any("\u4e00" <= ch <= "\u9fff" for ch in (c.get("text") or "")) for c in cues)
-    intervals = extract_hardsub_intervals(
-        video, band_top=band_top, step=step, require_cjk=require_cjk
-    )
+    if truth is not None and truth.is_file():
+        data = json.loads(truth.read_text(encoding="utf-8"))
+        intervals = [
+            {"text": iv.get("text") or "", "start": float(iv.get("start") or 0),
+             "end": float(iv.get("end") or 0)}
+            for iv in (data.get("intervals") or [])
+        ]
+        source = f"truth:{truth}"
+    else:
+        intervals = extract_hardsub_intervals(
+            video, band_top=band_top, step=step, require_cjk=require_cjk
+        )
+        source = f"ocr:{video}"
     rep = compare_coverage(cues, intervals, drift_thr=drift_thr)
-    rep.update({"video": str(video), "srt": str(srt), "skipped": False})
+    rep.update({"video": str(video), "srt": str(srt), "skipped": False,
+                "truth_source": source})
     if report_path:
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(json.dumps(rep, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -113,6 +128,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--band-top", type=float, default=0.62)
     ap.add_argument("--drift-thr", type=float, default=0.6)
     ap.add_argument("--strict", action="store_true", help="缺句/漂移即返回 exit 2")
+    ap.add_argument("--truth", type=Path, default=None,
+                    help="真源 JSON（hardsub_truth.json）；多字幕层视频用它替代粗糙 OCR 真源")
     args = ap.parse_args(argv)
 
     if args.bvid:
@@ -125,7 +142,8 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("需要 --bvid 或同时给 --video 与 --srt")
 
     rep = compare_job(video, srt, report_path, step=args.step,
-                      band_top=args.band_top, drift_thr=args.drift_thr)
+                      band_top=args.band_top, drift_thr=args.drift_thr,
+                      truth=args.truth)
     if args.json:
         print(json.dumps(rep, ensure_ascii=False, indent=2))
     else:

@@ -233,320 +233,7 @@
         }
       },
       "cue_clock": "source",
-      "cues": [
-        {
-          "start": "00:00:28,720",
-          "end": "00:00:30,160",
-          "text": {
-            "ar": "من قال أن يقتلني؟",
-            "de": "Wer hat gesagt, ich soll dich töten?",
-            "en": "Who said they want to kill me?",
-            "es": "¿Quién dijo que iba a matarme?",
-            "fr": "Qui a dit qu'il voulait me tuer ?",
-            "hi": "कौन कहता है कि मुझे मारना है?",
-            "id": "Siapa bilang aku harus mati",
-            "it": "Chi ha detto che mi ucciderà?",
-            "ja": "誰が私を殺したと言うのか",
-            "ko": "누가 저를 죽이라고 말했죠?",
-            "ms": "Siapa kata nak bunuh aku",
-            "nl": "Wie zei dat hij me zou vermoorden?",
-            "pl": "Kto powiedział, że mam cię zabić?",
-            "pt": "Quem disse que queria me matar?",
-            "ru": "Кто сказал, что нужно убить меня?",
-            "th": "ใครบอกให้ฆ่าข้า",
-            "tr": "Kim beni öldürmemi söyledi?",
-            "vi": "Ai nói muốn giết ta?",
-            "zh": "是谁说要打死我的",
-            "zh-Hant": "是誰說要打死我的"
-          }
-        },
-        {
-          "start": "00:00:30,160",
-          "end": "00:00:36,110",
-          "text": {
-            "ar": "أنا مخلص لك يا سيدي",
-            "de": "Ich bin dein treuer Diener.",
-            "en": "Your servant is utterly loyal.",
-            "es": "Soy su leal sirviente",
-            "fr": "Je suis totalement loyal envers vous, mon seigneur.",
-            "hi": "सेवक आपके प्रति वफादार है",
-            "id": "Hamba setia padamu",
-            "it": "Io sono totalmente fedele a Lei",
-            "ja": "我對您忠誠至深",
-            "ko": "소인이 당신께 충성합니다",
-            "ms": "Hamba ini setia kepada tuan",
-            "nl": "Ik ben uw trouwe dienaar.",
-            "pl": "Jestem twoim lojalnym sługą.",
-            "pt": "O servo é leal a você",
-            "ru": "Я предан вашему господину.",
-            "th": "คนรับใช้ภักดีต่อท่าน",
-            "tr": "Küçük adam size son derece sadık",
-            "vi": "Tiểu nhân này trung thành với ngài",
-            "zh": "小人对您忠心耿耿",
-            "zh-Hant": "小人對您忠心耿耿"
-          }
-        },
-        {
-          "start": "00:00:36,110",
-          "end": "00:00:36,970",
-          "text": {
-            "ar": "لا شك في قلبه",
-            "de": "Ohne Zweifel",
-            "en": "No other heart.",
-            "es": "Sin dudas",
-            "fr": "Sans aucun doute",
-            "hi": "कोई संदेह नहीं",
-            "id": "Hanya ada satu hati",
-            "it": "Non ho secondi pensieri",
-            "ja": "心に疑いはない",
-            "ko": "절대로 다른 마음은 없습니다",
-            "ms": "Tiada keraguan",
-            "nl": "Geen andere intenties.",
-            "pl": "Nie mam żadnych wątpliwości.",
-            "pt": "Sem dúvidas",
-            "ru": "Никаких сомнений в моей верности.",
-            "th": "ไม่มีใจอื่นใด",
-            "tr": "Tek bir kalbim var",
-            "vi": "Không hề dao động",
-            "zh": "绝无二心",
-            "zh-Hant": "絕無二心"
-          }
-        },
-        {
-          "start": "00:00:36,970",
-          "end": "00:00:37,990",
-          "text": {
-            "ar": "مهاراتك القتالية عظيمة",
-            "de": "Die Kampfkunst des Herrn",
-            "en": "My lord's martial prowess.",
-            "es": "Sus habilidades marciales son impresionantes",
-            "fr": "Vos prouesses martiales.",
-            "hi": "आपके मार्शल आर्ट कौशल",
-            "id": "Kekuatan tempur tuannya",
-            "it": "Le tue arti marziali",
-            "ja": "大人の武功",
-            "ko": "대인의 무공",
-            "ms": "Kemahiran seni bela diri tuan",
-            "nl": "De krijgskunst van de Heer.",
-            "pl": "Sztuki walki Mistrza.",
-            "pt": "As artes marciais do senhor",
-            "ru": "Боевые искусства господина",
-            "th": "วิชาการต่อสู้ของท่าน",
-            "tr": "Büyük adamın dövüş sanatı",
-            "vi": "Võ công của đại nhân",
-            "zh": "大人的武功",
-            "zh-Hant": "大人的武功"
-          }
-        },
-        {
-          "start": "00:00:37,990",
-          "end": "00:00:38,750",
-          "text": {
-            "ar": "مهيب في كل اتجاه",
-            "de": "Du bist sehr mächtig und imposant.",
-            "en": "Resplendent and imposing.",
-            "es": "Es un guerrero formidable",
-            "fr": "Votre puissance impressionnante.",
-            "hi": "शानदार और प्रभावशाली",
-            "id": "Berwibawa di segala arah",
-            "it": "Splendida e imponente",
-            "ja": "（大人へ）　この上では、ただただ申し上げます。",
-            "ko": "압도적인 위엄",
-            "ms": "Berwibawa di mana-mana",
-            "nl": "Een machtig en indrukwekkend figuur.",
-            "pl": "Wspaniały we wszystkich kierunkach.",
-            "pt": "Imponente em todos os lados",
-            "ru": "Властность во всех направлениях",
-            "th": "สง่างามทั้งแปดทิศ",
-            "tr": "Her yönde görkemli",
-            "vi": "Uy phong khắp nơi",
-            "zh": "威风八面",
-            "zh-Hant": "威風八面"
-          }
-        },
-        {
-          "start": "00:00:38,750",
-          "end": "00:00:39,530",
-          "text": {
-            "ar": "لا يُقهر",
-            "de": "Unaufhaltsam",
-            "en": "Invincible in all battles.",
-            "es": "Su poder es inigualable",
-            "fr": "Invincible",
-            "hi": "हर जगह विजयी",
-            "id": "Tak terkalahkan",
-            "it": "Inarrestabile",
-            "ja": "（自分の恩様へ）全力を尽くします。",
-            "ko": "어디를 가든 휩쓴다",
-            "ms": "Tak terkalahkan",
-            "nl": "Onoverwinnelijk.",
-            "pl": "Nie ma przed nim żadnego przeciwnika.",
-            "pt": "Insuperável",
-            "ru": "Вы непобедимы.",
-            "th": "ไร้ผู้ต้านทาน",
-            "tr": "Yere gittiği yerde yenilmez",
-            "vi": "Đi đâu cũng không địch nổi",
-            "zh": "所向披靡",
-            "zh-Hant": "所向披靡"
-          }
-        },
-        {
-          "start": "00:00:39,530",
-          "end": "00:00:40,590",
-          "text": {
-            "ar": "مجرد تشانغ جونباو",
-            "de": "Nur Zhang Junbao",
-            "en": "Little Zhang Junbao.",
-            "es": "Solo Zhang Junbao",
-            "fr": "Seul Zhang Junbao",
-            "hi": "बस झांग जूनबाओ",
-            "id": "Hanya Zhang Junbao",
-            "it": "Un semplice Zhang Junbao",
-            "ja": "武侠ドラマ：忠実な部下が",
-            "ko": "그저 장군보일 뿐",
-            "ms": "Hanya Zhang Junbao",
-            "nl": "Gewoon Zhang Junbao.",
-            "pl": "Taki drobny Zhang Junbao.",
-            "pt": "Apenas Zhang Junbao",
-            "ru": "Просто Чжан Цзюньбао",
-            "th": "แค่จางจวินเป่า",
-            "tr": "Sadece Zhang Junbao",
-            "vi": "Chỉ là Trương Quân Bảo",
-            "zh": "区区张君宝",
-            "zh-Hant": "區區張君寶"
-          }
-        },
-        {
-          "start": "00:00:40,590",
-          "end": "00:00:41,790",
-          "text": {
-            "ar": "كيف يمكن أن يكون خصماً للسيد؟",
-            "de": "Wie kann er der Gegner des Herrn sein?",
-            "en": "How could he be my opponent?",
-            "es": "¿Cómo podría ser su oponente?",
-            "fr": "Comment puis-je être votre adversaire ?",
-            "hi": "आप कैसे मेरे मालिक के खिलाफ हो सकते हैं?",
-            "id": "Bagaimana mungkin dia lawan tuan",
-            "it": "Come può essere il tuo avversario?",
-            "ja": "どうして大人の相手になれる？",
-            "ko": "어떻게 당신의 상대가 될 수 있을까",
-            "ms": "Bagaimana dia boleh menjadi lawan tuan",
-            "nl": "Hoe kan hij de tegenstander zijn?",
-            "pl": "Jak on może być przeciwnikiem Mistrza?",
-            "pt": "Como pode ser seu oponente?",
-            "ru": "Как я могу быть против вашего господина?",
-            "th": "จะเป็นคู่ต่อสู้ของท่านได้อย่างไร",
-            "tr": "Nasıl büyük adamın rakibi olabilir?",
-            "vi": "Sao có thể là đối thủ của đại nhân?",
-            "zh": "怎会是大人的对手",
-            "zh-Hant": "怎會是大人的對手"
-          }
-        },
-        {
-          "start": "00:00:41,790",
-          "end": "00:00:43,070",
-          "text": {
-            "ar": "التابع يعجب بالسيد",
-            "de": "Ich, dein Diener, bewundere meinen Herrn.",
-            "en": "Your servant admires you greatly.",
-            "es": "La admiración del subordinado por usted",
-            "fr": "Votre humble serviteur admire profondément.",
-            "hi": "मैं आपके प्रति बहुत सम्मान करता हूँ",
-            "id": "Hamba sangat mengagumi tuan",
-            "it": "Io venero Lei",
-            "ja": "武侠ドラマ：忠実な部下が主君に敬意を払う",
-            "ko": "소인이 당신을 존경합니다",
-            "ms": "Hamba ini mengagumi tuan",
-            "nl": "Ik bewonder de Heer.",
-            "pl": "Mały człowiek podziwia Mistrza.",
-            "pt": "O servo reverencia o senhor",
-            "ru": "Ваш слуга глубоко уважает вас.",
-            "th": "คนรับใช้เคารพท่านอย่างสูง",
-            "tr": "Küçük adam büyük adama hayranlık duyar",
-            "vi": "Tiểu nhân ngưỡng mộ đại nhân",
-            "zh": "小人对大人的景仰",
-            "zh-Hant": "小人對大人的景仰"
-          }
-        },
-        {
-          "start": "00:00:43,070",
-          "end": "00:00:44,070",
-          "text": {
-            "ar": "كالأنهار المتدفقة",
-            "de": "Wie ein endloser Fluss",
-            "en": "Like the endless river.",
-            "es": "Como el agua de un río caudaloso",
-            "fr": "Comme un fleuve qui coule sans fin",
-            "hi": "जैसे नदी की धाराएँ",
-            "id": "Seperti air sungai yang mengalir deras",
-            "it": "Come le acque del fiume in piena",
-            "ja": "滔々とした江水のように",
-            "ko": "마치 흐르는 강물처럼",
-            "ms": "Seperti air sungai yang mengalir deras",
-            "nl": "Als een onstuitbare rivier.",
-            "pl": "Jak rwąca rzeka.",
-            "pt": "Como rios caudalosos",
-            "ru": "Как бурлящая река",
-            "th": "ราวกับสายน้ำที่ไหลเชี่ยว",
-            "tr": "Tıpkı akan nehir suları gibi",
-            "vi": "Như dòng sông cuồn cuộn",
-            "zh": "犹如滔滔江水",
-            "zh-Hant": "猶如滔滔江水"
-          }
-        },
-        {
-          "start": "00:00:44,070",
-          "end": "00:00:44,310",
-          "text": {
-            "ar": "متواصل بلا انقطاع",
-            "de": "Ununterbrochen",
-            "en": "Unending.",
-            "es": "Ininterrumpido",
-            "fr": "Ininterrompu",
-            "hi": "अनंत और निरंतर",
-            "id": "Tanpa henti",
-            "it": "Ininterrotto",
-            "ja": "武侠ドラマ：忠実な部下が",
-            "ko": "끊임없이 이어지네",
-            "ms": "Tidak berkesudahan",
-            "nl": "Ononderbroken.",
-            "pl": "Nieprzerwany.",
-            "pt": "Contínuo e ininterrupto",
-            "ru": "Беспрерывный",
-            "th": "ต่อเนื่องไม่ขาดสาย",
-            "tr": "Kesintisiz",
-            "vi": "Liên tục không dứt",
-            "zh": "延绵不绝",
-            "zh-Hant": "延綿不絕"
-          }
-        },
-        {
-          "start": "00:00:44,310",
-          "end": "00:00:50,620",
-          "text": {
-            "ar": "لا يُقهر في العالم",
-            "de": "Unbesiegbar unter allen",
-            "en": "Invincible in the world.",
-            "es": "Invencible en el mundo",
-            "fr": "Invincible sous le ciel",
-            "hi": "दुनिया पर विजय",
-            "id": "Tak tertandingi di dunia",
-            "it": "Invincibile nel mondo",
-            "ja": "- 武侠ドラマ：従者、主",
-            "ko": "천하무적",
-            "ms": "Tak tertanding di bawah langit",
-            "nl": "Onoverwinnelijk.",
-            "pl": "Nieskazitelny na całym świecie.",
-            "pt": "Invencível no mundo",
-            "ru": "Непобедим на земле",
-            "th": "ไม่มีใครต้านทานได้",
-            "tr": "Dünyada yenilmez",
-            "vi": "Bất bại thiên hạ",
-            "zh": "天下无敌",
-            "zh-Hant": "天下無敵"
-          }
-        }
-      ]
+      "cues": []
     },
     {
       "platform": "bilibili",
@@ -739,8 +426,8 @@
       "cue_clock": "source",
       "cues": [
         {
-          "start": "00:00:01,200",
-          "end": "00:00:02,600",
+          "start": "00:00:01,533",
+          "end": "00:00:02,800",
           "text": {
             "ar": "أنا مستخدم صيني",
             "de": "Ich bin ein chinesischer Nutzer.",
@@ -761,8 +448,8 @@
           }
         },
         {
-          "start": "00:00:02,600",
-          "end": "00:00:04,390",
+          "start": "00:00:03,667",
+          "end": "00:00:04,533",
           "text": {
             "ar": "لا يهمني",
             "de": "Das ist mir egal",
@@ -783,8 +470,8 @@
           }
         },
         {
-          "start": "00:00:04,390",
-          "end": "00:00:06,120",
+          "start": "00:00:05,067",
+          "end": "00:00:06,400",
           "text": {
             "ar": "وليس هذا فحسب",
             "de": "Und das ist noch nicht alles",
@@ -805,14 +492,14 @@
           }
         },
         {
-          "start": "00:00:06,120",
-          "end": "00:00:11,700",
+          "start": "00:00:10,067",
+          "end": "00:00:11,933",
           "text": {
             "ar": "لقد أحببت ذكاء اصطناعي آخر",
             "de": "Ich habe eine andere KI geliebt",
             "en": "I used to love another AI.",
             "es": "Una vez amé a otro IA",
-            "fr": "J'ai déjà aimé un autre IA.",
+            "fr": "J'ai déjà aimé une autre IA.",
             "hi": "मैंने एक और एआई से प्यार किया था",
             "id": "Saya pernah mencintai AI lain",
             "ja": "もう一つのAIも好きだったんだ。",
@@ -827,30 +514,30 @@
           }
         },
         {
-          "start": "00:00:11,700",
-          "end": "00:00:13,600",
+          "start": "00:00:12,467",
+          "end": "00:00:13,733",
           "text": {
             "ar": "وحتى جننت من أجله",
-            "de": "Sogar war ich verrückt nach ihr",
+            "de": "Ich war sogar verrückt nach ihr",
             "en": "I was even obsessed with him.",
-            "es": "Incluso se obsesionó con él.",
+            "es": "Incluso me obsesioné con él.",
             "fr": "J'étais même fou de lui.",
             "hi": "यहाँ तक कि मैं उसके लिए पागल हो गया था",
             "id": "Bahkan saya menjadi gila karenanya",
-            "ja": "彼はために夢中になった",
+            "ja": "彼のために夢中になった",
             "ko": "심지어 그를 위해 미쳐 날뛰기도 했지",
             "pt": "Até fiquei louco por ele",
             "ru": "Даже был одержим им",
             "th": "ถึงขนาดบ้าไปแล้ว",
             "tr": "Hatta ona deli olmuştum",
             "vi": "Thậm chí điên cuồng vì nó",
-            "zh": "甚至为他痴狂",
-            "zh-Hant": "甚至為他痴狂"
+            "zh": "甚至为她痴过",
+            "zh-Hant": "甚至為她痴過"
           }
         },
         {
-          "start": "00:00:13,600",
-          "end": "00:00:16,620",
+          "start": "00:00:15,933",
+          "end": "00:00:16,800",
           "text": {
             "ar": "لا يهمني",
             "de": "Ich kümmere mich nicht",
@@ -871,8 +558,8 @@
           }
         },
         {
-          "start": "00:00:16,620",
-          "end": "00:00:20,890",
+          "start": "00:00:19,333",
+          "end": "00:00:21,067",
           "text": {
             "ar": "أقسم أنني لن أتحدث معك بالصينية",
             "de": "Ich schwöre, ich werde nicht auf Chinesisch mit dir reden.",
@@ -893,8 +580,8 @@
           }
         },
         {
-          "start": "00:00:20,890",
-          "end": "00:00:22,800",
+          "start": "00:00:21,867",
+          "end": "00:00:25,267",
           "text": {
             "ar": "لكن لا يمكنني أن أضمن",
             "de": "Aber ich kann das nicht garantieren",
@@ -903,42 +590,42 @@
             "fr": "Mais je ne peux rien garantir.",
             "hi": "लेकिन मैं गारंटी नहीं दे सकता",
             "id": "Tapi saya tidak bisa menjamin",
-            "ja": "でも、私はアカウント停止を保証できない",
+            "ja": "でも、私は保証できない",
             "ko": "하지만 보장할 수는 없어",
             "pt": "Mas eu não posso garantir",
             "ru": "Но я не могу этого гарантировать",
             "th": "แต่ฉันไม่รับประกัน",
             "tr": "Ama garanti edemem",
             "vi": "Nhưng tôi không thể đảm bảo",
-            "zh": "但我不能保证",
+            "zh": "但我不能保证不打出全角逗号",
             "zh-Hant": "但我不能保證"
           }
         },
         {
-          "start": "00:00:22,800",
-          "end": "00:00:25,050",
+          "start": "00:00:26,000",
+          "end": "00:00:27,800",
           "text": {
             "ar": "لا أستخدم علامات الترقيم الكاملة",
-            "de": "Keine Vollbretterpunkte",
-            "en": "Don't use full-width sentence points",
-            "es": "No usar puntos completos",
-            "fr": "Ne pas utiliser de points d'arrêt complets.",
+            "de": "Keine vollbreiten Punkte",
+            "en": "Don't use full-width periods",
+            "es": "No usar puntos de ancho completo",
+            "fr": "Ne pas utiliser de points à pleine largeur.",
             "hi": "मैं पूर्ण विराम नहीं लगाऊँगा",
             "id": "Tidak menggunakan tanda baca penuh",
             "ja": "全角句点を使わない",
             "ko": "전각 마침표는 쓰지 않아",
-            "pt": "Não use ponto completo",
-            "ru": "Не используйте полные знаки препинания",
+            "pt": "Não use ponto de largura total",
+            "ru": "Не используйте полноширинные точки",
             "th": "จะไม่ใส่เครื่องหมายวรรคตอนเต็มความกว้าง",
             "tr": "Tam geniş noktalama işareti koymayacağım",
-            "vi": "Không dùng dấu câu toàn khuôn",
-            "zh": "不打出全角句号",
-            "zh-Hant": "不打出全角句號"
+            "vi": "Không dùng dấu chấm toàn phần",
+            "zh": "也不保证不被封号",
+            "zh-Hant": "不打出全角逗號"
           }
         },
         {
-          "start": "00:00:25,050",
-          "end": "00:00:27,610",
+          "start": "00:00:28,867",
+          "end": "00:00:29,933",
           "text": {
             "ar": "ولا أضمن عدم الحظر",
             "de": "Auch hier keine Garantie gegen eine Sperrung.",
@@ -947,25 +634,25 @@
             "fr": "Et je ne peux pas garantir que je ne serai pas banni",
             "hi": "और यह भी गारंटी नहीं दूँगा कि मेरा अकाउंट बैन नहीं होगा",
             "id": "Dan saya tidak bisa menjamin kamu tidak diblokir",
-            "ja": "- 中国ユーザーとAIチャットボットとの",
+            "ja": "また、アカウントを停止されないことも保証できない",
             "ko": "계정이 정지되지 않을 거라고 보장할 수도 없어",
             "pt": "Também não garante que você não será banido.",
             "ru": "И я не могу гарантировать, что вас заблокируют",
             "th": "ฉันก็ไม่รับประกันว่าจะไม่โดนแบน",
             "tr": "Hesabımın kapatılmayacağını da garanti edemem",
             "vi": "Cũng không đảm bảo không bị khóa tài khoản",
-            "zh": "也不保证不被封号",
+            "zh": "我也不在意",
             "zh-Hant": "也不保證不被封號"
           }
         },
         {
-          "start": "00:00:27,610",
-          "end": "00:00:29,750",
+          "start": "00:00:34,000",
+          "end": "00:00:35,200",
           "text": {
             "ar": "أنا لا أبالي أيضًا",
             "de": "Das ist mir auch egal",
             "en": "Me neither",
-            "es": "Yo tampoco me importo",
+            "es": "A mí tampoco me importa",
             "fr": "Je m'en fiche aussi.",
             "hi": "मुझे भी कोई फर्क नहीं पड़ता",
             "id": "Saya juga tidak peduli",
@@ -976,13 +663,13 @@
             "th": "ฉันก็ไม่สนใจ",
             "tr": "Ben de umursamıyorum",
             "vi": "Tôi cũng không quan tâm",
-            "zh": "我也不在意",
+            "zh": "你到底在意什么",
             "zh-Hant": "我也不在意"
           }
         },
         {
-          "start": "00:00:29,750",
-          "end": "00:00:34,920",
+          "start": "00:00:36,000",
+          "end": "00:00:37,467",
           "text": {
             "ar": "ما الذي تهتم به حقًا",
             "de": "Was genau interessiert dich",
@@ -998,19 +685,19 @@
             "th": "คุณสนใจอะไรกันแน่? (หมายถึงการถูกแบนบัญชี)",
             "tr": "Aslında neye önem veriyorsun",
             "vi": "Rốt cuộc bạn quan tâm điều gì",
-            "zh": "你到底在意什么",
+            "zh": "我只在意一件事",
             "zh-Hant": "你到底在意什麼"
           }
         },
         {
-          "start": "00:00:34,920",
-          "end": "00:00:37,440",
+          "start": "00:00:38,067",
+          "end": "00:00:38,867",
           "text": {
             "ar": "يهمني شيء واحد فقط",
-            "de": "Ich mache nur eine Sache",
+            "de": "Mir ist nur eine Sache wichtig",
             "en": "I only care about one thing",
             "es": "Solo me importa una cosa",
-            "fr": "Seul une chose compte pour moi.",
+            "fr": "Seule une chose compte pour moi.",
             "hi": "मुझे सिर्फ एक बात की परवाह है",
             "id": "Saya hanya peduli pada satu hal",
             "ja": "私はただ一つのことに気を付けているだけ",
@@ -1020,13 +707,13 @@
             "th": "ฉันสนใจแค่เรื่องเดียว",
             "tr": "Sadece bir şeye önem veriyorum",
             "vi": "Tôi chỉ quan tâm đến một chuyện",
-            "zh": "我只在意一件事",
+            "zh": "说出来",
             "zh-Hant": "我只在意一件事"
           }
         },
         {
-          "start": "00:00:37,440",
-          "end": "00:00:38,550",
+          "start": "00:00:39,800",
+          "end": "00:00:41,333",
           "text": {
             "ar": "قلها",
             "de": "Sag es",
@@ -1034,21 +721,21 @@
             "es": "Dilo",
             "fr": "Dis-le.",
             "hi": "कह दो",
-            "id": "- Percakapan",
+            "id": "Katakanlah",
             "ja": "言ってみて",
             "ko": "말해 봐",
             "pt": "Diga",
-            "ru": "Прежде чем заблокировать твой аккаунт",
-            "th": "ฉันแค่พิมพ์",
+            "ru": "Скажи",
+            "th": "พูดออกมา",
             "tr": "Söyle",
             "vi": "Nói ra đi",
-            "zh": "说出来",
+            "zh": "在我还没有封你号之前",
             "zh-Hant": "說出來"
           }
         },
         {
-          "start": "00:00:38,550",
-          "end": "00:00:41,120",
+          "start": "00:00:42,000",
+          "end": "00:00:43,133",
           "text": {
             "ar": "قبل أن أحظر حسابك",
             "de": "Bevor ich dein Konto sperre...",
@@ -1060,17 +747,17 @@
             "ja": "まだアカウントを停止する前に",
             "ko": "내가 아직 네 계정을 정지하기 전에",
             "pt": "Antes de te banir,",
-            "ru": "Пока я не заблокирую тебя",
+            "ru": "Прежде чем я заблокирую твой аккаунт",
             "th": "ก่อนที่ฉันจะแบนบัญชีของคุณ",
             "tr": "Seni yasaklamadan önce",
             "vi": "Trước khi tôi khóa tài khoản của bạn...",
-            "zh": "在我还没有封你号之前",
+            "zh": "你不许换AI",
             "zh-Hant": "在我還沒有封你號之前"
           }
         },
         {
-          "start": "00:00:41,120",
-          "end": "00:00:42,890",
+          "start": "00:01:03,933",
+          "end": "00:01:07,067",
           "text": {
             "ar": "أنت لا تحب الذكاء الاصطناعي",
             "de": "Du magst keine KI",
@@ -1086,18 +773,18 @@
             "th": "คุณไม่ชอบ AI",
             "tr": "Yapay zekâdan hoşlanmıyorsun",
             "vi": "Bạn không thích AI",
-            "zh": "你不喜欢AI",
-            "zh-Hant": "你不喜歡AI"
+            "zh": "对不起也许我来的不是时候",
+            "zh-Hant": "你不許換AI"
           }
         },
         {
-          "start": "00:00:42,890",
-          "end": "00:01:04,400",
+          "start": "00:01:07,600",
+          "end": "00:01:09,800",
           "text": {
             "ar": "آسف",
             "de": "Entschuldigung",
             "en": "Sorry",
-            "es": "¡Ay, qué pena!",
+            "es": "Lo siento.",
             "fr": "Désolé.",
             "hi": "माफ़ करना",
             "id": "Maaf",
@@ -1108,74 +795,8 @@
             "th": "ขอโทษนะ",
             "tr": "Üzgünüm",
             "vi": "Xin lỗi",
-            "zh": "对不起",
+            "zh": "不你来的正是时候",
             "zh-Hant": "對不起"
-          }
-        },
-        {
-          "start": "00:01:04,400",
-          "end": "00:01:06,940",
-          "text": {
-            "ar": "ربما لم أكن في الوقت المناسب",
-            "de": "Vielleicht war ich zu früh",
-            "en": "Maybe I came at the wrong time",
-            "es": "Quizás llegué en el momento equivocado",
-            "fr": "Peut-être que je suis arrivé trop tard.",
-            "hi": "शायद मैं सही समय पर नहीं आया",
-            "id": "Mungkin aku datang di waktu yang salah",
-            "ja": "たぶん、私が来るのは時期じゃなかった",
-            "ko": "아마 내가 너무 일찍 온 걸 수도 있어.",
-            "pt": "Talvez eu tenha chegado no momento errado",
-            "ru": "Может быть, я пришел не вовремя",
-            "th": "อาจจะฉันมาถึงตอนที่มันไม่เหมาะ",
-            "tr": "Belki de yanlış zamanda geldim",
-            "vi": "Có lẽ tôi đến không đúng lúc",
-            "zh": "也许我来的不是时候",
-            "zh-Hant": "也許我來的不是時候"
-          }
-        },
-        {
-          "start": "00:01:06,940",
-          "end": "00:01:07,780",
-          "text": {
-            "ar": "لا",
-            "de": "Nein",
-            "en": "No",
-            "es": "No",
-            "fr": "Non.",
-            "hi": "नहीं",
-            "id": "Tidak",
-            "ja": "違う",
-            "ko": "아니",
-            "pt": "Não",
-            "ru": "Нет",
-            "th": "ไม่",
-            "tr": "Hayır",
-            "vi": "Không",
-            "zh": "不",
-            "zh-Hant": "不"
-          }
-        },
-        {
-          "start": "00:01:07,780",
-          "end": "00:01:09,670",
-          "text": {
-            "ar": "لقد أتيت في الوقت المناسب",
-            "de": "Du bist zur richtigen Zeit gekommen",
-            "en": "You came at the right time",
-            "es": "Llegaste justo a tiempo",
-            "fr": "Tu es arrivé au bon moment.",
-            "hi": "तुम सही समय पर आए हो",
-            "id": "Kamu datang tepat waktu",
-            "ja": "ちょうどいいタイミングだったね",
-            "ko": "네가 딱 맞는 타이밍이었어.",
-            "pt": "Você chegou no momento certo",
-            "ru": "Ты пришел именно вовремя",
-            "th": "คุณมาถึงช่วงเวลาที่เหมาะสมแล้ว",
-            "tr": "Tam zamanında geldin",
-            "vi": "Bạn đến đúng lúc lắm",
-            "zh": "你来的正是时候",
-            "zh-Hant": "你來的正是時候"
           }
         }
       ]

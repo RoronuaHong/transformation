@@ -242,6 +242,25 @@ def test_media_json_not_marked_as_translation():
     # 笔记/文档本地化校对报告同样是流水线 sidecar，不得入库刷屏。
     assert bridge_subtitle.is_pipeline_sidecar("x/downloads/batch/j/media/notes_qa_it.json")
     assert not bridge_subtitle.is_pipeline_sidecar("x/downloads/batch/j/subs/it.srt")
+    # 切片多语拷贝 / 下划线临时片不入库
+    assert bridge_subtitle.is_pipeline_intermediate(
+        "x/downloads/batch/j/media/segments/range_00/subs/en.srt"
+    )
+    assert bridge_subtitle.is_pipeline_intermediate(
+        "x/downloads/batch/j/media/dehardsub/_hs_r0.mp4"
+    )
+    assert bridge_subtitle.is_pipeline_intermediate(
+        "x/downloads/batch/j/media/remix/_body.mp4"
+    )
+    assert not bridge_subtitle.is_pipeline_intermediate(
+        "x/downloads/batch/j/subs/en.srt"
+    )
+    assert not bridge_subtitle.is_pipeline_intermediate(
+        "x/downloads/batch/j/media/dehardsub/clean.mp4"
+    )
+    assert not bridge_subtitle.is_pipeline_intermediate(
+        "x/downloads/batch/j/media/source.mp4"
+    )
     assert "type:translate" not in core.media_facet_tags(
         "fetch_meta.json", "docs", "type:media")
     assert "type:translate" in core.media_facet_tags(

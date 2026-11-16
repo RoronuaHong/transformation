@@ -16,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from collections.abc import Callable
+
 from discover.content_db import ContentDB, embed_url_for, public_slug, slugify
 from discover.queue_db import QueueDB
 from langs import DEFAULT_PACK, coalesce_source_lang, file_tag, lang_name, normalize_lang, resolve_targets
@@ -38,6 +40,7 @@ from pipeline import (
     load_notes_summary,
     locked_print,
     notes_fields,
+    notes_localize_step_key,
     ollama_chat,
     segments_plain_text,
     transcribe_video,
@@ -192,11 +195,119 @@ def _find_source_srt(work_dir: Path, stem: str, source_lang: str) -> Path | None
     return found.get(tag) or next(iter(found.values()), None)
 
 
-def _hardsub_gate(work_dir: Path, stem: str, src_lang: str, *, bvid: str | None) -> dict:
+def _source_video_for_job(work_dir: Path, stem: str = "full_16k") -> Path | None:
+    media = job_media_dir(work_dir)
+    for cand in (media / "source.mp4", media / f"{stem}.mp4"):
+        if cand.is_file():
+            return cand
+    return None
+
+
+def _detect_hardsub_on_source(video: Path) -> dict:
+    """Cheap burned-caption probe (no OCR). Empty/missing → not detected."""
+    try:
+        from media_ops import detect_hardsubs
+
+        return detect_hardsubs(video)
+    except Exception as e:
+        print(f"[hardsub] detect skipped ({type(e).__name__}: {e})", flush=True)
+        return {"detected": False, "reason": f"detect_error:{e}"}
+
+
+def _try_hardsub_source_before_asr(
+    work_dir: Path,
+    *,
+    source_lang: str,
+    stem: str = "full_16k",
+) -> tuple[list[dict], str, Path] | None:
+    """有硬字幕时 OCR 直提源 SRT，成功则跳过 Whisper。
+
+    返回 (segs, src_lang, src_srt)；无硬字幕 / 直提失败 → None（调用方走 ASR）。
+    """
+    import os
+
+    prefer = (os.environ.get("VITUAL_HARDSUB_PREFER") or "1").strip().lower()
+    if prefer in ("0", "false", "no", "off"):
+        return None
+    video = _source_video_for_job(work_dir, stem)
+    if video is None:
+        return None
+    det = _detect_hardsub_on_source(video)
+    if not det.get("detected"):
+        print(
+            f"[hardsub] no burned captions on {video.name} "
+            f"(score={det.get('score')} hits={det.get('hits')}/{det.get('samples')}) → ASR",
+            flush=True,
+        )
+        return None
+    print(
+        f"[hardsub] burned captions detected on {video.name} "
+        f"(score={det.get('score')} hits={det.get('hits')}/{det.get('samples')}) "
+        f"→ OCR extract before ASR",
+        flush=True,
+    )
+    try:
+        from hardsub_extract import extract_source_srt_for_job
+        from pipeline import parse_srt
+
+        # 直提阶段默认跳过 relisten（省一轮 Whisper）；需要时可 VITUAL_HARDSUB_VERIFY=1
+        verify = (os.environ.get("VITUAL_HARDSUB_VERIFY") or "0").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        out = extract_source_srt_for_job(
+            work_dir,
+            source_lang=source_lang,
+            stem=stem,
+            verify_audio=verify,
+        )
+        cues = out.get("cues") or []
+        src_lang = coalesce_source_lang(str(out.get("source_lang") or source_lang or "zh"))
+        src_srt = Path(out.get("srt") or locale_srt_path(work_dir, src_lang, stem))
+        if not src_srt.is_file() or len(cues) < 2:
+            print(
+                f"[hardsub] extract too thin (cues={len(cues)}) → fall back to ASR",
+                flush=True,
+            )
+            return None
+        rep = out.get("compare") or {}
+        # 直提自洽失败仍可作候选，但 coverage 太低说明 OCR 不可信 → ASR
+        cov = float(rep.get("coverage") or 0.0)
+        if rep and not rep.get("skipped") and cov < 0.5 and not rep.get("ok"):
+            print(
+                f"[hardsub] extract self-check weak coverage={cov:.0%} → fall back to ASR",
+                flush=True,
+            )
+            return None
+        segs = parse_srt(src_srt)
+        print(
+            f"[hardsub] using OCR source srt ({len(segs)} cues, "
+            f"coverage={cov:.0%} ok={rep.get('ok')}) → skip Whisper",
+            flush=True,
+        )
+        return segs, src_lang, src_srt
+    except Exception as e:
+        print(f"[hardsub] extract failed ({type(e).__name__}: {e}) → ASR", flush=True)
+        traceback.print_exc()
+        return None
+
+
+def _hardsub_gate(
+    work_dir: Path,
+    stem: str,
+    src_lang: str,
+    *,
+    bvid: str | None,
+    hardsub_source: bool = False,
+    hardsub_detected: bool = False,
+) -> dict:
     """入库前把源 SRT 与原片硬字幕逐条对比（用户强制流程）。
 
     策略：
       - `VITUAL_HARDSUB_GATE=off` 关闭；`strict` 缺句/漂移阻断入库；默认 `warn` 只告警。
+      - 检测到硬字幕却仍用 ASR（直提失败）时，自动升为 ``strict``（可用 env 覆盖）。
       - 无带硬字幕的 source.mp4（纯音频/软字幕源）自动跳过，不误杀。
       - 报告写到 job media 目录 hardsub_compare.json，随 pack 一起可查。
     接进主流程是为了杜绝"对比工具存在但从不自动跑 → 反复缺句/不对齐"。
@@ -206,6 +317,13 @@ def _hardsub_gate(work_dir: Path, stem: str, src_lang: str, *, bvid: str | None)
     mode = (os.environ.get("VITUAL_HARDSUB_GATE") or "warn").strip().lower()
     if mode == "off":
         return {"ok": True, "skipped": True, "reason": "gate_disabled"}
+    # 画面有硬字幕、但源稿不是 OCR 直提 → 必须拦下 ASR 错稿
+    if mode == "warn" and hardsub_detected and not hardsub_source:
+        mode = "strict"
+        print(
+            "[hardsub-gate] auto-strict: burned captions present but source SRT is ASR",
+            flush=True,
+        )
     try:
         from hardsub_compare import compare_job
     except Exception as e:
@@ -217,8 +335,7 @@ def _hardsub_gate(work_dir: Path, stem: str, src_lang: str, *, bvid: str | None)
     if src_srt is None:
         return {"ok": True, "skipped": True, "reason": "no_source_srt"}
     media = job_media_dir(work_dir)
-    candidates = [media / "source.mp4", media / f"{stem}.mp4"]
-    video = next((p for p in candidates if p.is_file()), None)
+    video = _source_video_for_job(work_dir, stem)
     if video is None:
         return {"ok": True, "skipped": True, "reason": "no_hardsub_source_video"}
     if bvid:
@@ -267,6 +384,17 @@ def _load_existing_job_segments(
 
     out_dir = Path(work_dir)
     src_lang = coalesce_source_lang(source_lang if source_lang != "auto" else "zh")
+    if source_lang == "auto":
+        # ASR writes the detected language here. Without this, a notes-only
+        # job falls back to zh and summarizes the Chinese translation instead
+        # of the actual source SRT.
+        sync_meta = job_media_dir(out_dir) / "sync_meta.json"
+        try:
+            data = json.loads(sync_meta.read_text(encoding="utf-8-sig"))
+            if isinstance(data, dict) and data.get("source_lang"):
+                src_lang = coalesce_source_lang(str(data["source_lang"]))
+        except (OSError, json.JSONDecodeError, TypeError):
+            pass
     src_srt = _find_source_srt(out_dir, stem, src_lang)
     if src_srt is None:
         raise FileNotFoundError(
@@ -777,6 +905,10 @@ def register_work_dir(
     return article_id
 
 
+class JobCancelled(Exception):
+    """Raised when Try cooperative cancel fires between stages."""
+
+
 def _process_media_only(
     job,
     *,
@@ -787,6 +919,7 @@ def _process_media_only(
     frame_mode: str | None,
     gif_duration: float | None,
     frame_clips: list | None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> None:
     """Re-cut GIF and/or MP4 ranges on an existing work dir (no ASR)."""
     job_id = int(job["id"])
@@ -796,6 +929,11 @@ def _process_media_only(
     topic_id = job["topic_id"] or "home_tips"
     out_dir = work_dir
     wav = existing_wav(work_dir)
+
+    def _check_cancel(where: str) -> None:
+        if should_cancel and should_cancel():
+            print(f"[batch] job#{job_id} cancelled at {where}", flush=True)
+            raise JobCancelled(where)
 
     summary = load_notes_summary(out_dir, "full_16k", "zh")
     if not summary:
@@ -811,6 +949,7 @@ def _process_media_only(
         str((summary or {}).get("source_lang") or "zh")
     )
     print(f"[batch] media-only stages={sorted(enabled)}")
+    _check_cancel("media_before_dehardsub")
     if "dehardsub" in enabled:
         from media_ops import strip_hardsubs
 
@@ -825,6 +964,7 @@ def _process_media_only(
             demosaic=bool(opts.get("dehardsub_demosaic", True)),
             engine=str(opts.get("dehardsub_engine") or "ocr_telea"),
         )
+    _check_cancel("media_before_frames")
     if "frames" in enabled or "clips" in enabled:
         summary = _attach_job_media(
             work_dir=out_dir,
@@ -836,9 +976,12 @@ def _process_media_only(
             gif_duration=gif_duration,
             frame_clips=frame_clips,
         ) or summary
+    _check_cancel("media_before_postproc")
     try:
         media_st = _run_job_postproc(out_dir, job, enabled, frame_clips=frame_clips)
         _finish_media_status(queue, job_id, out_dir, media_st)
+    except JobCancelled:
+        raise
     except Exception as e:
         media_st = {
             "postproc": "failed",
@@ -850,6 +993,7 @@ def _process_media_only(
         traceback.print_exc()
         _finish_media_status(queue, job_id, out_dir, media_st)
 
+    _check_cancel("media_before_register")
     article_id = None
     if summary:
         article_id = register_work_dir(
@@ -910,6 +1054,7 @@ def process_job(
     lang_workers_n: int | None = None,
     stages: str = "all",
     embed_shift_ms: int = 0,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> None:
     job_id = int(job["id"])
     platform = job["platform"]
@@ -919,6 +1064,11 @@ def process_job(
     work_dir = _job_work_dir(work_root, platform, video_id)
     enabled = parse_stages(stages)
     tracks = describe_tracks(enabled)
+
+    def _check_cancel(where: str) -> None:
+        if should_cancel and should_cancel():
+            print(f"[batch] job#{job_id} cancelled at {where}", flush=True)
+            raise JobCancelled(where)
 
     print(f"[batch] job#{job_id} {platform}:{video_id} topic={topic_id} stages={sorted(enabled)}")
     print(
@@ -956,6 +1106,7 @@ def process_job(
             frame_mode=frame_mode,
             gif_duration=gif_duration,
             frame_clips=frame_clips,
+            should_cancel=should_cancel,
         )
         return
 
@@ -1049,39 +1200,68 @@ def process_job(
         (not skip_summary) or (skip_summary and not skip_keypoints)
     )
     need_segs = need_notes or ((not skip_translate) and ("translate" in enabled))
+    hardsub_source = False
+    hardsub_detected = False
 
+    _check_cancel("before_asr")
     if "asr" in enabled:
-        segs, out_dir, stem, _srt = transcribe_video(args)
-        src_lang = coalesce_source_lang(
-            args.source_lang if args.source_lang != "auto" else "en"
+        out_dir = work_dir
+        stem = "full_16k"
+        video_probe = _source_video_for_job(work_dir, stem)
+        if video_probe is not None:
+            hardsub_detected = bool(
+                _detect_hardsub_on_source(video_probe).get("detected")
+            )
+        hs = _try_hardsub_source_before_asr(
+            work_dir, source_lang=source_lang, stem=stem
         )
-        src_srt = _find_source_srt(out_dir, stem, src_lang)
-        if src_srt:
-            src_lang = _detect_source_lang(args.source_lang, src_srt)
-
-        if ollama and llm_correct and not getattr(args, "_glossary_polished", False):
-            try:
-                ensure_ollama_model(chat_model, role="chat")
-                glossary = auto_build_glossary(ollama, chat_model, segs, src_lang)
-                gloss_path = job_media_dir(out_dir) / "glossary.json"
-                gloss_path.write_text(
-                    json.dumps(glossary, ensure_ascii=False, indent=2), encoding="utf-8"
-                )
-                print(f"[out] {gloss_path}")
-                segs = correct_segments(ollama, chat_model, segs, glossary, src_lang)
-                src_srt = locale_srt_path(out_dir, src_lang, stem)
-                write_srt(segs, src_srt)
-                print(f"[auto] corrected source srt -> {src_srt}")
-            except Exception as e:
-                print(f"[auto] glossary/correct skipped ({type(e).__name__}: {e})")
-                glossary = {}
-        else:
+        if hs is not None:
+            segs, src_lang, src_srt = hs
+            hardsub_source = True
+            hardsub_detected = True
+            # Hardsub OCR text is ground truth — do not LLM-rewrite on-screen glyphs.
             glossary = _load_existing_glossary(out_dir)
-            if glossary:
-                print(
-                    f"[glossary] reuse {len(glossary.get('asr_fix') or {})} asr_fix "
-                    f"(already polished in ASR stage)"
-                )
+            setattr(args, "_hardsub_source", True)
+            setattr(args, "_skip_glossary_polish", True)
+        else:
+            segs, out_dir, stem, _srt = transcribe_video(args)
+            src_lang = coalesce_source_lang(
+                args.source_lang if args.source_lang != "auto" else "en"
+            )
+            src_srt = _find_source_srt(out_dir, stem, src_lang)
+            if src_srt:
+                src_lang = _detect_source_lang(args.source_lang, src_srt)
+
+            if ollama and llm_correct and not getattr(args, "_glossary_polished", False):
+                try:
+                    ensure_ollama_model(chat_model, role="chat")
+                    glossary = auto_build_glossary(ollama, chat_model, segs, src_lang)
+                    gloss_path = job_media_dir(out_dir) / "glossary.json"
+                    gloss_path.write_text(
+                        json.dumps(glossary, ensure_ascii=False, indent=2), encoding="utf-8"
+                    )
+                    print(f"[out] {gloss_path}")
+                    segs = correct_segments(ollama, chat_model, segs, glossary, src_lang)
+                    src_srt = locale_srt_path(out_dir, src_lang, stem)
+                    write_srt(segs, src_srt)
+                    print(f"[auto] corrected source srt -> {src_srt}")
+                except Exception as e:
+                    print(f"[auto] glossary/correct skipped ({type(e).__name__}: {e})")
+                    glossary = {}
+            else:
+                glossary = _load_existing_glossary(out_dir)
+                if glossary:
+                    print(
+                        f"[glossary] reuse {len(glossary.get('asr_fix') or {})} asr_fix "
+                        f"(already polished in ASR stage)"
+                    )
+        # Unlock notes (and other artifact waiters) while translate langs continue.
+        try:
+            from api.try_service import notify_artifact_ready
+
+            notify_artifact_ready(out_dir, artifact="source_srt")
+        except Exception as e:
+            print(f"[try] source_srt notify skipped ({type(e).__name__}: {e})")
     elif need_segs:
         segs, out_dir, stem, src_lang, _src_srt = _load_existing_job_segments(
             work_dir, source_lang=source_lang
@@ -1104,6 +1284,7 @@ def process_job(
             src_lang = _detect_source_lang(source_lang, src_srt)
         print(f"[stages] skip asr/translate/notes — reuse work_dir lang={src_lang}")
 
+    _check_cancel("after_asr")
     if not skip_translate and "translate" in enabled:
         ensure_ollama_model(translate_model, role="translate")
     if need_notes:
@@ -1115,14 +1296,45 @@ def process_job(
     do_kp = need_notes and skip_summary and (not skip_keypoints)
 
     def _notes_branch() -> None:
-        args.summary_lang = src_lang
-        if do_sum:
-            do_summary(args, ollama, segments_plain_text(segs), out_dir, stem)
-        elif do_kp:
-            do_keypoints(args, ollama, segments_plain_text(segs), out_dir, stem)
+        step_key = "notes.source"
+        queue.upsert_step(
+            int(job_id),
+            step_key,
+            kind="notes_source",
+            lang=file_tag(src_lang) if src_lang else None,
+            status="running",
+        )
+        queue.mark_step_running(int(job_id), step_key)
+        try:
+            args.summary_lang = src_lang
+            if do_sum:
+                do_summary(args, ollama, segments_plain_text(segs), out_dir, stem)
+            elif do_kp:
+                do_keypoints(args, ollama, segments_plain_text(segs), out_dir, stem)
+            queue.mark_step_done(
+                int(job_id),
+                step_key,
+                status="done",
+                qa_status="ok",
+                artifact_rel=f"notes/{file_tag(src_lang) if src_lang else 'source'}",
+            )
+        except BaseException as e:
+            queue.mark_step_failed(
+                int(job_id), step_key, f"{type(e).__name__}: {e}"
+            )
+            raise
 
     def _translate_branch() -> None:
-        do_translate(args, ollama, segs, out_dir, stem, glossary)
+        do_translate(
+            args,
+            ollama,
+            segs,
+            out_dir,
+            stem,
+            glossary,
+            job_id=int(job_id),
+            queue=queue,
+        )
 
     # After source SRT is stable: run subtitle translate, then source notes.
     # Previously these were forked to run in parallel, but on CPU-only Ollama
@@ -1131,18 +1343,23 @@ def process_job(
     # parallelizes internally via lang-workers) and is faster overall there.
     if do_tr and (do_sum or do_kp):
         print("[batch] sequence: subtitle translate → source notes")
+        _check_cancel("before_translate")
         _translate_branch()
+        _check_cancel("before_notes")
         _notes_branch()
     elif do_tr:
+        _check_cancel("before_translate")
         _translate_branch()
     elif do_sum or do_kp:
+        _check_cancel("before_notes")
         _notes_branch()
 
+    _check_cancel("before_localize")
     summary = load_notes_summary(out_dir, stem, src_lang)
 
-    need_targets = (not skip_translate) and (
-        "translate" in enabled or "localize" in enabled
-    )
+    need_targets = (
+        (not skip_translate) and ("translate" in enabled)
+    ) or (localize_summary and "localize" in enabled)
     targets = resolve_targets(langs, src_lang) if need_targets else []
     if localize_summary and "localize" in enabled:
         if not summary:
@@ -1156,34 +1373,85 @@ def process_job(
             workers = lang_workers(lang_workers_n)
             print(f"[notes-loc] {len(targets)} locales (workers={workers})")
 
-            def _one_loc(loc: str) -> Path:
-                proofread: dict = {}
-                loc_data = translate_summary_locale(
-                    ollama,
-                    translate_model,
-                    summary,
-                    source_lang=src_lang,
-                    target_lang=loc,
-                    proofread_report=proofread,
+            for loc in targets:
+                queue.upsert_step(
+                    int(job_id),
+                    notes_localize_step_key(loc),
+                    kind="notes_localize",
+                    lang=file_tag(loc),
+                    status="queued",
                 )
-                loc_data["source_lang"] = src_lang
-                loc_data["summary_lang"] = loc
-                _js, md = write_locale_notes(loc_data, out_dir, loc)
-                # 笔记校对报告与字幕 translate_qa 报告对齐（同一 ProofreadReport 结构）。
-                qa_path = job_media_dir(out_dir) / f"notes_qa_{file_tag(loc)}.json"
-                qa_path.write_text(
-                    json.dumps({"proofread": proofread}, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-                locked_print(f"[out] {md}")
-                locked_print(f"[out] {qa_path}")
-                return md
 
+            def _one_loc(loc: str) -> Path:
+                step_key = notes_localize_step_key(loc)
+                tag = file_tag(loc)
+                queue.upsert_step(
+                    int(job_id),
+                    step_key,
+                    kind="notes_localize",
+                    lang=tag,
+                    status="running",
+                )
+                queue.mark_step_running(int(job_id), step_key)
+                try:
+                    proofread: dict = {}
+                    loc_data = translate_summary_locale(
+                        ollama,
+                        translate_model,
+                        summary,
+                        source_lang=src_lang,
+                        target_lang=loc,
+                        proofread_report=proofread,
+                    )
+                    loc_data["source_lang"] = src_lang
+                    loc_data["summary_lang"] = loc
+                    _js, md = write_locale_notes(loc_data, out_dir, loc)
+                    qa_path = job_media_dir(out_dir) / f"notes_qa_{tag}.json"
+                    qa_path.write_text(
+                        json.dumps(
+                            {"proofread": proofread}, ensure_ascii=False, indent=2
+                        ),
+                        encoding="utf-8",
+                    )
+                    locked_print(f"[out] {md}")
+                    locked_print(f"[out] {qa_path}")
+                    try:
+                        art = str(Path(md).relative_to(out_dir)).replace("\\", "/")
+                    except ValueError:
+                        art = f"notes/{tag}.md"
+                    qa_status = (
+                        "needs_review"
+                        if proofread.get("human_review", 0)
+                        or proofread.get("status") not in ("ok", "disabled", None, "")
+                        else "ok"
+                    )
+                    if proofread.get("status") in (None, "", "disabled"):
+                        qa_status = "ok"
+                    queue.mark_step_done(
+                        int(job_id),
+                        step_key,
+                        status="done",
+                        qa_status=qa_status,
+                        artifact_rel=art,
+                    )
+                    return md
+                except BaseException as e:
+                    queue.mark_step_failed(
+                        int(job_id), step_key, f"{type(e).__name__}: {e}"
+                    )
+                    locked_print(
+                        f"[notes-loc FAIL] {loc}: {type(e).__name__}: {e}"
+                    )
+                    raise
+
+            loc_errors: list[tuple[str, BaseException]] = []
             if workers <= 1 or len(targets) <= 1:
                 for loc in targets:
-                    _one_loc(loc)
+                    try:
+                        _one_loc(loc)
+                    except BaseException as e:
+                        loc_errors.append((loc, e))
             else:
-                errors = []
                 with ThreadPoolExecutor(max_workers=workers) as pool:
                     futures = {pool.submit(_one_loc, loc): loc for loc in targets}
                     for fut in as_completed(futures):
@@ -1191,19 +1459,25 @@ def process_job(
                         try:
                             fut.result()
                         except BaseException as e:
-                            errors.append((loc, e))
-                            locked_print(
-                                f"[notes-loc FAIL] {loc}: {type(e).__name__}: {e}"
-                            )
-                if errors:
-                    loc0, err0 = errors[0]
-                    raise RuntimeError(
-                        f"notes localize failed for {len(errors)} locale(s); "
-                        f"first={loc0}: {err0}"
-                    ) from err0
-            write_notes_index(out_dir)
+                            loc_errors.append((loc, e))
+            if loc_errors and len(loc_errors) == len(targets):
+                loc0, err0 = loc_errors[0]
+                raise RuntimeError(
+                    f"notes localize failed for all {len(loc_errors)} locale(s); "
+                    f"first={loc0}: {err0}"
+                ) from err0
+            if loc_errors:
+                print(
+                    f"[notes-loc] partial: {len(targets) - len(loc_errors)} ok, "
+                    f"{len(loc_errors)} failed"
+                )
+            try:
+                write_notes_index(out_dir)
+            except Exception as e:
+                print(f"[notes-loc] index skipped ({type(e).__name__}: {e})")
 
     # Optional screenshots for visual how-tos (needs source video in media/)
+    _check_cancel("before_frames")
     if "frames" in enabled or "clips" in enabled:
         try:
             summary = _attach_job_media(
@@ -1220,6 +1494,7 @@ def process_job(
             print(f"[frames] FAILED ({type(e).__name__}: {e})")
             traceback.print_exc()
 
+    _check_cancel("before_postproc")
     try:
         media_st = _run_job_postproc(out_dir, job, enabled, frame_clips=frame_clips)
         _finish_media_status(queue, job_id, out_dir, media_st)
@@ -1234,12 +1509,20 @@ def process_job(
         traceback.print_exc()
         _finish_media_status(queue, job_id, out_dir, media_st)
 
+    _check_cancel("before_register")
     # 入库前强制与原片硬字幕对比（用户要求）：缺句/漂移写报告并告警，
     # VITUAL_HARDSUB_GATE=strict 时阻断入库，避免残缺字幕再次流进内容库/素材中心。
     if "asr" in enabled:
         try:
             _bv = video_id if platform == "bilibili" else None
-            _hardsub_gate(out_dir, stem, src_lang, bvid=_bv)
+            _hardsub_gate(
+                out_dir,
+                stem,
+                src_lang,
+                bvid=_bv,
+                hardsub_source=hardsub_source,
+                hardsub_detected=hardsub_detected,
+            )
         except Exception as e:
             print(f"[hardsub-gate] raised ({type(e).__name__}: {e})", flush=True)
             raise
@@ -1264,12 +1547,29 @@ def process_job(
         source_wav=str(wav_path) if wav_path else _job_field(job, "source_wav"),
         locales=targets or None,
     )
-    queue.mark_done(
-        job_id,
-        source_wav=str(wav_path) if wav_path else _job_field(job, "source_wav"),
-        canonical_url=url,
-    )
-    print(f"[batch] done job#{job_id} article_id={article_id}")
+    wav_s = str(wav_path) if wav_path else _job_field(job, "source_wav")
+    # Prefer step aggregation when language steps exist (P2 partial support).
+    agg = queue.aggregate_job_from_steps(int(job_id))
+    if agg is None:
+        queue.mark_done(job_id, source_wav=wav_s, canonical_url=url)
+        final_st = "done"
+    else:
+        # Keep wav/url even on partial.
+        if agg in ("done", "partial"):
+            now = __import__("time").time()
+            queue._conn.execute(
+                """
+                UPDATE jobs
+                SET source_wav=COALESCE(?, source_wav),
+                    canonical_url=COALESCE(?, canonical_url),
+                    updated_at=?
+                WHERE id=?
+                """,
+                (wav_s, url, now, int(job_id)),
+            )
+            queue._conn.commit()
+        final_st = agg
+    print(f"[batch] {final_st} job#{job_id} article_id={article_id}")
     from discover.hub_push import push_work_dir_to_hub
 
     push_work_dir_to_hub(

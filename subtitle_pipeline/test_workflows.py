@@ -52,11 +52,15 @@ def test_expand_media_postproc_each_own_task() -> None:
     ]
 
 
-def test_expand_handoffs_notes_depends_translate() -> None:
+def test_expand_handoffs_notes_waits_source_srt_not_translate_job() -> None:
     tasks = expand_workflow_tasks(want_translate=True, want_notes=True)
     notes = next(t for t in tasks if t["workflow"] == "notes")
-    assert notes["depends_on"] == ["translate"]
+    assert notes["depends_on"] == []
+    assert notes.get("depends_on_artifacts") == ["source_srt"]
     assert notes.get("input_from") is None
+    assert notes.get("lane") == "content"
+    tr = next(t for t in tasks if t["workflow"] == "translate")
+    assert tr.get("lane") == "content"
 
 
 def test_expand_handoffs_enhance_input_from_dehardsub() -> None:
@@ -64,6 +68,20 @@ def test_expand_handoffs_enhance_input_from_dehardsub() -> None:
     enh = next(t for t in tasks if t["workflow"] == "enhance")
     assert enh["input_from"] == "dehardsub"
     assert enh["depends_on"] == ["dehardsub"]
+    assert enh.get("lane") == "media"
+
+
+def test_expand_deblur_fans_out_from_dehardsub_not_concat() -> None:
+    tasks = expand_workflow_tasks(
+        want_dehardsub=True, want_concat=True, want_deblur=True
+    )
+    deblur = next(t for t in tasks if t["workflow"] == "deblur")
+    concat = next(t for t in tasks if t["workflow"] == "concat")
+    assert deblur["input_from"] == "dehardsub"
+    assert deblur["depends_on"] == ["dehardsub"]
+    assert "concat" not in deblur["depends_on"]
+    assert concat["depends_on"] == ["clips"]
+    assert deblur.get("lane") == "media"
 
 
 def test_expand_handoffs_override_input_from() -> None:

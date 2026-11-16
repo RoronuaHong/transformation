@@ -248,8 +248,6 @@ const KIND_ICON: Record<string, string> = {
   other: "📦",
 };
 
-type KindKey = (typeof KINDS)[number] | "";
-
 // kind 过滤器从后端 /api/stats.kinds 动态生成(单一真相源在后端):已知 kind 按 KINDS
 // 既定顺序,后端新增的未知 kind 自动排后并按字母序,不再依赖前端硬编码同步。
 function orderKinds(keys: string[]): string[] {
@@ -740,6 +738,9 @@ interface HubCardProps {
 
 const HubCard = memo(function HubCard({ m, copy, kindLabel, tagLabelMap, locale, pendingIds, onOpen, onDelete, onToggleFavorite, selected, onToggleSelect }: HubCardProps) {
   const vidRef = useRef<HTMLVideoElement>(null);
+  // 整卡一点开详情:hub-card-body::after 铺满 article(含缩略图左右空白);
+  // 选/删/藏 z-index 更高;视频画面叠在 stretch 之上保留 hover 预览。
+  const open = () => onOpen(m);
   return (
     <article className={"hub-card" + (selected ? " selected" : "")}>
       <div className="hub-thumb">
@@ -800,12 +801,11 @@ const HubCard = memo(function HubCard({ m, copy, kindLabel, tagLabelMap, locale,
             alt=""
             loading="lazy"
             decoding="async"
-            onClick={() => onOpen(m)}
           />
         ) : m.kind === "videos" ? (
           <>
-            {/* 视频卡片:B 站/抖音式 hover 预览(静音自动播放,移开复位),不在网格显示进度条;
-                精确播放/拖拽走详情弹层。点击不冒泡到卡片体(避免误开详情)。 */}
+            {/* 视频卡片:hover 静音预览;点击整卡开详情(与图片/文档一致)。
+                z-index 高于 body::after,由本节点自己接 click。 */}
             <video
               ref={vidRef}
               src={hubFileUrl(m.id)}
@@ -829,17 +829,18 @@ const HubCard = memo(function HubCard({ m, copy, kindLabel, tagLabelMap, locale,
                 v.pause();
                 if (m.hit_t != null) v.currentTime = m.hit_t;
               }}
-              onClick={(e) => e.stopPropagation()}
-              onPointerDown={(e) => e.stopPropagation()}
-              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                open();
+              }}
             />
           </>
         ) : m.kind === "audio" ? (
-          <span className="ph" onClick={() => onOpen(m)} role="presentation">
+          <span className="ph" role="presentation">
             ♪
           </span>
         ) : (
-          <span className="pill" onClick={() => onOpen(m)} role="presentation">
+          <span className="pill" role="presentation">
             {(m.ext || "?").replace(/^\./, "").slice(0, 5).toUpperCase()}
           </span>
         )}
@@ -852,7 +853,8 @@ const HubCard = memo(function HubCard({ m, copy, kindLabel, tagLabelMap, locale,
       <button
         type="button"
         className="hub-card-body"
-        onClick={() => onOpen(m)}
+        aria-label={displayName(m)}
+        onClick={open}
       >
         <strong title={displayName(m)}>{displayName(m)}</strong>
         {facetBadges(m).length > 0 && (
@@ -1223,7 +1225,8 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
   const sentinelRef = useRef<HTMLDivElement>(null);
   const [stats, setStats] = useState<HubStats | null>(null);
   const [tags, setTags] = useState<HubTag[]>([]);
-  const [busy, setBusy] = useState(false);
+  // 首屏默认 busy:首帧就出骨架,避免先闪「没有匹配的素材」空态
+  const [busy, setBusy] = useState(true);
   const [err, setErr] = useState("");
   const [toast, setToast] = useState("");
   const [upNote, setUpNote] = useState("");
@@ -1240,23 +1243,33 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
   const bulkBusyRef = useRef(false);
   const [albumOpen, setAlbumOpen] = useState(false);
   const [moveOpen, setMoveOpen] = useState(false);
+  const [leaveOpen, setLeaveOpen] = useState(false);
   const [albumName, setAlbumName] = useState("");
   // 结构筛选切换时清列表出骨架,避免旧结果闪一下再变
   const [skelReset, setSkelReset] = useState(false);
-  // 视频合集视图:同一 job 的源片/字幕/翻译折成一张卡(默认开,偏好持久化)。
-  // SSR 首帧一律 true,挂载后再读 localStorage,避免 hydration mismatch。
-  const [collMode, setCollMode] = useState(true);
-  const collMounted = useRef(false);
+  // 视图 Tab:合集 / 散件 / 全部。
+  // SSR 铁律(同 UP_KEY):首帧固定 "coll",挂载后再读 localStorage。
+  // 未 hydrate 前绝不回写,否则会把用户偏好「散件」覆盖成默认「合集」。
+  type CollView = "coll" | "loose" | "flat";
+  const [collView, setCollView] = useState<CollView>("coll");
+  const [collHydrated, setCollHydrated] = useState(false);
   useEffect(() => {
     try {
-      if (localStorage.getItem("vitual.hub.collectionMode") === "0") setCollMode(false);
-    } catch { /* 隐私模式下 localStorage 不可用 */ }
-    collMounted.current = true;
+      const saved = localStorage.getItem("vitual.hub.collectionView");
+      if (saved === "coll" || saved === "loose" || saved === "flat") setCollView(saved);
+      else if (localStorage.getItem("vitual.hub.collectionMode") === "0") setCollView("flat");
+    } catch { /* 隐私模式 */ }
+    setCollHydrated(true);
   }, []);
   useEffect(() => {
-    if (!collMounted.current) return;
-    try { localStorage.setItem("vitual.hub.collectionMode", collMode ? "1" : "0"); } catch { /* ignore */ }
-  }, [collMode]);
+    if (!collHydrated) return;
+    try { localStorage.setItem("vitual.hub.collectionView", collView); } catch { /* ignore */ }
+  }, [collView, collHydrated]);
+  // page 不进 loadQuery deps:校正页码时用 pageRef,避免 setPage 再触发一轮 busy/骨架
+  const pageRef = useRef(page);
+  pageRef.current = page;
+  const bootedQuery = useRef(false);
+  const pageQueryBoot = useRef(true);
   const [maxUp, setMaxUp] = useState(HUB_UPLOAD_MAX_BYTES);
   const [detail, setDetail] = useState<HubMaterial | null>(null);
   // removeMaterial 用 useCallback 稳定身份,但需读当前 detail 决定是否清面板——
@@ -1272,6 +1285,11 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
   const [exportLang, setExportLang] = useState<string>("");
   const [exportResult, setExportResult] = useState<HubDeliverResult | null>(null);
   const [exportBusy, setExportBusy] = useState(false);
+  // 批量栏「导出」:与详情导出独立,支持一次交付多个 job 的素材 + 指定语种
+  const [bulkExportOpen, setBulkExportOpen] = useState(false);
+  const [bulkExportLang, setBulkExportLang] = useState("");
+  const [bulkExportResult, setBulkExportResult] = useState<HubDeliverResult | null>(null);
+  const [bulkExportBusy, setBulkExportBusy] = useState(false);
   const [editTags, setEditTags] = useState("");
   const [editDesc, setEditDesc] = useState("");
   const [zoom, setZoom] = useState(false);
@@ -1383,13 +1401,20 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
       const tTotal = count.total || 0;
       setTotal(tTotal);
       const pages = Math.max(1, Math.ceil(tTotal / pageSize));
-      const p = Math.min(page, pages);
-      if (p !== page) setPage(p);
-      // 同签名且页码递增 → 只取新一页追加;其余情况(筛选变化 / 同页重复请求 /
-      // 并发请求被 loadSeq 取消)一律重取 0..p*pageSize 全窗口。否则重复触发查询时
-      // 只写回「最后一页」会把已累积的行冲掉 —— 合集折叠后网格变矮、哨兵提前翻页,
-      // 这个竞态更容易撞上(实测 59 条只剩最后 11 条)。
-      const append = querySig === lastQuerySig.current && p > lastPage.current;
+      const pageNow = pageRef.current;
+      const p = Math.min(pageNow, pages);
+      if (p !== pageNow) {
+        pageRef.current = p;
+        setPage(p);
+      }
+      // 同签名且页码「严格递增一页」→ 只取新一页追加;其余情况(筛选变化 / 跳页 /
+      // 同页重复请求 / 并发请求被 loadSeq 取消)一律重取 0..p*pageSize 全窗口。
+      // 必须用 p === lastPage.current + 1 而非 p > lastPage.current:
+      // 无限滚动哨兵(rootMargin 提前翻页)与「加载更多」按钮同批次连触发会让 page
+      // 从 2 直接跳到 4,若只取最后一页,中间页会永久丢失(实测 138/186 = 48+48+42,
+      // 缺第 3 页;page 到顶后按钮与哨兵都停,用户再无法补回)。合集折叠后网格变矮,
+      // 这个竞态更容易撞上(另一次实测 59 条只剩最后 11 条)。
+      const append = querySig === lastQuerySig.current && p === lastPage.current + 1;
       if (append) {
         qs.set("offset", String((p - 1) * pageSize));
         qs.set("limit", String(pageSize));
@@ -1402,16 +1427,26 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
       const rowsAll: HubMaterial[] = Array.isArray(list) ? list : [];
       // 分页路径:total 已由 /count 写入,不能再用本页 rows 长度覆盖(否则共 N 条会变成 pageSize)。
       setRows((prev) => (append ? [...prev, ...rowsAll] : rowsAll));
+      setSkelReset(false);
       lastQuerySig.current = querySig;
       lastPage.current = p;
     } catch (e) {
       if (loadSeq.current !== seq) return;
       setRows([]);
+      setSkelReset(false);
       setErr(e instanceof Error ? e.message : copy.error);
     } finally {
       if (loadSeq.current === seq) setBusy(false);
     }
-  }, [q, kind, tag, mode, sort, page, formSel, topicSel, usageSel, favOnly, copy.error]);
+  }, [q, kind, tag, mode, sort, formSel, topicSel, usageSel, favOnly, copy.error]);
+
+  // 筛选集合变化(搜索/排序/类型/标签/分面/仅看收藏)时,已选行可能不在新结果里,
+  // 继续批量操作会打到不可见数据 —— 清空选择并退出批量模式。
+  // 翻页(page)刻意不在依赖里:跨页保留选择是有意行为。
+  useEffect(() => {
+    setSelected(new Set());
+    setSelectMode(false);
+  }, [q, kind, tag, mode, sort, formSel, topicSel, usageSel, favOnly]);
 
   // 切换收藏:乐观更新本页 rows(收藏置顶用稳定排序,组内保持当前顺序);
   // 若处于「仅看收藏」模式且取消收藏,该卡片立即移出列表。失败回滚。
@@ -1424,7 +1459,15 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
       return out;
     });
     hubSetFavorite(m.id, next).catch(() => {
-      setRows((prev) => prev.map((r) => (r.id === m.id ? { ...r, favorite: !next } : r)));
+      setRows((prev) => {
+        // 仅看收藏下取消收藏会立即移除卡片,回滚时必须把原条目插回,
+        // 否则失败后「取消」了收藏却永久看不到这张卡片。
+        let out = prev.map((r) => (r.id === m.id ? { ...r, favorite: !next } : r));
+        if (favOnly && !next && !out.some((r) => r.id === m.id)) {
+          out = [...out, m];
+        }
+        return out.slice().sort((a, b) => (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0));
+      });
     });
   }, [favOnly]);
 
@@ -1461,24 +1504,38 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
   }, [structSig]);
 
   useEffect(() => {
-    // 250ms 防抖:搜索框每敲一个字不再立刻发请求。只拉查询数据(loadQuery);
-    // 全局 stats/tags 由 loadMeta 在挂载/结构性变更时拉一次即可,避免每次击键都重拉拖慢交互。
+    // 250ms 防抖:搜索框每敲一个字不再立刻发请求。首屏 delay=0 少空等。
     // busy 立即置 true:防抖窗口内不能闪现「没有匹配的素材」空态。
     setBusy(true);
-    const t = window.setTimeout(() => void loadQuery(), 250);
+    const delay = bootedQuery.current ? 250 : 0;
+    bootedQuery.current = true;
+    const t = window.setTimeout(() => void loadQuery(), delay);
     return () => window.clearTimeout(t);
   }, [loadQuery]);
 
+  // 仅翻页(无限滚动 / 加载更多):page 已从 loadQuery deps 拆出,这里单独跟。
+  // 故意不把 loadQuery 放进 deps,否则筛选一变会和上面的防抖 effect 各打一枪。
+  const loadQueryRef = useRef(loadQuery);
+  loadQueryRef.current = loadQuery;
   useEffect(() => {
-    if (!busy) setSkelReset(false);
-  }, [busy]);
+    if (pageQueryBoot.current) {
+      pageQueryBoot.current = false;
+      return;
+    }
+    void loadQueryRef.current();
+  }, [page]);
 
   // Esc:关闭浮层 / 退出多选(DAM 批量栏惯例)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
+      // 详情/灯箱的 Esc 由详情弹窗自己的监听独占处理;这里跳过,
+      // 否则关详情的同时会把批量选择也清空。
+      if (detail) return;
       if (albumOpen) { setAlbumOpen(false); return; }
       if (moveOpen) { setMoveOpen(false); return; }
+      if (leaveOpen) { setLeaveOpen(false); return; }
+      if (bulkExportOpen) { setBulkExportOpen(false); return; }
       if (selected.size || selectMode) {
         setSelected(new Set());
         setSelectMode(false);
@@ -1486,7 +1543,7 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [albumOpen, moveOpen, selected.size, selectMode]);
+  }, [detail, albumOpen, moveOpen, leaveOpen, bulkExportOpen, selected.size, selectMode]);
 
   // 无限滚动(Douyin / B 站式):滚到底部(提前 400px)自动加载下一页;
   // 同时保留「加载更多」按钮作为无观察者环境/手动兜底。仅在没有更多页时停用。
@@ -1900,10 +1957,19 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
     setSelected(new Set(rows.map((r) => r.id)));
   }, [rows]);
 
-  // 合集视图:按 job:/parent: 归组;组内仍是原来的 HubCard,不改任何单卡交互。
-  const gridEntries = useMemo<GridEntry[]>(
-    () => (collMode ? buildGridEntries(rows) : rows.map((m) => ({ type: "card" as const, m }))),
-    [collMode, rows],
+  // 归组结果始终算好(合集候选也用);Tab 只决定展示哪一块。
+  const groupedEntries = useMemo(() => buildGridEntries(rows), [rows]);
+  const collGroups = useMemo(
+    () => groupedEntries.filter((e): e is Extract<GridEntry, { type: "group" }> => e.type === "group"),
+    [groupedEntries],
+  );
+  const collLoose = useMemo(
+    () => groupedEntries.filter((e): e is Extract<GridEntry, { type: "card" }> => e.type === "card"),
+    [groupedEntries],
+  );
+  const flatEntries = useMemo(
+    () => rows.map((m) => ({ type: "card" as const, m })),
+    [rows],
   );
   const cardCtx = useMemo<HubCardCtx>(() => ({
     copy, kindLabel, tagLabelMap, locale, pendingIds, selected, selectMode,
@@ -1977,8 +2043,8 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
       }
     }
     // 当前网格里已折叠的合集卡(标题更可读,如 BV 号)
-    for (const e of gridEntries) {
-      if (e.type !== "group" || !e.group.jobTag) continue;
+    for (const e of collGroups) {
+      if (!e.group.jobTag) continue;
       put(e.group.jobTag, e.group.members.length, e.group.title);
     }
     const all = Array.from(map.values());
@@ -1987,7 +2053,7 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
     const albums = all.filter((o) => o.kind === "album")
       .sort((a, b) => a.title.localeCompare(b.title, locale));
     return [...jobs, ...albums];
-  }, [tags, rows, gridEntries, locale]);
+  }, [tags, rows, collGroups, locale]);
   // 侧栏「我的合集」仍只展示用户 album
   const albumOptions = useMemo(
     () => collPickOptions.filter((o) => o.kind === "album"),
@@ -2021,6 +2087,29 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
     }
   }, [selected, copy, clearSelect, beginBulk, endBulk]);
 
+  // 批量取消收藏:仅看收藏模式下,取消成功的卡片应立即移出列表。
+  const bulkUnfavorite = useCallback(async () => {
+    const ids = Array.from(selected);
+    if (!ids.length || !beginBulk()) return;
+    try {
+      const r = await hubBulk("unfavorite", ids);
+      const done = r.done ?? ids.length;
+      if (!done) throw new Error(r.error || r.errors?.[0]?.error || copy.error);
+      const failedIds = new Set((r.errors || []).map((x) => x.id));
+      const okIds = new Set(ids.filter((id) => !failedIds.has(id)));
+      setRows((prev) => prev
+        .map((r) => (okIds.has(r.id) ? { ...r, favorite: false } : r))
+        .filter((r) => !(favOnly && okIds.has(r.id))));
+      setToast(copy.unfavorite);
+      clearSelect();
+      setSelectMode(false);
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : copy.error);
+    } finally {
+      endBulk();
+    }
+  }, [selected, favOnly, copy, clearSelect, beginBulk, endBulk]);
+
   const bulkDelete = useCallback(async () => {
     const ids = Array.from(selected);
     if (!ids.length || bulkBusyRef.current) return;
@@ -2028,11 +2117,17 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
     if (!beginBulk()) return;
     try {
       const r = await hubBulk("remove", ids);
-      setToast(fillCopy(copy.deletedMany, { n: String(r.done || ids.length) }));
+      // 只移除服务端确认删除的条目,成功数用后端 done(权威)。
+      // 不能用 r.done || ids.length —— done=0 会被当成全删,部分失败时行数与总数也对不上。
+      const done = r.done ?? 0;
+      if (!done) throw new Error(r.error || r.errors?.[0]?.error || copy.error);
+      const failedIds = new Set((r.errors || []).map((x) => x.id));
+      const removedIds = ids.filter((id) => !failedIds.has(id));
+      setToast(fillCopy(copy.deletedMany, { n: String(done) }));
       clearSelect();
       setSelectMode(false);
-      setRows((prev) => prev.filter((x) => !ids.includes(x.id)));
-      setTotal((t) => Math.max(0, t - (r.done || ids.length)));
+      setRows((prev) => prev.filter((x) => !removedIds.includes(x.id)));
+      setTotal((t) => Math.max(0, t - done));
       void loadMeta();
     } catch (e) {
       setToast(e instanceof Error ? e.message : copy.error);
@@ -2059,6 +2154,7 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
       }));
       setToast(copy.albumAdded);
       setAlbumOpen(false);
+      setLeaveOpen(false);
       setAlbumName("");
       clearSelect();
       setSelectMode(false);
@@ -2075,9 +2171,14 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
     if (!ids.length || !beginBulk()) return;
     try {
       const r = await hubBulk("set_form", ids, { form: formId });
-      setRows((prev) => prev.map((x) => (selected.has(x.id) ? { ...x, form: formId } : x)));
-      setToast(fillCopy(copy.movedMany, { n: String(r.done || ids.length) }));
+      const done = r.done ?? 0;
+      if (!done) throw new Error(r.error || r.errors?.[0]?.error || copy.error);
+      const failedIds = new Set((r.errors || []).map((x) => x.id));
+      setRows((prev) => prev.map((x) =>
+        (selected.has(x.id) && !failedIds.has(x.id) ? { ...x, form: formId } : x)));
+      setToast(fillCopy(copy.movedMany, { n: String(done) }));
       setMoveOpen(false);
+      setLeaveOpen(false);
       clearSelect();
       setSelectMode(false);
       void loadMeta();
@@ -2088,37 +2189,99 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
     }
   }, [selected, copy, clearSelect, beginBulk, endBulk, loadMeta]);
 
-  // 当前筛选若是合集 tag,批量栏可「移出合集」
+  // 当前筛选若是合集 tag,置顶到「移出合集」候选
   const activeCollTag = (tag.startsWith("album:") || tag.startsWith("job:")) ? tag : "";
+  // 选中的素材也可能来自展开的合集卡(此时 tag 为空),按成员实际标签给出候选
+  const leaveCollOptions = useMemo(() => {
+    const inSelection = new Set<string>();
+    for (const r of rows) {
+      if (!selected.has(r.id)) continue;
+      for (const t of csv(r.tags)) {
+        if (t.startsWith("album:") || t.startsWith("job:")) inSelection.add(t);
+      }
+    }
+    if (activeCollTag) inSelection.add(activeCollTag);
+    const opts = collPickOptions.filter((o) => inSelection.has(o.tag));
+    const known = new Set(opts.map((o) => o.tag));
+    for (const t of inSelection) {
+      if (known.has(t)) continue;
+      const isJob = t.startsWith("job:");
+      opts.push({
+        tag: t,
+        kind: isJob ? "job" : "album",
+        title: isJob ? t.slice(4) : albumTitleOf(t),
+        count: 0,
+      });
+    }
+    return activeCollTag
+      ? [...opts.filter((o) => o.tag === activeCollTag), ...opts.filter((o) => o.tag !== activeCollTag)]
+      : opts;
+  }, [rows, selected, activeCollTag, collPickOptions]);
 
-  const bulkLeaveColl = useCallback(async () => {
+  const bulkLeaveColl = useCallback(async (collTag: string) => {
     const ids = Array.from(selected);
-    if (!ids.length || !activeCollTag || !beginBulk()) return;
-    if (!window.confirm(fillCopy(copy.leaveCollConfirm, { n: String(ids.length) }))) {
+    if (!ids.length || !collTag || !beginBulk()) return;
+    const title = leaveCollOptions.find((o) => o.tag === collTag)?.title || collTag;
+    if (!window.confirm(fillCopy(copy.leaveCollConfirm, { n: String(ids.length), name: title }))) {
       endBulk();
       return;
     }
     try {
-      const r = await hubBulk("leave_coll", ids, { tags: activeCollTag });
+      const r = await hubBulk("leave_coll", ids, { tags: collTag });
+      const done = r.done ?? 0;
+      if (!done) throw new Error(r.error || r.errors?.[0]?.error || copy.error);
       setToast(copy.leftColl);
-      const leaveIds = new Set(ids);
+      const failedIds = new Set((r.errors || []).map((x) => x.id));
+      const leaveIds = new Set(ids.filter((id) => !failedIds.has(id)));
       setRows((prev) => prev
         .map((row) => {
           if (!leaveIds.has(row.id)) return row;
-          return { ...row, tags: csv(row.tags).filter((t) => t !== activeCollTag).join(",") };
+          return { ...row, tags: csv(row.tags).filter((t) => t !== collTag).join(",") };
         })
-        // 「只看此合集」筛选下,移出的条目立刻从列表消失
-        .filter((row) => !(leaveIds.has(row.id) && activeCollTag)));
+        // 当前正在看这个合集时,移出的条目立刻从列表消失
+        .filter((row) => !(leaveIds.has(row.id) && tag === collTag)));
       clearSelect();
       setSelectMode(false);
-      setTotal((t) => Math.max(0, t - (r.done || ids.length)));
+      setLeaveOpen(false);
+      setTotal((n) => Math.max(0, n - done));
       void loadMeta();
     } catch (e) {
       setToast(e instanceof Error ? e.message : copy.error);
     } finally {
       endBulk();
     }
-  }, [selected, activeCollTag, copy, clearSelect, beginBulk, endBulk, loadMeta]);
+  }, [selected, leaveCollOptions, copy, tag, clearSelect, beginBulk, endBulk, loadMeta]);
+
+  // 批量导出语种取所选素材自身的 lang: 标签;详情 readiness 只覆盖单个 job
+  const bulkExportLangs = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of rows) {
+      if (!selected.has(r.id)) continue;
+      for (const t of csv(r.tags)) {
+        if (t.startsWith("lang:")) set.add(t.slice(5));
+      }
+    }
+    return Array.from(set).sort();
+  }, [rows, selected]);
+
+  const bulkDeliver = useCallback(async (confirm: boolean) => {
+    const ids = Array.from(selected);
+    if (!ids.length || bulkExportBusy) return;
+    setBulkExportBusy(true);
+    try {
+      const r = await hubDeliver({ ids, lang: bulkExportLang || null, confirm });
+      if (r.error) {
+        setBulkExportResult(null);
+        throw new Error(r.error);
+      }
+      setBulkExportResult(r);
+      if (confirm) setToast(`${copy.exportResult}: ${(r.written || []).length}`);
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : copy.error);
+    } finally {
+      setBulkExportBusy(false);
+    }
+  }, [selected, bulkExportLang, bulkExportBusy, copy]);
 
   const renameColl = useCallback(async (collTag: string, title: string) => {
     if (!collTag.startsWith("album:")) return;
@@ -2581,17 +2744,26 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
               {activeFilterCount > 0 ? <span className="hub-filter-n">({activeFilterCount})</span> : null}
             </button>
             <div className="hub-toolbar-actions">
-              {/* 视频合集:同任务的源片/字幕/翻译折叠成一张卡,可随时切回平铺 */}
-              <button
-                type="button"
-                className={`hub-coll-toggle${collMode ? " on" : ""}`}
-                onClick={() => setCollMode((v) => !v)}
-                aria-pressed={collMode}
-                title={copy.collModeHint}
-                aria-label={copy.collMode}
-              >
-                <span aria-hidden="true">🗂️</span> {copy.collMode}
-              </button>
+              {/* 合集 / 散件 / 全部：互斥 Tab，点合集不再夹带散件 */}
+              <div className="hub-coll-tabs" role="tablist" aria-label={copy.collModeHint} title={copy.collModeHint}>
+                {([
+                  ["coll", copy.collSection],
+                  ["loose", copy.collLooseSection],
+                  ["flat", copy.collFlat],
+                ] as const).map(([id, label]) => (
+                  <button
+                    key={id}
+                    type="button"
+                    role="tab"
+                    // 偏好在 hydrate 后才从 localStorage 恢复;挂载前与 SSR 一致压在「合集」,
+                    // 避免 aria-selected 首帧漂移触发 hydration mismatch。
+                    aria-selected={(collHydrated ? collView : "coll") === id}
+                    onClick={() => setCollView(id)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
               {/* 排序:无边框、显当前值;「相关」仅在有关键词时出现 */}
               <div className="hub-sort">
                 <span className="hub-sort-label">{copy.filterSort}</span>
@@ -2627,6 +2799,8 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
                     setSelected(new Set());
                     setAlbumOpen(false);
                     setMoveOpen(false);
+                    setLeaveOpen(false);
+                    setBulkExportOpen(false);
                   }
                 }}
                 aria-pressed={selectMode}
@@ -2793,41 +2967,24 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
               onDrop: onDropFiles,
             };
             const gridCls =
-              "hub-grid" + (busy ? " busy" : "") + (busy && rows.length ? " refreshing" : "");
-            // 首屏 / 结构筛选切换:骨架屏(匹配合集模式布局),替代转圈与空态闪烁
-            if ((busy && !rows.length && !err) || skelReset) {
+              "hub-grid" + (busy && rows.length ? " refreshing" : "");
+            // 首屏 / 结构筛选切换:骨架屏。加载期固定卡片骨架(不跟合集 Tab 切换)。
+            // collHydrated 前也压骨架,避免偏好「散件」时先闪一帧默认「合集」内容。
+            // 骨架网格不加 .busy,避免 opacity:0.5 把 shimmer 冲成「空白页」。
+            if ((busy && !rows.length) || skelReset || !collHydrated) {
               return (
                 <div className={stageCls} {...stageProps} aria-busy="true" aria-label={copy.loading}>
-                  <div className={gridCls}>
-                    {collMode ? (
-                      <>
-                        {Array.from({ length: 2 }).map((_, i) => (
-                          <div className="hub-skel hub-skel-coll" key={`c${i}`}>
-                            <div className="hub-skel-coll-cover" />
-                            <div className="hub-skel-coll-meta">
-                              <div className="hub-skel-line" />
-                              <div className="hub-skel-line short" />
-                              <div className="hub-skel-line short" />
-                            </div>
-                          </div>
-                        ))}
-                        {Array.from({ length: 6 }).map((_, i) => (
-                          <div className="hub-skel" key={`k${i}`}>
-                            <div className="hub-skel-thumb" />
-                            <div className="hub-skel-line" />
-                            <div className="hub-skel-line short" />
-                          </div>
-                        ))}
-                      </>
-                    ) : (
-                      Array.from({ length: 12 }).map((_, i) => (
-                        <div className="hub-skel" key={i}>
-                          <div className="hub-skel-thumb" />
+                  <div className="hub-grid hub-skel-grid">
+                    {Array.from({ length: 12 }).map((_, i) => (
+                      <div className="hub-skel" key={i}>
+                        <div className="hub-skel-thumb" />
+                        <div className="hub-skel-body">
                           <div className="hub-skel-line" />
                           <div className="hub-skel-line short" />
+                          <div className="hub-skel-line chip" />
                         </div>
-                      ))
-                    )}
+                      </div>
+                    ))}
                   </div>
                 </div>
               );
@@ -2842,23 +2999,40 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
                 </div>
               );
             }
+            const tabEmpty =
+              (collView === "coll" && !collGroups.length)
+                ? copy.collEmpty
+                : (collView === "loose" && !collLoose.length)
+                  ? copy.collLooseEmpty
+                  : null;
+            if (tabEmpty) {
+              return (
+                <div className={stageCls} {...stageProps}>
+                  <div className="hub-empty" role="status">
+                    <p>{tabEmpty}</p>
+                  </div>
+                </div>
+              );
+            }
             return (
               <div className={stageCls} {...stageProps}>
                 <div className={gridCls}>
-                  {gridEntries.map((e) =>
-                    e.type === "card" ? renderCard(e.m) : (
-                      <HubCollection
-                        key={`g-${e.group.key}`}
-                        group={e.group}
-                        defaultOpen={!!e.group.jobTag && tag === e.group.jobTag}
-                        cardCtx={cardCtx}
-                        onFilterJob={filterJob}
-                        onSelectGroup={selectGroup}
-                        onRenameColl={(t, title) => void renameColl(t, title)}
-                        onDissolveColl={(t, title, kind) => void dissolveColl(t, title, kind)}
-                      />
-                    ),
-                  )}
+                  {collView === "coll"
+                    ? collGroups.map((e) => (
+                        <HubCollection
+                          key={`g-${e.group.key}`}
+                          group={e.group}
+                          defaultOpen={!!e.group.jobTag && tag === e.group.jobTag}
+                          cardCtx={cardCtx}
+                          onFilterJob={filterJob}
+                          onSelectGroup={selectGroup}
+                          onRenameColl={(t, title) => void renameColl(t, title)}
+                          onDissolveColl={(t, title, kind) => void dissolveColl(t, title, kind)}
+                        />
+                      ))
+                    : collView === "loose"
+                      ? collLoose.map((e) => renderCard(e.m))
+                      : flatEntries.map((e) => renderCard(e.m))}
                 </div>
               </div>
             );
@@ -2898,7 +3072,7 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
                   className={`watch-btn hub-bulk-primary${albumOpen ? " on" : ""}`}
                   disabled={bulkBusy || selected.size === 0}
                   aria-expanded={albumOpen}
-                  onClick={() => { setAlbumOpen((v) => !v); setMoveOpen(false); }}
+                  onClick={() => { setAlbumOpen((v) => !v); setMoveOpen(false); setLeaveOpen(false); setBulkExportOpen(false); }}
                 >
                   {copy.addToAlbum}
                 </button>
@@ -2962,7 +3136,7 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
                   className={`watch-btn${moveOpen ? " on" : ""}`}
                   disabled={bulkBusy || selected.size === 0}
                   aria-expanded={moveOpen}
-                  onClick={() => { setMoveOpen((v) => !v); setAlbumOpen(false); }}
+                  onClick={() => { setMoveOpen((v) => !v); setAlbumOpen(false); setLeaveOpen(false); setBulkExportOpen(false); }}
                 >
                   {copy.moveMany}
                 </button>
@@ -2991,17 +3165,111 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
                   </div>
                 )}
               </div>
-              {activeCollTag ? (
+              <div className="hub-bulk-popwrap">
                 <button
                   type="button"
-                  className="watch-btn"
-                  disabled={bulkBusy || selected.size === 0}
-                  onClick={() => void bulkLeaveColl()}
+                  className={`watch-btn${leaveOpen ? " on" : ""}`}
+                  disabled={bulkBusy || selected.size === 0 || leaveCollOptions.length === 0}
+                  aria-expanded={leaveOpen}
+                  onClick={() => { setLeaveOpen((v) => !v); setAlbumOpen(false); setMoveOpen(false); setBulkExportOpen(false); }}
                 >
                   {copy.leaveColl}
                 </button>
-              ) : null}
+                {leaveOpen && (
+                  <div className="hub-bulk-pop" role="dialog" aria-label={copy.leaveColl}>
+                    <p className="hub-bulk-pop-hint">{copy.leaveCollHint}</p>
+                    {leaveCollOptions.length ? (
+                      <div className="hub-bulk-pop-list">
+                        {leaveCollOptions.map((a) => (
+                          <button
+                            key={a.tag}
+                            type="button"
+                            className="hub-bulk-pop-item"
+                            disabled={bulkBusy}
+                            title={a.tag}
+                            onClick={() => void bulkLeaveColl(a.tag)}
+                          >
+                            <span className="hub-bulk-pop-item-main">
+                              <span className={`hub-bulk-pop-kind k-${a.kind}`}>
+                                {a.kind === "job" ? copy.collTitle : copy.collAlbumTitle}
+                              </span>
+                              <span>{a.title}</span>
+                            </span>
+                            <span className="n">{a.count}</span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="hub-bulk-pop-empty">{copy.leaveCollEmpty}</p>
+                    )}
+                  </div>
+                )}
+              </div>
               <button type="button" className="watch-btn" disabled={bulkBusy || selected.size === 0} onClick={() => void bulkFavorite()}>{copy.favorite}</button>
+              <button type="button" className="watch-btn" disabled={bulkBusy || selected.size === 0} onClick={() => void bulkUnfavorite()}>{copy.unfavorite}</button>
+              <div className="hub-bulk-popwrap">
+                <button
+                  type="button"
+                  className={`watch-btn${bulkExportOpen ? " on" : ""}`}
+                  disabled={bulkBusy || selected.size === 0}
+                  aria-expanded={bulkExportOpen}
+                  onClick={() => {
+                    setBulkExportOpen((v) => {
+                      if (!v) setBulkExportResult(null);
+                      return !v;
+                    });
+                    setAlbumOpen(false); setMoveOpen(false); setLeaveOpen(false);
+                  }}
+                >
+                  {copy.bulkExport}
+                </button>
+                {bulkExportOpen && (
+                  <div className="hub-bulk-pop hub-bulk-pop-move" role="dialog" aria-label={copy.bulkExport}>
+                    <p className="hub-bulk-pop-hint">{copy.bulkExportHint}</p>
+                    <select
+                      className="hub-field"
+                      aria-label={copy.exportOnlySource}
+                      value={bulkExportLang}
+                      onChange={(e) => { setBulkExportLang(e.target.value); setBulkExportResult(null); }}
+                    >
+                      <option value="">{copy.exportOnlySource}</option>
+                      {bulkExportLangs.map((lg) => <option key={lg} value={lg}>{lg}</option>)}
+                    </select>
+                    <div className="hub-bulk-pop-list">
+                      <button
+                        type="button"
+                        className="watch-btn hub-bulk-primary"
+                        disabled={bulkExportBusy || selected.size === 0}
+                        onClick={() => void bulkDeliver(false)}
+                      >{copy.exportPlan}</button>
+                      <button
+                        type="button"
+                        className="watch-btn"
+                        disabled={bulkExportBusy || !bulkExportResult || bulkExportResult.dry_run === false}
+                        onClick={() => void bulkDeliver(true)}
+                      >{copy.exportConfirm}</button>
+                    </div>
+                    {bulkExportResult ? (
+                      <div className="hub-export-result">
+                        <span className="chip warn">
+                          {copy.exportResult}: {bulkExportResult.dry_run ? copy.exportPlan : copy.exportConfirm}
+                        </span>
+                        {(bulkExportResult.written && bulkExportResult.written.length
+                          ? bulkExportResult.written
+                          : (bulkExportResult.plan || [])).map((e, i) => (
+                          <div key={i} className="hub-export-file">
+                            <span className="chip">{e.mode || e.status || "file"}</span>
+                            <span className="hub-export-name">
+                              {e.dst ? e.dst.split(/[\\/]/).pop() : e.id}
+                            </span>
+                            {e.url ? <a className="chip" href={e.url} download>{copy.exportDownload}</a> : null}
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                )}
+              </div>
               <button type="button" className="watch-btn hub-danger" disabled={bulkBusy || selected.size === 0} onClick={() => void bulkDelete()}>{copy.del}</button>
               <button
                 type="button"
@@ -3012,6 +3280,9 @@ export function MaterialsHub({ copy }: { copy: HubCopy }) {
                   setSelectMode(false);
                   setAlbumOpen(false);
                   setMoveOpen(false);
+                  setLeaveOpen(false);
+                  setBulkExportOpen(false);
+                  setBulkExportResult(null);
                 }}
               >
                 {copy.exitSelect}

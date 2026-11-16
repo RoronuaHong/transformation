@@ -934,7 +934,7 @@ def try_accounts_unbind(platform: str) -> dict:
 
 @app.post("/api/try/urls")
 def try_urls(body: TryUrlsBody, background: BackgroundTasks) -> dict:
-    from api.try_service import job_snapshot, run_try_job, submit_urls, try_status
+    from api.try_service import job_snapshot, kick_try_scheduler, submit_urls
 
     clip_dicts = [{"start": c.start, "end": c.end} for c in body.clips]
     gif_dicts = [{"start": c.start, "end": c.end} for c in body.gif_ranges]
@@ -978,8 +978,8 @@ def try_urls(body: TryUrlsBody, background: BackgroundTasks) -> dict:
         raise HTTPException(status_code=400, detail=out.get("error") or "submit failed")
 
     starter = out.get("started_job_id")
-    if starter and not try_status()["busy"]:
-        background.add_task(run_try_job, int(starter))
+    # Dual-lane: fill content + media slots (not only the starter job).
+    kick_try_scheduler()
 
     enriched = []
     for row in out.get("jobs") or []:
@@ -988,7 +988,16 @@ def try_urls(body: TryUrlsBody, background: BackgroundTasks) -> dict:
         if jid:
             snap = job_snapshot(int(jid))
             if snap.get("ok"):
-                for key in ("status", "path", "title", "error", "progress", "busy"):
+                for key in (
+                    "status",
+                    "path",
+                    "title",
+                    "error",
+                    "progress",
+                    "busy",
+                    "lane",
+                    "workflow",
+                ):
                     if key in snap:
                         item[key] = snap[key]
         enriched.append(item)
@@ -1010,11 +1019,10 @@ def try_urls(body: TryUrlsBody, background: BackgroundTasks) -> dict:
 def try_url(body: TryUrlBody, background: BackgroundTasks) -> dict:
     from api.try_service import (
         job_snapshot,
+        kick_try_scheduler,
         refresh_try_frames,
         resolve_try_intent,
-        run_try_job,
         submit_url,
-        try_status,
     )
 
     clip_dicts = [{"start": c.start, "end": c.end} for c in body.clips]
@@ -1094,9 +1102,6 @@ def try_url(body: TryUrlBody, background: BackgroundTasks) -> dict:
                 "status": snap.get("status") or "done",
             }
 
-        if try_status()["busy"]:
-            raise HTTPException(status_code=409, detail="another job is processing")
-
         if intent["intent"] in ("clips", "frames", "media"):
             background.add_task(
                 partial(refresh_try_frames, job_id, stages=intent["stages"])
@@ -1126,7 +1131,7 @@ def try_url(body: TryUrlBody, background: BackgroundTasks) -> dict:
                 )
         finally:
             queue.close()
-        background.add_task(run_try_job, job_id)
+        kick_try_scheduler()
         snap = job_snapshot(job_id)
         return {
             "accepted": True,
@@ -1140,11 +1145,14 @@ def try_url(body: TryUrlBody, background: BackgroundTasks) -> dict:
             "status": "pending",
         }
 
-    if try_status()["busy"]:
-        raise HTTPException(status_code=409, detail="another job is processing")
     if enqueue == "already_processing":
-        raise HTTPException(status_code=409, detail="another job is processing")
-    background.add_task(run_try_job, job_id)
+        # This pack workflow is already running — kick other free lanes, then 409.
+        kick_try_scheduler()
+        raise HTTPException(
+            status_code=409,
+            detail="this workflow is already processing",
+        )
+    kick_try_scheduler()
     snap = job_snapshot(job_id)
     return {
         "accepted": True,
@@ -1179,7 +1187,7 @@ async def try_uploads(
     media_opts: str = Form("{}"),
     stages: str = Form(""),
 ) -> dict:
-    from api.try_service import job_snapshot, run_try_job, submit_uploads, try_status
+    from api.try_service import job_snapshot, kick_try_scheduler, submit_uploads
 
     if not files:
         raise HTTPException(status_code=400, detail="no files")
@@ -1277,8 +1285,7 @@ async def try_uploads(
         raise HTTPException(status_code=400, detail=out.get("error") or "submit failed")
 
     starter = out.get("started_job_id")
-    if starter and not try_status()["busy"]:
-        background.add_task(run_try_job, int(starter))
+    kick_try_scheduler()
 
     enriched = []
     for row in out.get("jobs") or []:
@@ -1287,7 +1294,16 @@ async def try_uploads(
         if jid:
             snap = job_snapshot(int(jid))
             if snap.get("ok"):
-                for key in ("status", "path", "title", "error", "progress", "busy"):
+                for key in (
+                    "status",
+                    "path",
+                    "title",
+                    "error",
+                    "progress",
+                    "busy",
+                    "lane",
+                    "workflow",
+                ):
                     if key in snap:
                         item[key] = snap[key]
         enriched.append(item)
@@ -1328,10 +1344,8 @@ async def try_upload(
     media_opts: str = Form("{}"),
     stages: str = Form(""),
 ) -> dict:
-    from api.try_service import job_snapshot, run_try_job, submit_upload, try_status
+    from api.try_service import job_snapshot, kick_try_scheduler, submit_upload
 
-    if try_status()["busy"]:
-        raise HTTPException(status_code=409, detail="another job is processing")
     try:
         clip_raw = json.loads(clips or "[]")
     except json.JSONDecodeError:
@@ -1392,7 +1406,7 @@ async def try_upload(
     if not out.get("ok"):
         raise HTTPException(status_code=400, detail=out.get("error") or "upload failed")
     job_id = int(out["job_id"])
-    background.add_task(run_try_job, job_id)
+    kick_try_scheduler()
     snap = job_snapshot(job_id)
     return {"accepted": True, "frame_opts": out.get("frame_opts"), **snap}
 
@@ -1437,13 +1451,13 @@ def try_cancel(job_id: int) -> dict:
 
 @app.post("/api/try/{job_id}/retry")
 def try_retry(job_id: int, background: BackgroundTasks) -> dict:
-    from api.try_service import job_snapshot, retry_try_job, run_try_job, try_status
+    from api.try_service import job_snapshot, kick_try_scheduler, retry_try_job
 
     out = retry_try_job(job_id)
     if not out.get("ok"):
         raise HTTPException(status_code=409, detail=out.get("error") or "retry failed")
-    if out.get("status") == "pending" and not try_status()["busy"]:
-        background.add_task(run_try_job, job_id)
+    if out.get("status") == "pending":
+        kick_try_scheduler()
         snap = job_snapshot(job_id)
         if snap.get("ok"):
             out.update(snap)
@@ -1458,6 +1472,31 @@ def try_keypoint_clips(job_id: int, max_points: int = 12) -> dict:
     out = keypoint_clips_for_job(job_id, max_points=max(1, min(24, int(max_points or 12))))
     if not out.get("ok"):
         raise HTTPException(status_code=404, detail=out.get("error") or "not found")
+    return out
+
+
+@app.get("/api/try/{job_id}/steps")
+def try_job_steps(job_id: int) -> dict:
+    """P2: per-language job_steps for a translate/notes job."""
+    from api.try_service import list_try_job_steps
+
+    out = list_try_job_steps(job_id)
+    if not out.get("ok"):
+        raise HTTPException(status_code=404, detail=out.get("error") or "not found")
+    return out
+
+
+@app.post("/api/try/{job_id}/steps/{step_key}/retry")
+def try_job_step_retry(job_id: int, step_key: str) -> dict:
+    """P2: retry one language step (parent must not be processing)."""
+    from urllib.parse import unquote
+
+    from api.try_service import retry_try_job_step
+
+    key = unquote(step_key or "").strip()
+    out = retry_try_job_step(job_id, key)
+    if not out.get("ok"):
+        raise HTTPException(status_code=409, detail=out.get("error") or "retry failed")
     return out
 
 

@@ -1852,10 +1852,37 @@ html[data-theme="dark"] .theme-toggle-track {
     );
 }
 
+.try-workflow-lanes {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.try-workflow-rail-lane-tag {
+  flex: none !important;
+  min-width: 3.5rem;
+  margin-right: 0.35rem;
+  padding-right: 0.55rem;
+  border-right: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.try-workflow-rail-lane-tag::after {
+  display: none !important;
+}
+
+.try-workflow-rail-lane-tag .try-workflow-rail-label {
+  white-space: nowrap;
+}
+
 .try-workflow-rail {
   list-style: none;
   margin: 0;
-  padding: 0.95rem 1.5rem 0.45rem;
+  padding: 0.55rem 1.5rem 0.25rem;
   display: flex;
   align-items: center;
   justify-content: flex-start;
@@ -1863,9 +1890,17 @@ html[data-theme="dark"] .theme-toggle-track {
   gap: 0.55rem 0;
 }
 
+.try-workflow-rail-content {
+  padding-top: 0.85rem;
+}
+
+.try-workflow-rail-media {
+  padding-bottom: 0.35rem;
+}
+
 .try-workflow-rail-hint {
   margin: 0;
-  padding: 0 1.5rem 0.9rem;
+  padding: 0.25rem 1.5rem 0.9rem;
   font-size: 0.78rem;
   line-height: 1.4;
   color: var(--muted);
@@ -3758,6 +3793,63 @@ html[data-theme="dark"] .theme-toggle-track {
   text-decoration: none;
 }
 
+.try-pack-task-steps {
+  font-size: 0.75rem;
+  opacity: 0.85;
+}
+
+.try-step-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: 0.45rem;
+}
+
+.try-step-chip {
+  appearance: none;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.72rem;
+  line-height: 1.2;
+  padding: 0.2rem 0.45rem;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.try-step-chip:disabled {
+  cursor: default;
+  opacity: 0.85;
+}
+
+.try-step-chip.is-done {
+  border-color: color-mix(in srgb, var(--text) 25%, transparent);
+}
+
+.try-step-chip.is-failed {
+  border-color: #b33;
+  color: #b33;
+}
+
+.try-step-chip.is-review {
+  border-color: #a67c00;
+  color: #a67c00;
+}
+
+.try-step-chip.is-running {
+  border-style: dashed;
+}
+
+.try-step-chip.is-queued:not(:disabled):hover {
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+.try-badge.is-partial,
+.try-pack-task.is-partial .try-pack-task-st {
+  color: #a67c00;
+}
+
 /* ââ Ask the knowledge base (é®é®ä¸æ¡) ââ */
 .ask-page {
   display: block;
@@ -3975,9 +4067,38 @@ html[data-theme="dark"] .theme-toggle-track {
 .hub-fav { width: 2.5rem; padding: 0; justify-content: center; font-size: 1.05rem; line-height: 1; }
 .hub-fav:hover { border-color: var(--primary); color: var(--primary); }
 .hub-fav.on { border-color: var(--primary); color: var(--primary); background: var(--primary-bg); }
-/* 视频合集视图开关 */
-.hub-coll-toggle { display: inline-flex; align-items: center; gap: 0.3rem; white-space: nowrap; }
-.hub-coll-toggle.on { border-color: var(--primary); color: var(--primary); background: var(--primary-bg); }
+/* 合集 / 散件 / 全部：工具栏 Tab（覆盖 .hub-toolbar button 的独立描边） */
+.hub-coll-tabs {
+  display: inline-flex;
+  align-items: stretch;
+  height: 2.5rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-ctrl);
+  background: var(--bg);
+  overflow: hidden;
+}
+.hub-toolbar .hub-coll-tabs button {
+  appearance: none;
+  margin: 0;
+  height: 100%;
+  padding: 0 0.75rem;
+  border: 0;
+  border-radius: 0;
+  border-right: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.hub-toolbar .hub-coll-tabs button:last-child { border-right: 0; }
+.hub-toolbar .hub-coll-tabs button:hover { color: var(--primary); background: var(--primary-bg); }
+.hub-toolbar .hub-coll-tabs button[aria-selected="true"] {
+  color: var(--primary);
+  background: var(--primary-bg);
+}
 /* ⋯ 更多:溢出菜单,收纳检索方式 / 刷新 / 批量管理 */
 .hub-more { position: relative; display: inline-flex; }
 .hub-more-btn { width: 2.5rem; padding: 0; justify-content: center; font-size: 1.2rem; line-height: 1; }
@@ -4022,7 +4143,7 @@ html[data-theme="dark"] .theme-toggle-track {
 .hub-chipfx:hover .hub-chipfx-x { background: rgba(255, 255, 255, 0.28); }
 .hub-error { padding: 0.85rem 1rem; border: 1px solid var(--danger); border-radius: var(--radius-card); background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--ink); }
 /* B 站「批量管理」模式:勾选框常显 */
-.hub-stage.selmode .hub-card-check { opacity: 1; transform: none; }
+.hub-stage.selmode .hub-card-check { opacity: 1; transform: none; pointer-events: auto; }
 .hub-layout { display: flex; gap: 1rem; align-items: flex-start; min-height: 50vh; }
 
 /* ===== B 站风格:顶部醒目的媒体类型分段标签栏(替代折叠侧栏里的小 facet)=====
@@ -4275,43 +4396,54 @@ html[data-theme="dark"] .theme-toggle-track {
 .hub-card:focus-within { border-color: var(--primary); }
 .hub-card.selected { border-color: var(--primary); box-shadow: 0 0 0 2px var(--primary); }
 .hub-thumb { position: relative; aspect-ratio: 16 / 9; height: auto; display: flex; align-items: center; justify-content: center; overflow: hidden; border-bottom: 1px solid var(--line); background: radial-gradient(120% 120% at 50% 0%, var(--surface) 0%, var(--tile) 100%); }
-.hub-thumb img { width: 100%; height: 100%; object-fit: cover; cursor: pointer; transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.3, 1); }
+.hub-thumb img { width: 100%; height: 100%; object-fit: cover; transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.3, 1); }
 .hub-card:hover .hub-thumb img { transform: scale(1.05); }
 .hub-thumb video {
   width: 100%;
   height: 100%;
   object-fit: cover;
   background: #000;
-  pointer-events: auto;
+  /* 高于 body::after;自身接 click 开详情,并保留 hover 预览 */
   position: relative;
-  z-index: 1;
+  z-index: 2;
+  cursor: pointer;
 }
-.hub-thumb .ph { font-size: 2rem; color: var(--muted); cursor: pointer; }
-.hub-thumb .pill { border: 1px solid var(--line-strong); border-radius: 8px; padding: 0.35rem 0.75rem; color: var(--muted); font-size: 0.75rem; letter-spacing: 0.08em; cursor: pointer; }
+.hub-card-body .muted,
+.hub-card-body .hub-desc,
+.hub-card-body .hub-chips,
+.hub-card-body .hub-hit,
+.hub-card-body .hub-card-badges {
+  position: relative;
+  z-index: 0;
+}
+.hub-thumb .ph { font-size: 2rem; color: var(--muted); pointer-events: none; }
+.hub-thumb .pill { border: 1px solid var(--line-strong); border-radius: 8px; padding: 0.35rem 0.75rem; color: var(--muted); font-size: 0.75rem; letter-spacing: 0.08em; pointer-events: none; }
 .hub-thumb .pill.bad { color: var(--danger); border-color: var(--danger); }
 .hub-kind-badge { position: absolute; right: 0.4rem; bottom: 0.4rem; z-index: 2; font-size: 0.68rem; background: rgba(0,0,0,0.72); color: #fff; border-radius: 999px; padding: 0.08rem 0.45rem; letter-spacing: 0.04em; pointer-events: none; }
-/* 选择框:默认隐藏,hover/focus/已选时显现 */
+/* 选择框:默认隐藏且不抢点击;hover/focus/已选时显现并恢复 pointer */
 .hub-card-check {
   position: absolute; top: 0.4rem; left: 0.4rem; z-index: 4;
   width: 1.5rem; height: 1.5rem; display: inline-flex; align-items: center; justify-content: center;
   border: 1.5px solid rgba(255,255,255,0.95); border-radius: 7px; background: rgba(0,0,0,0.42);
   color: #fff; cursor: pointer; padding: 0;
-  opacity: 0; transform: scale(0.85); transition: opacity 0.15s ease, transform 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+  opacity: 0; transform: scale(0.85); pointer-events: none;
+  transition: opacity 0.15s ease, transform 0.15s ease, background 0.15s ease, border-color 0.15s ease;
   backdrop-filter: blur(2px);
 }
 .hub-card-check svg { display: block; width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; opacity: 0; transition: opacity 0.12s ease; }
 .hub-card-check.on svg { opacity: 1; }
 .hub-card:hover .hub-card-check,
 .hub-card:focus-within .hub-card-check,
-.hub-card-check.on { opacity: 1; transform: none; }
+.hub-card-check.on { opacity: 1; transform: none; pointer-events: auto; }
 .hub-card-check.on { background: var(--primary); border-color: var(--primary); }
 .hub-card-del {
-  position: absolute; top: 0.4rem; right: 0.4rem; z-index: 3;
+  position: absolute; top: 0.4rem; right: 0.4rem; z-index: 4;
   width: 1.9rem; height: 1.9rem;
   display: inline-flex; align-items: center; justify-content: center;
   border: 0; border-radius: 999px; padding: 0; cursor: pointer;
   color: #fff; background: rgba(0,0,0,0.55); backdrop-filter: blur(4px);
-  opacity: 0; transform: translateY(-4px) scale(0.9); transition: opacity 0.15s ease, transform 0.15s ease, background 0.15s ease, color 0.15s ease;
+  opacity: 0; transform: translateY(-4px) scale(0.9); pointer-events: none;
+  transition: opacity 0.15s ease, transform 0.15s ease, background 0.15s ease, color 0.15s ease;
 }
 .hub-card-del svg {
   display: block;
@@ -4324,17 +4456,18 @@ html[data-theme="dark"] .theme-toggle-track {
   stroke-linejoin: round;
 }
 .hub-card:hover .hub-card-del,
-.hub-card:focus-within .hub-card-del { opacity: 1; transform: none; }
+.hub-card:focus-within .hub-card-del { opacity: 1; transform: none; pointer-events: auto; }
 .hub-card-del:hover {
   background: var(--danger);
 }
 .hub-card-fav {
-  position: absolute; top: 0.4rem; right: 2.55rem; z-index: 3;
+  position: absolute; top: 0.4rem; right: 2.55rem; z-index: 4;
   width: 1.9rem; height: 1.9rem;
   display: inline-flex; align-items: center; justify-content: center;
   border: 0; border-radius: 999px; padding: 0; cursor: pointer;
   color: #fff; background: rgba(0,0,0,0.55); backdrop-filter: blur(4px);
-  opacity: 0; transform: translateY(-4px) scale(0.9); transition: opacity 0.15s ease, transform 0.15s ease, background 0.15s ease, color 0.15s ease;
+  opacity: 0; transform: translateY(-4px) scale(0.9); pointer-events: none;
+  transition: opacity 0.15s ease, transform 0.15s ease, background 0.15s ease, color 0.15s ease;
 }
 .hub-card-fav svg {
   display: block;
@@ -4347,13 +4480,28 @@ html[data-theme="dark"] .theme-toggle-track {
   stroke-linejoin: round;
 }
 .hub-card:hover .hub-card-fav,
-.hub-card:focus-within .hub-card-fav { opacity: 1; transform: none; }
+.hub-card:focus-within .hub-card-fav { opacity: 1; transform: none; pointer-events: auto; }
 .hub-card-fav:hover { background: rgba(0,0,0,0.72); color: var(--warning); }
-.hub-card-fav.on { opacity: 1; transform: none; color: var(--warning); background: rgba(0,0,0,0.55); }
+.hub-card-fav.on { opacity: 1; transform: none; pointer-events: auto; color: var(--warning); background: rgba(0,0,0,0.55); }
 .hub-card-fav.on svg { fill: var(--warning); }
-.hub-card-body { display: flex; flex-direction: column; gap: 0.3rem; padding: 0.7rem 0.8rem 0.85rem; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; width: 100%; }
-.hub-card-body:hover { background: color-mix(in srgb, var(--primary) 5%, transparent); }
-.hub-card-body strong { font-size: 0.86rem; line-height: 1.35; font-weight: 600; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
+/* position:static 让 ::after 相对 .hub-card 定位,铺满整卡(含缩略图);
+   flex:1 吃掉同排等高拉伸多出的高度,避免正文下出现一块空白 */
+.hub-card-body {
+  position: static; display: flex; flex-direction: column; gap: 0.3rem;
+  flex: 1 1 auto; min-height: 0;
+  padding: 0.7rem 0.8rem 0.85rem; border: 0; background: transparent;
+  color: inherit; font: inherit; text-align: left; cursor: pointer; width: 100%;
+}
+.hub-card-body::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  cursor: pointer;
+}
+.hub-card-body:hover,
+.hub-card:hover .hub-card-body { background: color-mix(in srgb, var(--primary) 5%, transparent); }
+.hub-card-body strong { position: relative; z-index: 0; font-size: 0.86rem; line-height: 1.35; font-weight: 600; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
 .hub-hit { font-size: 0.72rem; color: var(--primary); }
 .hub-desc { margin: 0; font-size: 0.75rem; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .hub-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; }
@@ -4409,15 +4557,52 @@ html[data-theme="dark"] .theme-toggle-track {
 .hub-stage { position: relative; }
 .hub-stage.drag::after { content: ""; position: absolute; inset: 0; z-index: 12; border: 2px dashed var(--primary); border-radius: var(--radius-card); background: color-mix(in srgb, var(--primary) 9%, transparent); pointer-events: none; }
 .hub-stage.drag::before { content: attr(data-tip); position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 13; padding: 0.6rem 1rem; border-radius: 999px; background: var(--primary); color: #fff; font-size: 0.9rem; box-shadow: var(--shadow-float); pointer-events: none; }
-/* 骨架屏(首屏/筛选切换;合集模式含横条占位) */
-.hub-skel { border: 1px solid var(--line); border-radius: var(--radius-card); background: var(--surface); overflow: hidden; box-shadow: var(--shadow-card); }
-.hub-skel-thumb { aspect-ratio: 16 / 9; height: auto; background: linear-gradient(100deg, var(--tile) 30%, var(--tile-deep) 50%, var(--tile) 70%); background-size: 220% 100%; animation: hubShimmer 1.3s linear infinite; }
-.hub-skel-line { height: 0.7rem; margin: 0.75rem 0.8rem 0; border-radius: 5px; background: linear-gradient(100deg, var(--tile) 30%, var(--tile-deep) 50%, var(--tile) 70%); background-size: 220% 100%; animation: hubShimmer 1.3s linear infinite; }
-.hub-skel-line.short { width: 55%; margin-bottom: 0.85rem; }
+/* 骨架屏(首屏/筛选切换;合集模式含横条占位)。
+   中间色用 muted 混色,避免 --tile/--tile-deep 过近导致「看起来像空白」。 */
+.hub-skel-grid { pointer-events: none; }
+.hub-skel {
+  display: flex; flex-direction: column;
+  border: 1px solid var(--line); border-radius: var(--radius-card);
+  background: var(--surface); overflow: hidden; box-shadow: var(--shadow-card);
+}
+.hub-skel-thumb {
+  aspect-ratio: 16 / 9; height: auto; border-bottom: 1px solid var(--line);
+  background: linear-gradient(
+    100deg,
+    color-mix(in srgb, var(--muted) 10%, var(--tile)) 28%,
+    color-mix(in srgb, var(--muted) 28%, var(--surface)) 50%,
+    color-mix(in srgb, var(--muted) 10%, var(--tile)) 72%
+  );
+  background-size: 220% 100%;
+  animation: hubShimmer 1.25s linear infinite;
+}
+.hub-skel-body { display: flex; flex-direction: column; gap: 0.55rem; padding: 0.75rem 0.8rem 0.9rem; flex: 1; }
+.hub-skel-line {
+  height: 0.72rem; border-radius: 5px; width: 88%;
+  background: linear-gradient(
+    100deg,
+    color-mix(in srgb, var(--muted) 12%, var(--tile)) 28%,
+    color-mix(in srgb, var(--muted) 30%, var(--surface)) 50%,
+    color-mix(in srgb, var(--muted) 12%, var(--tile)) 72%
+  );
+  background-size: 220% 100%;
+  animation: hubShimmer 1.25s linear infinite;
+}
+.hub-skel-line.short { width: 52%; height: 0.62rem; }
+.hub-skel-line.chip { width: 4.5rem; height: 1.05rem; border-radius: 999px; }
 .hub-skel-coll { grid-column: 1 / -1; display: flex; align-items: center; gap: 0.9rem; padding: 0.85rem; }
-.hub-skel-coll-cover { flex: 0 0 8.4rem; aspect-ratio: 16 / 9; border-radius: 10px; background: linear-gradient(100deg, var(--tile) 30%, var(--tile-deep) 50%, var(--tile) 70%); background-size: 220% 100%; animation: hubShimmer 1.3s linear infinite; }
-.hub-skel-coll-meta { flex: 1; min-width: 0; }
-.hub-skel-coll-meta .hub-skel-line { margin-left: 0; margin-right: 0; }
+.hub-skel-coll-cover {
+  flex: 0 0 8.4rem; aspect-ratio: 16 / 9; border-radius: 10px;
+  background: linear-gradient(
+    100deg,
+    color-mix(in srgb, var(--muted) 10%, var(--tile)) 28%,
+    color-mix(in srgb, var(--muted) 28%, var(--surface)) 50%,
+    color-mix(in srgb, var(--muted) 10%, var(--tile)) 72%
+  );
+  background-size: 220% 100%;
+  animation: hubShimmer 1.25s linear infinite;
+}
+.hub-skel-coll-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.55rem; }
 .hub-grid.refreshing { opacity: 0.55; transition: opacity 0.18s ease; pointer-events: none; }
 @keyframes hubShimmer { to { background-position: -220% 0; } }
 /* 批量管理入口(工具栏) */
@@ -4518,12 +4703,14 @@ html[data-theme="dark"] .theme-toggle-track {
 @media (prefers-reduced-motion: reduce) {
   .hub-card, .hub-thumb img, .hub-card-del, .hub-card-fav, .hub-card-check { transition: none !important; }
   .hub-card:hover { transform: none; }
-  .hub-skel-thumb, .hub-skel-line, .hub-skel-coll-cover { animation: none; }
+  .hub-skel-thumb, .hub-skel-line, .hub-skel-coll-cover { animation: none !important; }
   .hub-grid.refreshing { transition: none; }
 }
-/* 触屏(无 hover):操作按钮与选择框常显,避免隐藏后无法点 */
+/* 触屏(无 hover):操作按钮与选择框常显并可点(基线 pointer-events:none 必须放开) */
 @media (hover: none) {
-  .hub-card-del, .hub-card-fav, .hub-card-check { opacity: 1; transform: none; }
+  .hub-card-del, .hub-card-fav, .hub-card-check {
+    opacity: 1; transform: none; pointer-events: auto;
+  }
 }
 /* 步骤 1/4/5:入库链逐步状态 + 理解记录(派生 sidecar,只读展示) */
 .hub-run { display: flex; flex-wrap: wrap; gap: 0.3rem; margin: 0.6rem 0; }

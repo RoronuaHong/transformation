@@ -40,15 +40,48 @@ WORKFLOW_ORDER: tuple[str, ...] = (
     WORKFLOW_PUBLISH,
 )
 
-# Video handoff chain (earlier → later). REQ-A03 auto-serial.
+LANE_CONTENT = "content"
+LANE_MEDIA = "media"
+
+CONTENT_WORKFLOWS: frozenset[str] = frozenset(
+    {
+        WORKFLOW_TRANSLATE,
+        WORKFLOW_NOTES,
+        WORKFLOW_FRAMES,
+        WORKFLOW_ALL,
+    }
+)
+MEDIA_WORKFLOWS: frozenset[str] = frozenset(
+    {
+        WORKFLOW_DEHARDSUB,
+        WORKFLOW_CLIPS,
+        WORKFLOW_CONCAT,
+        WORKFLOW_DEBLUR,
+        WORKFLOW_ENHANCE,
+        WORKFLOW_COMPRESS,
+        WORKFLOW_REMIX,
+        WORKFLOW_PUBLISH,
+    }
+)
+
+# Post-clean video handoff (earlier → later). Concat is a sibling fan-out
+# from dehardsub/clips — NOT an upstream of deblur (dual-lane design).
 VIDEO_INPUT_CHAIN: tuple[str, ...] = (
     WORKFLOW_DEHARDSUB,
-    WORKFLOW_CONCAT,
     WORKFLOW_DEBLUR,
     WORKFLOW_ENHANCE,
     WORKFLOW_COMPRESS,
     WORKFLOW_REMIX,
 )
+
+ARTIFACT_SOURCE_SRT = "source_srt"
+
+
+def lane_for_workflow(workflow: str) -> str:
+    wf = (workflow or "").strip() or WORKFLOW_ALL
+    if wf in CONTENT_WORKFLOWS:
+        return LANE_CONTENT
+    return LANE_MEDIA
 
 # Relative paths under work_dir for pack artifacts.
 WORKFLOW_ARTIFACT_RELS: dict[str, tuple[str, ...]] = {
@@ -112,6 +145,8 @@ def expand_workflow_tasks(
             first = raw.split(",")[0].strip().lower() or "custom"
             tasks = [{"workflow": first, "stages": raw}]
         return annotate_task_handoffs(tasks, input_from=input_from)
+
+    # annotate_task_handoffs always sets lane; early-return path covered above.
 
     out: list[dict[str, Any]] = []
     if toggles[WORKFLOW_TRANSLATE]:
@@ -194,8 +229,11 @@ def annotate_task_handoffs(
         if inp == INPUT_AUTO:
             inp = default_input_from(wf, selected)
         deps: list[str] = []
+        artifact_deps: list[str] = []
+        # Notes wait for source.srt (often produced mid-translate), not the
+        # whole translate job — so localize can start once ASR/OCR finishes.
         if wf == WORKFLOW_NOTES and WORKFLOW_TRANSLATE in selected:
-            deps.append(WORKFLOW_TRANSLATE)
+            artifact_deps.append(ARTIFACT_SOURCE_SRT)
         if inp and inp not in (INPUT_SOURCE, INPUT_AUTO, None) and inp in selected:
             if inp not in deps:
                 deps.append(inp)
@@ -205,6 +243,9 @@ def annotate_task_handoffs(
                 deps.append(WORKFLOW_NOTES)
         t["input_from"] = inp
         t["depends_on"] = deps
+        if artifact_deps:
+            t["depends_on_artifacts"] = artifact_deps
+        t["lane"] = lane_for_workflow(wf)
         annotated.append(t)
     return annotated
 
@@ -216,11 +257,14 @@ def tasks_meta_payload(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         row: dict[str, Any] = {
             "workflow": t["workflow"],
             "stages": t["stages"],
+            "lane": t.get("lane") or lane_for_workflow(str(t.get("workflow") or "")),
         }
         if t.get("input_from") is not None:
             row["input_from"] = t["input_from"]
         if t.get("depends_on"):
             row["depends_on"] = list(t["depends_on"])
+        if t.get("depends_on_artifacts"):
+            row["depends_on_artifacts"] = list(t["depends_on_artifacts"])
         out.append(row)
     return out
 

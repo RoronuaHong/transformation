@@ -5,7 +5,7 @@ description: Processes pending queue jobs with ASR/translate/notes and optional 
 
 # Batch process (local first) · WF-01 + WF-02
 
-> 产品归属：`trans/工具需求.md` → **WF-01 翻译** + **WF-02 笔记**（+ 可选 export 旁路）。不覆盖增强/压缩/拼接/二创/发布。
+> 产品归属：`trans/工具需求.md` → **WF-01 翻译** + **WF-02 笔记**（+ 可选 export 旁路）。不覆盖增强/压缩/拼接/竖屏包装/发布/AI Remake。
 
 ## Rules
 
@@ -25,7 +25,7 @@ description: Processes pending queue jobs with ASR/translate/notes and optional 
   - `postproc` — 媒体轨：dehardsub,deblur,enhance,compress（第二轨，opt-in）
   - `media` / `clips` / `frames` — re-cut only (needs existing notes)
   - comma list e.g. `content,postproc` / `translate,localize,dehardsub`
-- Parallel already: notes∥translate fork; `--lang-workers`; `VITUAL_CLIP_WORKERS`
+- Parallel already: `--lang-workers`（字幕翻译 / 笔记 localize）；`VITUAL_CLIP_WORKERS`。**不是** notes∥translate（batch 已串行；设计见 `trans/并行化设计.md`）
 - Yarn tracks: `batch:content` / `batch:fast` / `batch:postproc` / `batch:dehardsub`
 - Whisper stays local. Secrets: `llm.yaml` / `.env` are gitignored.
 - Source language in content.db / filenames must be a real code (`en`, `zh`, …), **never** `src`.

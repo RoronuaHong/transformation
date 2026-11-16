@@ -862,7 +862,7 @@ class Handler(BaseHTTPRequestHandler):
                 if job_tag:
                     subs = search("", tag="%s,lang:%s" % (job_tag, lang), limit=20)
                     for s in subs:
-                        if m.get("kind") == "docs" and "type:subs" in (m.get("tags") or "") and s["id"] not in ids:
+                        if s.get("kind") == "docs" and "type:subs" in (s.get("tags") or "") and s["id"] not in ids:
                             ids.append(s["id"])
             res = deliver_package(
                 ids=ids, confirm=bool(body.get("confirm")),

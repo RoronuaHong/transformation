@@ -60,6 +60,8 @@ SKIP_EXT = {".db", ".pyc", ".py", ".log", ".err", ".example"}
 SIDECAR_MEDIA_JSON = {
     "fetch_meta.json", "sync_meta.json", "multipass_raw.json",
     "media_status.json", "pack_manifest.json", "glossary.json",
+    "hardsub_compare.json", "hardsub_truth.json", "hardsub_audit.json",
+    "danmaku_hotwords.json", "dehardsub_progress.json", "dehardsub_meta.json",
 }
 
 
@@ -73,7 +75,37 @@ def is_pipeline_sidecar(path):
         base in SIDECAR_MEDIA_JSON
         or base.startswith("translate_qa_")
         or base.startswith("notes_qa_")
+        or base.endswith("_meta.json")
+        or base.endswith("_progress.json")
     )
+
+
+def is_pipeline_intermediate(path):
+    """流水线中间产物:不入库(切片多语字幕拷贝 / 下划线临时片 / 半成品)。
+
+    合集应只保留母版 + 可交付成片 + 整片 ``subs/`` + notes；
+    ``media/segments/**`` 的多语拷贝会把一个视频刷成几十张字幕卡。
+    """
+    low = str(path or "").replace("\\", "/").lower()
+    base = os.path.basename(low)
+    # 切片旁路字幕包(整片已有 fununion20)
+    if "/media/segments/" in low:
+        return True
+    # 临时/半成品视频
+    if base.startswith("_") and base.endswith((".mp4", ".avi", ".mkv", ".webm")):
+        return True
+    if base.endswith("_saved.mp4") or base in {
+        "clean_lama_writing.mp4",
+        "source_video.f30280.m4a",  # yt-dlp 中间音轨
+    }:
+        return True
+    # dehardsub 多遍中间片(最终交付是 clean.mp4)
+    if "/media/dehardsub/" in low and base.startswith("_hs_"):
+        return True
+    # remix 拼装零件
+    if "/media/remix/" in low and base in {"_body.mp4", "_intro.mp4"}:
+        return True
+    return False
 # 单一真源:core.HUB_LANGS(字幕产物 20 语包)。站点 UI 的 16 语 locales 与它刻意解耦。
 LANGS = set(core.HUB_LANGS)
 
@@ -187,7 +219,7 @@ def _iter_files(base):
             if f.startswith("_probe"):
                 continue
             p = os.path.join(dirpath, f)
-            if is_pipeline_sidecar(p):
+            if is_pipeline_sidecar(p) or is_pipeline_intermediate(p):
                 continue
             yield p
 
@@ -415,7 +447,7 @@ def prune_sidecars(dry_run=False):
     removed, fixed = [], []
     for m in core.all_materials():
         p = m.get("external_path") or m.get("rel_path") or ""
-        if is_pipeline_sidecar(p):
+        if is_pipeline_sidecar(p) or is_pipeline_intermediate(p):
             removed.append(m["id"])
             continue
         parts = [t.strip() for t in (m.get("tags") or "").split(",") if t.strip()]

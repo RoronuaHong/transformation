@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -1354,7 +1355,43 @@ def fetch_to_wav(
     return meta
 
 
+_source_video_locks: dict[str, threading.Lock] = {}
+_source_video_locks_guard = threading.Lock()
+
+
+def _source_video_lock_for(out_dir: Path) -> threading.Lock:
+    key = str(Path(out_dir).resolve())
+    with _source_video_locks_guard:
+        lock = _source_video_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _source_video_locks[key] = lock
+        return lock
+
+
 def ensure_source_video(
+    url: str,
+    out_dir: Path,
+    *,
+    cookies_from_browser: str | None = "chrome",
+    cookies_file: Path | None = None,
+    force: bool = False,
+    max_height: int = DEFAULT_VIDEO_MAX_HEIGHT,
+) -> Path:
+    """Download a muxed video (prefer ≤1080p H.264+AAC) into media/source.mp4."""
+    out_dir = Path(out_dir)
+    with _source_video_lock_for(out_dir):
+        return _ensure_source_video_unlocked(
+            url,
+            out_dir,
+            cookies_from_browser=cookies_from_browser,
+            cookies_file=cookies_file,
+            force=force,
+            max_height=max_height,
+        )
+
+
+def _ensure_source_video_unlocked(
     url: str,
     out_dir: Path,
     *,

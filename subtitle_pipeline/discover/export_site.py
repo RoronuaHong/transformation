@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -208,10 +209,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         articles = export_articles(db, site_public=args.site_public)
         args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(
-            json.dumps({"articles": articles}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        payload = json.dumps({"articles": articles}, ensure_ascii=False, indent=2)
+        tmp = args.out.with_suffix(args.out.suffix + f".tmp.{os.getpid()}")
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, args.out)
         n_cues = sum(len(a.get("cues") or []) for a in articles)
         print(f"[export] {len(articles)} articles cues={n_cues} → {args.out}")
         return 0
