@@ -130,7 +130,10 @@ def test_crawler_links_action_dual_write(tmp_path: Path, monkeypatch) -> None:
     db = QueueDB()
     try:
         row = db.list_video_jobs("youtube", "v1")[0]
-        db.mark_done(int(row["id"]))
+        # mark_done 自 444968a 起只接受 processing/done/partial（不再接受 pending）；
+        # 先置 processing 再标完成，符合真实生命周期。
+        db.set_status(int(row["id"]), "processing")
+        assert db.mark_done(int(row["id"]))
     finally:
         db.close()
     sync_links_from_queue(mem, source="test")

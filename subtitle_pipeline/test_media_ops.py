@@ -111,7 +111,8 @@ def test_normalize_media_opts_postproc_modes() -> None:
     assert quality["dehardsub_engine"] == "ocr_telea"
     assert quality["dehardsub_passes"] == 1
     assert quality["deblur_demosaic"] is True
-    assert quality["dehardsub_polish_residual_floor"] == 1.0
+    # quality keeps residual polish on (0.02); fast is the mode that disables it.
+    assert quality["dehardsub_polish_residual_floor"] == 0.02
     assert quality["dehardsub_dialogue_short_route"] == "auto"
 
 
@@ -921,17 +922,23 @@ def test_hardsub_fast_fill_uses_segment_windows(tmp_path: Path, monkeypatch) -> 
         }
 
     def fake_scan(*_args, **_kwargs):
+        # 单 GOP 10s 样片：只命中开头一小段，避免扩窗后覆盖率超过
+        # segment 快速路径的 85% 硬闸（两个分散 hit 会被吸附成全程 → 退化 full）。
         return {
-            "hits": [1.6, 7.8],
-            "hits_n": 2,
+            "hits": [1.6],
+            "hits_n": 1,
             "frames": 20,
-            "hit_frac": 0.1,
+            "hit_frac": 0.05,
             "fps": 2.0,
             "reason": "caption_timeline",
         }
 
     monkeypatch.setattr("media_ops.detect_hardsubs", fake_detect)
     monkeypatch.setattr("media_ops.scan_caption_timeline", fake_scan)
+    # 本测试专测 segment-window 路径：短样片经 fade-hold 扩窗后覆盖率会超过
+    # DENSE_COVERAGE_FULL(0.75) 触发 delogo_full。抬高阈值确保走 segments，
+    # 让断言聚焦于「窗口来自稠密时间轴」这一被测逻辑。
+    monkeypatch.setattr("media_ops.DENSE_COVERAGE_FULL", 1.0)
     cleaned, meta = strip_hardsubs(
         tmp_path,
         video=src,
@@ -978,6 +985,11 @@ def test_a1_auto_does_not_skip_when_dense_scan_finds_captions(
 
     monkeypatch.setattr("media_ops.detect_hardsubs", fake_detect)
     monkeypatch.setattr("media_ops.scan_caption_timeline", fake_scan)
+    # 本测试只验证 detect/scan 决策，不依赖外部 Ollama：合成视频上 OCR 未检出时
+    # resolve_hardsub_boxes 会转 VLM 定位，本机 Ollama 响应慢会拖满 180s×3 帧。
+    # 置 None 使其降级到 band 定位（纯本地），测试逻辑与速度都不受影响。
+    monkeypatch.setattr("media_ops.locate_hardsub_box_vlm", lambda *a, **k: None)
+    monkeypatch.setattr("media_ops.detect_dialogue_box_ocr", lambda *a, **k: None)
     cleaned, meta = strip_hardsubs(
         tmp_path, video=src, force=False, mode="auto", engine="ocr_telea"
     )
@@ -1035,7 +1047,11 @@ def test_run_postproc_dehardsub(tmp_path: Path) -> None:
     out = run_postproc(
         tmp_path,
         frozenset({"dehardsub"}),
-        media_opts={"dehardsub_mode": "band", "dehardsub_engine": "ocr_telea"},
+        media_opts={
+            "dehardsub_mode": "band",
+            "dehardsub_engine": "ocr_telea",
+            "dehardsub_require_confirm": False,
+        },
     )
     assert "dehardsub" in out
     meta_path = media / "dehardsub" / "dehardsub_meta.json"
@@ -1177,5 +1193,106 @@ def test_hybrid_cleanup_skips_polish_when_residual_low(tmp_path: Path, monkeypat
     assert encode["polish_applied"] is False
     assert float(encode["polish_probe"]["hardsub"]) == 0.005
     assert lama_calls == []
+
+
+def _route_probe_video(path: Path, *, textured: bool) -> Path:
+    import cv2
+    import numpy as np
+
+    w, h = 320, 240
+    vw = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), 10.0, (w, h))
+    assert vw.isOpened()
+    rng = np.random.default_rng(7)
+    for _ in range(10):
+        if textured:
+            fr = np.clip(rng.normal(30, 18, (h, w, 3)), 0, 95).astype(np.uint8)
+        else:
+            fr = np.full((h, w, 3), 6, dtype=np.uint8)
+        cv2.putText(
+            fr, "TEST 01", (55, 222), cv2.FONT_HERSHEY_SIMPLEX,
+            0.7, (255, 255, 255), 2, cv2.LINE_AA,
+        )
+        vw.write(fr)
+    vw.release()
+    return path
+
+
+def test_classify_dialogue_route_rejects_dark_textured_scene(tmp_path: Path) -> None:
+    from _inpaint_shared import classify_dialogue_route
+
+    box = {"x": 45, "y": 195, "w": 230, "h": 40}
+    plate = classify_dialogue_route(
+        _route_probe_video(tmp_path / "plate.mp4", textured=False), box, samples=5
+    )
+    scene = classify_dialogue_route(
+        _route_probe_video(tmp_path / "scene.mp4", textured=True), box, samples=5
+    )
+    assert plate["route"] == "glyph_black"
+    assert scene["route"] != "glyph_black"
+    assert float(scene["plate_std_gray"]) > float(plate["plate_std_gray"])
+
+
+def test_glyph_black_flood_guard(tmp_path: Path) -> None:
+    from _inpaint_shared import glyph_black_would_flood
+
+    box = {"x": 45, "y": 195, "w": 230, "h": 40}
+    assert not glyph_black_would_flood(
+        _route_probe_video(tmp_path / "plate2.mp4", textured=False), box
+    )
+    assert glyph_black_would_flood(
+        _route_probe_video(tmp_path / "scene2.mp4", textured=True), box
+    )
+
+
+def test_normalize_media_opts_confirm_gate_default() -> None:
+    assert normalize_media_opts({})["dehardsub_require_confirm"] is True
+    assert (
+        normalize_media_opts({"dehardsub_require_confirm": False})[
+            "dehardsub_require_confirm"
+        ]
+        is False
+    )
+
+
+def test_run_postproc_dehardsub_confirm_gate(tmp_path: Path, monkeypatch) -> None:
+    import media_ops
+
+    media = tmp_path / "media"
+    media.mkdir()
+    src = media / "source.mp4"
+    _tiny_mp4_with_bottom_bar(src, seconds=1.0)
+    boxes = [{"x": 10, "y": 190, "w": 300, "h": 40, "role": "dialogue"}]
+
+    def fake_detect(work_dir, **_kwargs):
+        dest = media_ops.job_dehardsub_dir(Path(work_dir))
+        dest.mkdir(parents=True, exist_ok=True)
+        payload = {"confirmed": False, "width": 320, "height": 240, "boxes": boxes}
+        (dest / "dehardsub_regions.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+        return payload
+
+    monkeypatch.setattr(media_ops, "detect_dehardsub_regions", fake_detect)
+    out = media_ops.run_postproc(tmp_path, frozenset({"dehardsub"}))
+    assert "dehardsub" not in out
+    status = json.loads((media / "media_status.json").read_text(encoding="utf-8"))
+    assert status.get("awaiting_confirm") is True
+
+    regions = media_ops.job_dehardsub_dir(tmp_path) / "dehardsub_regions.json"
+    payload = json.loads(regions.read_text(encoding="utf-8"))
+    payload["confirmed"] = True
+    regions.write_text(json.dumps(payload), encoding="utf-8")
+
+    calls: list[dict] = []
+    real_strip = media_ops.strip_hardsubs
+
+    def recording_strip(work_dir, **kwargs):
+        calls.append(kwargs)
+        return real_strip(work_dir, **kwargs)
+
+    monkeypatch.setattr(media_ops, "strip_hardsubs", recording_strip)
+    out2 = media_ops.run_postproc(tmp_path, frozenset({"dehardsub"}))
+    assert "dehardsub" in out2
+    assert calls and calls[0].get("boxes_override") == boxes
 
 
