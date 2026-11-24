@@ -1,0 +1,23 @@
+---
+description: Windows 禁止弹黑框/闪 CMD——子进程必须无窗口，常驻服务用 PM2+pythonw
+alwaysApply: true
+---
+
+# Windows: no console flash (CMD / 黑框)
+
+Flashing black CMD windows are **not** fixed by “put it in PM2 alone”. PM2 keeps parents alive; **child** console apps (`ffmpeg`, `ffprobe`, `python.exe`, `cmd`) still allocate a console unless hidden.
+
+## Hard rules
+
+1. **Never** ship new `subprocess.run` / `Popen` on Windows without hiding the console.
+2. Prefer the project patch: import `subtitle_pipeline/win_no_console.py` once at process entry (already wired in `api/app.py`, `discover/run_batch.py`, `materials_hub/_run_hub.py`). New long-lived entrypoints must import it too.
+3. If calling subprocess directly (hub `core.py` style), set `creationflags=subprocess.CREATE_NO_WINDOW` (or `0x08000000`) on Windows; optional `STARTUPINFO` + `SW_HIDE`.
+4. **PM2 parents**: use `pythonw.exe` for Python apps in `ecosystem.config.cjs` (not `python.exe`). Do not switch back to `python.exe` “for logs”—use PM2 `out_file` / `error_file` / `pm2 logs`.
+5. Agent/Shell one-offs: prefer non-interactive commands; do not spawn visible `Start-Process` consoles for pipeline work. Do not open dozens of foreground CMD windows to “monitor” jobs—poll HTTP/`pm2 logs` instead.
+6. Do **not** invent a second PM2 worker per ffmpeg call. One API process + hidden children is correct.
+
+## Checklist when adding process spawns
+
+- [ ] Entry script imports `win_no_console` **or** call site sets `CREATE_NO_WINDOW`
+- [ ] New PM2 app uses `pythonw` / `node` without a console wrapper `.cmd` that flashes
+- [ ] Smoke: run the path that shells out to ffmpeg; taskbar should not spam console windows

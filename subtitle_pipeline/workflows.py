@@ -447,21 +447,98 @@ def workflow_products(work_dir: Path, workflow: str) -> list[dict[str, Any]]:
             _add(meta, kind="meta")
         for extra in ("remix_cues.json", "remix.vtt", "report.json"):
             _add(home / extra, kind="sidecar")
+        if wf == WORKFLOW_DEHARDSUB:
+            for extra in ("dehardsub_postfix.json", "frame_risk.csv",
+                          "frame_risk_top.json", "frame_risk_top12.jpg",
+                          "dehardsub_review.mp4"):
+                _add(home / extra, kind="review")
     return out
 
 
-def _read_sttn_progress(work_dir: Path) -> "dict | None":
-    """Read the live STTN frame-progress sidecar written by _inpaint_shared."""
+def _read_dehardsub_live_progress(work_dir: Path) -> "dict[str, Any] | None":
+    """Live dehardsub progress from sidecars + milestones (not side-json counts).
+
+    Prefer frame counters when present; otherwise milestone phases so the UI
+    does not stick at a fake 85% just because meta/postfix JSON already exist.
+    """
     try:
         import json
 
-        p = Path(work_dir) / WORKFLOW_HOME[WORKFLOW_DEHARDSUB] / ".sttn_progress.json"
-        if not p.is_file():
+        home = Path(work_dir) / WORKFLOW_HOME[WORKFLOW_DEHARDSUB]
+        if not home.is_dir():
             return None
-        data = json.loads(p.read_text(encoding="utf-8"))
-        if not isinstance(data, dict) or not data.get("total"):
-            return None
-        return {"frames": int(data.get("frames", 0)), "total": int(data["total"])}
+
+        def _load(name: str) -> dict | None:
+            p = home / name
+            if not p.is_file():
+                return None
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return None
+            return data if isinstance(data, dict) else None
+
+        # Legacy STTN sidecar
+        sttn = _load(".sttn_progress.json")
+        if sttn and sttn.get("total"):
+            frames = int(sttn.get("frames", 0) or 0)
+            total = max(1, int(sttn["total"]))
+            frac = frames / total
+            return {
+                "percent": max(8, min(98, int(round(8 + 90 * frac)))),
+                "stage": "dehardsub",
+                "detail": f"{frames}/{total} 帧",
+            }
+
+        # Current OCR/LaMa path writes dehardsub_progress.json
+        prog = _load("dehardsub_progress.json")
+        if prog:
+            frames = prog.get("frames")
+            total = prog.get("total") or prog.get("n_frames")
+            try:
+                if frames is not None and total is not None and int(total) > 0:
+                    f_i, t_i = int(frames), int(total)
+                    frac = f_i / max(1, t_i)
+                    return {
+                        "percent": max(12, min(96, int(round(12 + 84 * frac)))),
+                        "stage": "dehardsub",
+                        "detail": f"{f_i}/{t_i} 帧",
+                    }
+            except (TypeError, ValueError):
+                pass
+            status = str(prog.get("status") or "").lower()
+            kind = str(prog.get("kind") or prog.get("route") or "").strip()
+            label = kind.replace("dehardsub_", "") if kind else ""
+            if status == "running":
+                return {
+                    "percent": 55,
+                    "stage": "dehardsub",
+                    "detail": f"填充中{(' · ' + label) if label else ''}".strip(),
+                }
+            if status == "done":
+                clean = home / "clean.mp4"
+                if clean.is_file() and clean.stat().st_size > 1000:
+                    return {
+                        "percent": 97,
+                        "stage": "dehardsub",
+                        "detail": "收尾中",
+                    }
+                return {
+                    "percent": 90,
+                    "stage": "dehardsub",
+                    "detail": "后处理",
+                }
+
+        clean = home / "clean.mp4"
+        if clean.is_file() and clean.stat().st_size > 1000:
+            return {"percent": 97, "stage": "dehardsub", "detail": "收尾中"}
+        if (home / "dehardsub_postfix.json").is_file():
+            return {"percent": 88, "stage": "dehardsub", "detail": "精修中"}
+        if (home / "dehardsub_regions.json").is_file():
+            return {"percent": 30, "stage": "dehardsub", "detail": "已定位字幕区"}
+        if (home / "dehardsub_meta.json").is_file():
+            return {"percent": 18, "stage": "dehardsub", "detail": "检测中"}
+        return {"percent": 10, "stage": "dehardsub", "detail": "启动中"}
     except Exception:
         return None
 
@@ -490,29 +567,52 @@ def infer_workflow_progress(
             "active": False,
         }
 
-    # dehardsub: report live STTN frame progress instead of the hard-coded
-    # "some product exists → 85%" placeholder, which makes a multi-hour job
-    # look frozen at 85% the whole time.
+    # dehardsub: live sidecar / milestones — never "N side files → 85%".
     if st == "processing" and wf == WORKFLOW_DEHARDSUB:
-        prog = _read_sttn_progress(work_dir)
-        if prog:
-            frac = prog["frames"] / max(1, prog["total"])
-            pct = int(round(8 + 90 * frac))  # 8%..98%, leaves head/tail room
-            pct = max(8, min(98, pct))
+        live = _read_dehardsub_live_progress(work_dir)
+        if live:
             return {
-                "percent": pct,
-                "stage": "dehardsub",
-                "detail": f"{prog['frames']}/{prog['total']} 帧",
+                "percent": int(live["percent"]),
+                "stage": str(live.get("stage") or "dehardsub"),
+                "detail": live.get("detail"),
                 "active": active,
             }
-
-    # processing
-    products = workflow_products(work_dir, wf)
-    if products:
         return {
-            "percent": 85 if active else 70,
+            "percent": 12 if active else 8,
+            "stage": "dehardsub",
+            "detail": "启动中",
+            "active": active,
+        }
+
+    # processing — only treat primary media products as near-done, not sidecars
+    products = workflow_products(work_dir, wf)
+    primary = [
+        p
+        for p in products
+        if str(p.get("kind") or "") == wf
+        or str(p.get("ext") or "").lower() in (".mp4", ".webm", ".mkv")
+    ]
+    if primary:
+        return {
+            "percent": 90 if active else 75,
             "stage": wf,
-            "detail": str(len(products)),
+            "detail": None,
+            "active": active,
+        }
+    if products and wf not in (WORKFLOW_TRANSLATE, WORKFLOW_NOTES):
+        # Sidecars only (meta/json) — soft mid progress, never fake 85%.
+        return {
+            "percent": 45 if active else 30,
+            "stage": wf,
+            "detail": None,
+            "active": active,
+        }
+    if products and wf in (WORKFLOW_TRANSLATE, WORKFLOW_NOTES):
+        n = len(products)
+        return {
+            "percent": min(92, 20 + n * 4) if active else min(80, 15 + n * 3),
+            "stage": wf,
+            "detail": None,
             "active": active,
         }
     # stage-specific soft progress

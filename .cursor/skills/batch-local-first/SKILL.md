@@ -15,7 +15,14 @@ description: Processes pending queue jobs with ASR/translate/notes and optional 
 - Site pack: `--langs site` (**16 langs**, same as `transform/lib/locales.ts`; pack name `site`, frontend dir `transform/`). Default in `pipeline.py` / `yarn batch` / `yarn full`. `yarn translate` still passes `--langs all` when you want the full set.
 - Notes (WF-02): source-lang `one_liner`/`summary`/`focuses`/`key_points`/`hard_points`, then localize to the same lang pack as captions.
 - Parallel translate / notes localize: `--lang-workers N` or env `VITUAL_LANG_WORKERS` (default **2**, max 8). Whisper/fetch stay serial.
-- ASR default: **multipass** + LLM-1 suspicious polish + LLM-2 glossary/full correct (see `PIPELINE_BEST_PRACTICES.md`).
+- **硬烧字幕 = 源文基准（有硬字幕时强制）**：
+  - 画面有烧录字幕 → `hardsub_extract` OCR 直提源语 SRT，**跳过 Whisper**（`VITUAL_HARDSUB_PREFER=1` 默认开）。
+  - 入库前 `hardsub_compare` 对账：源 SRT vs 原片 OCR（报告 `media/hardsub_compare.json`）。
+  - 检测到硬字幕却仍是 ASR 稿 → 门禁自动升 `strict`（`VITUAL_HARDSUB_GATE`，默认 `warn` 会升）。
+  - 无硬字幕才走 ASR multipass。翻译/笔记一律以硬烧对过的源 SRT 为真源，勿用 ASR 错名覆盖。
+  - 手工纠源后重翻：`pipeline.py translate --from-srt <work>/subs/{src}.srt --source-lang … --force`。
+  - 代码：`hardsub_extract.py` / `hardsub_compare.py` / `discover/run_batch.py`（`_try_hardsub_source` / `_hardsub_gate`）。
+- ASR default（仅无硬字幕）：**multipass** + LLM-1 suspicious polish + LLM-2 glossary/full correct (see `PIPELINE_BEST_PRACTICES.md`).
 - After source SRT: **source notes 与 subtitle translate 串行**（先 translate 再 notes；CPU-only Ollama 下并行会互相抢占致 summary 600s 超时，串行更快）。Notes localize 仍等待 source notes 完成。
 - GIF/MP4 cuts: parallel ffmpeg via `VITUAL_CLIP_WORKERS` (default **2**).
 - Controllable `--stages`:

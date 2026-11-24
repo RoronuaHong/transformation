@@ -20,11 +20,16 @@ subtitle_pipeline/cookies*.txt
 subtitle_pipeline/.env
 subtitle_pipeline/llm.yaml
 
+# 第三方对照引擎（PeelSub 无源码；对标开源 VideoWipe GPL）
+subtitle_pipeline/_vendor/
+
 # 临时目录 / 脚本
 .tmp-bili/
 .tmp-bili2/
 .tmp-bili3/
 .tmp-v2ray-*.py
+.playwright-cli/
+regen-*.yaml
 subtitle_pipeline/_tmp*.py
 # 本地调试/一次性脚本与运行产物（下划线前缀约定 + pid 文件）
 subtitle_pipeline/_*.py

@@ -1,7 +1,15 @@
-"use client";
+﻿"use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MutableRefObject,
+} from "react";
 import {
   cloneSourceMedia,
   defaultSourceMedia,
@@ -9,7 +17,6 @@ import {
   type ClipRow,
   type SourceMediaState,
 } from "@/components/TrySourceMedia";
-import { RemixPlayer } from "@/components/RemixPlayer";
 import { fillCopy, type TryCopy } from "@/lib/copy";
 import { DEFAULT_TOPIC } from "@/lib/site-config";
 import {
@@ -32,6 +39,11 @@ import {
 /** Same-origin proxy — avoids browser extensions blocking cross-origin :8901 fetch. */
 const API = tryApiBase();
 
+/** 后端可能返回绝对路径，勿无条件拼 API base（否则变成 /ops-apihttps://…）。 */
+function assetHref(url: string): string {
+  return /^https?:\/\//i.test(url) ? url : `${API}${url}`;
+}
+
 function isFetchNetworkError(e: unknown): boolean {
   if (!(e instanceof Error)) return false;
   const m = e.message.toLowerCase();
@@ -50,6 +62,8 @@ type Progress = {
   active?: boolean;
   stale?: boolean;
   updated_sec_ago?: number | null;
+  /** Seconds remaining (server hint); UI may recompute from created_at. */
+  eta_sec?: number | null;
 };
 
 type Poll = {
@@ -58,6 +72,10 @@ type Poll = {
   error?: string | null;
   path?: string;
   title?: string;
+  platform?: string;
+  video_id?: string;
+  created_at?: number;
+  updated_at?: number;
   busy?: boolean;
   paused?: boolean;
   active_job_id?: number | null;
@@ -142,6 +160,92 @@ type Poll = {
     clips?: { start: number; end: number }[];
   };
 };
+
+type HistoryJob = {
+  job_id: number;
+  status: string;
+  workflow: string;
+  title: string;
+  platform: string;
+  video_id: string;
+  pack_id?: string | null;
+  priority: string;
+  path?: string | null;
+  error?: string | null;
+  updated_at: number;
+  created_at: number;
+  updated_sec_ago: number;
+  progress?: Progress;
+};
+
+type BatchJobView = {
+  job_id: number;
+  label: string;
+  status: string;
+  path?: string;
+  title?: string;
+  platform?: string;
+  video_id?: string;
+  pack_id?: string | null;
+  workflow?: string;
+  lane?: string;
+  error?: string | null;
+  progress?: Progress;
+  created_at?: number;
+  updated_at?: number;
+};
+
+/** 已完成条目统一视图：合并 history（终态）与会话内已终态的 batchJobs。 */
+type DoneJobView = {
+  job_id: number;
+  label: string;
+  status: string;
+  title?: string;
+  workflow?: string;
+  priority?: string;
+  platform?: string;
+  video_id?: string;
+  pack_id?: string | null;
+  path?: string;
+  error?: string | null;
+  updated_sec_ago?: number;
+  progress?: Progress;
+};
+
+/** 同一来源视频下的所有终态任务聚成一个合集。 */
+type DoneJobGroup = {
+  key: string;
+  label: string;
+  source: string;
+  jobs: DoneJobView[];
+};
+
+/** 进行中同样按来源视频合集；展开后才看到各 workflow。 */
+type ActiveJobGroup = {
+  key: string;
+  label: string;
+  source: string;
+  jobs: BatchJobView[];
+};
+
+function jobGroupKey(j: {
+  pack_id?: string | null;
+  platform?: string;
+  video_id?: string;
+  label: string;
+}): string {
+  if (j.pack_id) return `pack:${j.pack_id}`;
+  if (j.video_id) return `${j.platform || ""}:${j.video_id}`;
+  return `label:${j.label}`;
+}
+
+function groupLeadJob(jobs: BatchJobView[]): BatchJobView | undefined {
+  return (
+    jobs.find((j) => j.status === "processing") ||
+    jobs.find((j) => j.status === "pending") ||
+    jobs[0]
+  );
+}
 
 const GIF_SEGMENT_MAX = 20;
 /** Fallback max when video length is unknown (prevents absurd inputs). */
@@ -232,6 +336,9 @@ const STAGE_KEYS: Record<string, keyof TryCopy> = {
   notes: "stageNotes",
   localize: "stageLocalize",
   gif: "stageGif",
+  dehardsub: "workflowRailDehardsub",
+  clips: "workflowRailClips",
+  deblur: "workflowRailDeblur",
   enhance: "stageEnhance",
   compress: "stageCompress",
   concat: "stageConcat",
@@ -310,6 +417,7 @@ type JobStep = {
 function isTerminalStatus(status?: string) {
   return (
     status === "done" ||
+    status === "published" ||
     status === "partial" ||
     status === "failed" ||
     status === "dead" ||
@@ -317,9 +425,22 @@ function isTerminalStatus(status?: string) {
   );
 }
 
+function isCompletedStatus(status?: string) {
+  return status === "done" || status === "published";
+}
+
+function canRetryStatus(status?: string) {
+  return (
+    status === "failed" ||
+    status === "dead" ||
+    status === "cancelled" ||
+    status === "partial"
+  );
+}
+
 function badgeClass(status?: string) {
   if (status === "processing") return "is-processing";
-  if (status === "done") return "is-done";
+  if (isCompletedStatus(status)) return "is-done";
   if (status === "partial") return "is-partial";
   if (status === "failed" || status === "dead") return "is-failed";
   if (status === "cancelled") return "is-cancelled";
@@ -334,6 +455,7 @@ function stageLabel(copy: TryCopy, stage?: string) {
 
 function jobStatusLabel(copy: TryCopy, status?: string) {
   if (status === "done") return copy.statusDone;
+  if (status === "published") return copy.statusPublished;
   if (status === "partial") return copy.statusPartial;
   if (status === "cancelled") return copy.statusCancelled;
   if (status === "failed" || status === "dead") return copy.statusFailed;
@@ -372,19 +494,237 @@ function platformDisplay(label: string, locale: Locale): string {
   return label;
 }
 
+const KNOWN_SOURCE_PLATFORMS = new Set(["bilibili", "douyin", "youtube", "hls"]);
+
+/** 后端解析出原始视频标题时直接展示，否则退回队列标签的紧凑格式。 */
+function doneJobTitle(j: DoneJobView, locale: Locale): string {
+  const raw = (j.title || "").trim();
+  if (raw && !/^try:[^:]+:/.test(raw)) return raw;
+  return formatBatchJobLabel(j.label, locale);
+}
+
+function sourceBadge(j: DoneJobView, locale: Locale): string {
+  const raw = (j.title || "").trim();
+  if (!j.video_id || !raw || /^try:[^:]+:/.test(raw) || raw.includes(j.video_id)) return "";
+  const platform = (j.platform || "").toLowerCase();
+  if (!KNOWN_SOURCE_PLATFORMS.has(platform)) return j.video_id;
+  return formatBatchJobLabel(`try:${platform}:${j.video_id}`, locale);
+}
+
+const GROUP_STATUS_ORDER = [
+  "failed",
+  "partial",
+  "cancelled",
+  "processing",
+  "pending",
+  "done",
+  "published",
+];
+
+function groupStatusChips(jobs: DoneJobView[], copy: TryCopy) {
+  const counts = new Map<string, number>();
+  for (const j of jobs) {
+    const key = j.status === "dead" ? "failed" : j.status || "pending";
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort(([a], [b]) => {
+      const ia = GROUP_STATUS_ORDER.indexOf(a);
+      const ib = GROUP_STATUS_ORDER.indexOf(b);
+      return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+    })
+    .map(([status, count]) => ({
+      status,
+      label: `${jobStatusLabel(copy, status)} ${count}`,
+    }));
+}
+
 function progressDetail(copy: TryCopy, progress?: Progress) {
   if (!progress?.detail) return null;
+  const raw = String(progress.detail).trim();
+  // Bare product counts ("2") are not user-facing progress.
+  if (/^\d+$/.test(raw)) return null;
   if (progress.stage === "translate" || progress.stage === "localize") {
-    const [n, total] = progress.detail.split("/");
-    // 仅当 detail 形如 "n/total" 时才按「种语言」渲染；
-    // pack 任务的 detail 可能是产物计数（如 "1"），不能套模板。
-    if (n && total) {
+    const [n, total] = raw.split("/");
+    // 仅当 detail 形如 "n/total" 时才按「种语言」渲染。
+    if (n && total && /^\d+$/.test(n) && /^\d+$/.test(total)) {
       return copy.progressLangs.replace("{n}", n).replace("{total}", total);
     }
     return null;
   }
-  return progress.detail;
+  return raw;
 }
+
+function formatEtaDuration(copy: TryCopy, sec: number): string {
+  const s = Math.max(0, Math.round(sec));
+  if (s < 60) return fillCopy(copy.etaSeconds, { n: Math.max(1, s) });
+  if (s < 3600) return fillCopy(copy.etaMinutes, { n: Math.max(1, Math.round(s / 60)) });
+  const hours = Math.round((s / 3600) * 10) / 10;
+  return fillCopy(copy.etaHours, { n: hours % 1 === 0 ? String(hours) : hours.toFixed(1) });
+}
+
+function jobEffectivePercent(j: BatchJobView): number {
+  if (isCompletedStatus(j.status) || j.status === "partial") return 100;
+  if (j.status === "failed" || j.status === "dead" || j.status === "cancelled") return 100;
+  return Math.max(0, Math.min(100, j.progress?.percent ?? 0));
+}
+
+type EtaTrack = { pct: number; at: number; displayEta: number | null };
+
+/**
+ * Velocity-based ETA. When percent is flat, only count down — never inflate
+ * (the old elapsed/percent formula grew ETA while dehardsub sat at 85%).
+ */
+function trackEtaSec(
+  track: Map<string, EtaTrack>,
+  key: string,
+  pct: number,
+  nowSec: number
+): number | null {
+  const p = Math.max(0, Math.min(100, pct));
+  const prev = track.get(key);
+  if (!prev) {
+    track.set(key, { pct: p, at: nowSec, displayEta: null });
+    return null;
+  }
+  if (p >= 99.5) {
+    track.set(key, { pct: p, at: nowSec, displayEta: 0 });
+    return 0;
+  }
+  if (p > prev.pct + 0.4) {
+    const dt = nowSec - prev.at;
+    const dp = p - prev.pct;
+    if (dt >= 1.5 && dp > 0) {
+      const raw = (dt / dp) * (100 - p);
+      const smoothed =
+        prev.displayEta != null && prev.displayEta > 0
+          ? prev.displayEta * 0.35 + raw * 0.65
+          : raw;
+      const eta = Math.max(0, Math.min(12 * 3600, smoothed));
+      track.set(key, { pct: p, at: nowSec, displayEta: eta });
+      return Math.round(eta);
+    }
+  }
+  // Flat or tiny change: countdown only.
+  if (prev.displayEta != null) {
+    const left = Math.max(0, prev.displayEta - (nowSec - prev.at));
+    track.set(key, { pct: Math.max(prev.pct, p), at: nowSec, displayEta: left });
+    return Math.round(left);
+  }
+  track.set(key, { pct: Math.max(prev.pct, p), at: nowSec, displayEta: null });
+  return null;
+}
+
+function packTrackedEtaSec(
+  track: Map<string, EtaTrack>,
+  groupKey: string,
+  jobs: BatchJobView[],
+  nowSec: number
+): number | null {
+  const content = jobs.filter((j) => j.lane === "content");
+  const media = jobs.filter((j) => j.lane === "media");
+  const lanes: Array<{ key: string; jobs: BatchJobView[] }> = [];
+  if (content.length) lanes.push({ key: `${groupKey}:content`, jobs: content });
+  if (media.length) lanes.push({ key: `${groupKey}:media`, jobs: media });
+  if (!lanes.length) lanes.push({ key: groupKey, jobs });
+  const etas = lanes
+    .map((lane) => {
+      const avg =
+        lane.jobs.reduce((s, j) => s + jobEffectivePercent(j), 0) / lane.jobs.length;
+      return trackEtaSec(track, lane.key, avg, nowSec);
+    })
+    .filter((n): n is number => n != null);
+  return etas.length ? Math.max(...etas) : null;
+}
+
+function formatProgressEta(copy: TryCopy, etaSec: number | null | undefined): string | null {
+  if (etaSec == null || !Number.isFinite(etaSec) || etaSec < 0) return null;
+  if (etaSec === 0) return null;
+  return fillCopy(copy.progressEta, { time: formatEtaDuration(copy, etaSec) });
+}
+
+/** Owns the 1s ETA clock so the giant TryForm tree does not re-render every second. */
+const ProgressEtaSpan = memo(function ProgressEtaSpan({
+  trackKey,
+  pct,
+  copy,
+  trackRef,
+}: {
+  trackKey: string;
+  pct: number;
+  copy: TryCopy;
+  trackRef: MutableRefObject<Map<string, EtaTrack>>;
+}) {
+  const [label, setLabel] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const tick = () => {
+      if (!alive) return;
+      const eta = trackEtaSec(trackRef.current, trackKey, pct, Date.now() / 1000);
+      setLabel(formatProgressEta(copy, eta));
+    };
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+  }, [trackKey, pct, copy, trackRef]);
+  if (!label) return null;
+  return <span>{label}</span>;
+});
+
+const PackProgressEtaSpan = memo(function PackProgressEtaSpan({
+  groupKey,
+  jobs,
+  copy,
+  trackRef,
+}: {
+  groupKey: string;
+  jobs: BatchJobView[];
+  copy: TryCopy;
+  trackRef: MutableRefObject<Map<string, EtaTrack>>;
+}) {
+  const [label, setLabel] = useState<string | null>(null);
+  const pctKey = jobs.map((j) => `${j.job_id}:${jobEffectivePercent(j)}`).join(",");
+  useEffect(() => {
+    let alive = true;
+    const tick = () => {
+      if (!alive) return;
+      const eta = packTrackedEtaSec(trackRef.current, groupKey, jobs, Date.now() / 1000);
+      setLabel(formatProgressEta(copy, eta));
+    };
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+    // pctKey captures progress; jobs identity is intentional for lane membership.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groupKey, pctKey, copy, trackRef]);
+  if (!label) return null;
+  return <span>{label}</span>;
+});
+
+function jobPollFingerprint(j: {
+  status?: string;
+  error?: string | null;
+  progress?: Progress | null;
+  updated_at?: number;
+}): string {
+  return [
+    j.status || "",
+    j.error || "",
+    j.progress?.percent ?? "",
+    j.progress?.stage ?? "",
+    j.progress?.detail ?? "",
+    j.updated_at ?? "",
+  ].join("|");
+}
+
+const POLL_MS_VISIBLE = 4000;
+const POLL_MS_HIDDEN = 20000;
 
 /** 子进程 stderr 常混入 ANSI 转义序列（进度条/光标控制），直接展示会是乱码。 */
 function stripAnsi(s?: string | null): string {
@@ -496,31 +836,31 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
   const dhGateRef = useRef({ skip: false, forceNoDehardsub: false });
   const onSubmitRef = useRef<((e: React.FormEvent) => void) | null>(null);
   const [poll, setPoll] = useState<Poll | null>(null);
-  const [batchJobs, setBatchJobs] = useState<
-    Array<{
-      job_id: number;
-      label: string;
-      status: string;
-      path?: string;
-      title?: string;
-      workflow?: string;
-      lane?: string;
-      error?: string | null;
-      progress?: Progress;
-    }>
-  >([]);
+  const [batchJobs, setBatchJobs] = useState<BatchJobView[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [queuePaused, setQueuePaused] = useState(false);
   const [jobActionBusy, setJobActionBusy] = useState<number | null>(null);
+  const [groupActionBusy, setGroupActionBusy] = useState<string | null>(null);
+  const [statusDrawerOpen, setStatusDrawerOpen] = useState(false);
+  const [workView, setWorkView] = useState<"new" | "active" | "done">("new");
+  const [batchOpen, setBatchOpen] = useState(true);
+  const [historyJobs, setHistoryJobs] = useState<HistoryJob[]>([]);
+  const [historyRefreshing, setHistoryRefreshing] = useState(false);
+  const [expandedJobIds, setExpandedJobIds] = useState<Set<number>>(new Set());
+  const [expandedGroupKeys, setExpandedGroupKeys] = useState<Set<string>>(new Set());
+  const [jobDetails, setJobDetails] = useState<Record<number, Poll>>({});
+  const [detailLoading, setDetailLoading] = useState<Set<number>>(new Set());
   const [jobStepsById, setJobStepsById] = useState<Record<number, JobStep[]>>({});
   const [stepRetryBusy, setStepRetryBusy] = useState<string | null>(null);
-  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const probeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollFailRef = useRef(0);
   const langsDdRef = useRef<HTMLDivElement | null>(null);
   const langsSearchRef = useRef<HTMLInputElement | null>(null);
   const batchJobsRef = useRef(batchJobs);
   batchJobsRef.current = batchJobs;
+  const historyJobsRef = useRef(historyJobs);
+  historyJobsRef.current = historyJobs;
 
   const parsedUrls = useMemo(() => parseUrlLines(urlsText), [urlsText]);
 
@@ -538,6 +878,19 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
   }, [tab, parsedUrls, files]);
 
   const sourceKeysSig = sourceItems.map((s) => s.key).join("\n");
+
+  useEffect(() => {
+    setStatusDrawerOpen(false);
+  }, [workView]);
+
+  useEffect(() => {
+    if (!statusDrawerOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setStatusDrawerOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [statusDrawerOpen]);
 
   useEffect(() => {
     const keys = sourceKeysSig ? sourceKeysSig.split("\n").filter(Boolean) : [];
@@ -924,10 +1277,32 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
 
   const stopPoll = useCallback(() => {
     if (timer.current) {
+      clearTimeout(timer.current);
       clearInterval(timer.current);
       timer.current = null;
     }
   }, []);
+
+  const expandedJobIdsRef = useRef(expandedJobIds);
+  expandedJobIdsRef.current = expandedJobIds;
+
+  const schedulePoll = useCallback(() => {
+    if (timer.current) {
+      clearTimeout(timer.current);
+      clearInterval(timer.current);
+      timer.current = null;
+    }
+    const delay =
+      typeof document !== "undefined" && document.visibilityState !== "visible"
+        ? POLL_MS_HIDDEN
+        : POLL_MS_VISIBLE;
+    timer.current = setTimeout(() => {
+      timer.current = null;
+      void refreshJobsRef.current?.();
+    }, delay);
+  }, []);
+
+  const refreshJobsRef = useRef<(() => Promise<void>) | null>(null);
 
   const resetForm = useCallback(() => {
     stopPoll();
@@ -972,7 +1347,12 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     setPoll(null);
     setBatchJobs([]);
     setJobStepsById({});
+    setJobDetails({});
+    setExpandedJobIds(new Set());
+    setDetailLoading(new Set());
     setStepRetryBusy(null);
+    setStatusDrawerOpen(false);
+    setBatchOpen(true);
     setErr(null);
   }, [stopPoll]);
 
@@ -997,51 +1377,20 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     }
   }, []);
 
-  const refreshJobs = useCallback(async () => {
-    const current = batchJobsRef.current;
-    const toPoll = current.filter((j) => j.job_id && !isTerminalStatus(j.status));
-    if (!toPoll.length) {
-      stopPoll();
-      return;
-    }
-
-    let activePoll: Poll | null = null;
-    let processingPoll: Poll | null = null;
-    let lastUpdated: Poll | null = null;
-    const byId = new Map<number, Partial<Poll> & { status: string }>();
-
-    try {
-      for (const j of toPoll) {
-        const r = await fetch(`${API}/api/try/${j.job_id}`);
+  /** 拉取单个 job 的整包快照（含 pack_tasks / 步骤摘要），供「当前任务」展开详情用。 */
+  const loadJobDetail = useCallback(
+    async (jobId: number, background = false) => {
+      if (!Number.isFinite(jobId) || jobId <= 0) return;
+      if (!background) {
+        setDetailLoading((prev) => new Set(prev).add(jobId));
+      }
+      try {
+        const r = await fetch(`${API}/api/try/${jobId}`);
         if (!r.ok) throw new Error(await r.text());
         const data = (await r.json()) as Poll;
-        byId.set(j.job_id, {
-          status: data.status,
-          path: data.path,
-          title: data.title,
-          error: data.error,
-          progress: data.progress,
-          queue_ahead: data.queue_ahead,
-          workflow: data.workflow,
-          pack_id: data.pack_id,
-          pack_tasks: data.pack_tasks,
-          pack_zip_url: data.pack_zip_url,
-          queue_position: data.queue_position,
-          busy: data.busy,
-          steps_summary: data.steps_summary,
-        });
-        lastUpdated = data;
-        if (data.paused != null) setQueuePaused(Boolean(data.paused));
-        if (data.status === "processing") {
-          processingPoll = data;
-        } else if (data.status === "pending") {
-          activePoll = data;
-        }
-        if (data.duration_sec != null && data.duration_sec > 0) {
-          applyVideoDuration(data.duration_sec);
-        }
-        const stepJobIds = [
-          j.job_id,
+        setJobDetails((prev) => ({ ...prev, [jobId]: data }));
+        const ids = [
+          jobId,
           ...((data.pack_tasks || [])
             .filter(
               (t) =>
@@ -1051,39 +1400,211 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
             )
             .map((t) => t.job_id) || []),
         ];
-        void loadJobSteps(stepJobIds);
+        void loadJobSteps(ids);
+      } catch {
+        /* detail is best-effort; the panel progress still reflects real state */
+      } finally {
+        if (!background) {
+          setDetailLoading((prev) => {
+            const next = new Set(prev);
+            next.delete(jobId);
+            return next;
+          });
+        }
       }
+    },
+    [loadJobSteps]
+  );
+
+  const toggleJobDetail = useCallback(
+    (jobId: number) => {
+      if (!Number.isFinite(jobId) || jobId <= 0) return;
+      const willOpen = !expandedJobIds.has(jobId);
+      setExpandedJobIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(jobId)) next.delete(jobId);
+        else next.add(jobId);
+        return next;
+      });
+      // 副作用移出 state updater：避免 StrictMode 下重复触发拉取。
+      if (willOpen && !jobDetails[jobId]) void loadJobDetail(jobId);
+    },
+    [expandedJobIds, jobDetails, loadJobDetail]
+  );
+
+  const toggleGroup = useCallback((key: string) => {
+    setExpandedGroupKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
+  const refreshJobs = useCallback(async () => {
+    // One batched /active fetch instead of N× /api/try/{id} (was 9 sequential round-trips).
+    try {
+      const r = await fetch(`${API}/api/try/active`);
+      if (!r.ok) throw new Error(await r.text());
+      const data = (await r.json()) as {
+        jobs?: Poll[];
+        paused?: boolean;
+      };
+      if (data.paused != null) setQueuePaused(Boolean(data.paused));
+      const jobs = (data.jobs || []).filter(
+        (j) => j.job_id && !isTerminalStatus(j.status)
+      ) as Poll[];
+
+      pollFailRef.current = 0;
+      setErr((prev) => (prev === copy.apiDown ? null : prev));
+
+      if (!jobs.length) {
+        // Mark in-flight rows terminal locally; history poll reconciles shortly.
+        setBatchJobs((prev) => {
+          const next = prev.map((j) =>
+            isTerminalStatus(j.status) ? j : { ...j, status: "done" }
+          );
+          const changed = next.some((j, i) => j !== prev[i]);
+          if (!changed) return prev;
+          batchJobsRef.current = next;
+          return next;
+        });
+        stopPoll();
+        return;
+      }
+
+      const mapped: BatchJobView[] = jobs.map((j) => ({
+        job_id: j.job_id,
+        label: j.title || String(j.job_id),
+        status: j.status,
+        path: j.path,
+        title: j.title,
+        platform: j.platform,
+        video_id: j.video_id,
+        pack_id: j.pack_id,
+        workflow: j.workflow,
+        lane: j.lane,
+        error: j.error ?? null,
+        progress: j.progress,
+        created_at: j.created_at,
+        updated_at: j.updated_at,
+      }));
+
+      setBatchJobs((prev) => {
+        const prevById = new Map(prev.map((j) => [j.job_id, j]));
+        let changed = prev.length !== mapped.length;
+        const next = mapped.map((j) => {
+          const old = prevById.get(j.job_id);
+          if (old && jobPollFingerprint(old) === jobPollFingerprint(j)) {
+            return old;
+          }
+          changed = true;
+          return old ? { ...old, ...j } : j;
+        });
+        if (!changed) return prev;
+        batchJobsRef.current = next;
+        return next;
+      });
+
+      const processing = jobs.find((j) => j.status === "processing");
+      const pending = jobs.find((j) => j.status === "pending");
+      const nextPoll = processing || pending || jobs[0];
+      if (nextPoll) {
+        setPoll((prev) => {
+          if (
+            prev &&
+            prev.job_id === nextPoll.job_id &&
+            jobPollFingerprint(prev) === jobPollFingerprint(nextPoll)
+          ) {
+            return prev;
+          }
+          return nextPoll;
+        });
+        if (nextPoll.duration_sec != null && nextPoll.duration_sec > 0) {
+          applyVideoDuration(nextPoll.duration_sec);
+        }
+      }
+
+      // Steps / pack detail only for rows the user expanded — not every poll.
+      const openIds = [...expandedJobIdsRef.current];
+      for (const id of openIds) {
+        const hit = jobs.find((j) => j.job_id === id);
+        if (!hit) continue;
+        setJobDetails((prev) => {
+          const cur = prev[id];
+          if (cur && jobPollFingerprint(cur) === jobPollFingerprint(hit)) return prev;
+          return { ...prev, [id]: hit };
+        });
+        if (
+          hit.workflow === "translate" ||
+          hit.workflow === "notes" ||
+          (hit.steps_summary?.total || 0) > 0
+        ) {
+          void loadJobSteps([id]);
+        }
+      }
+
+      schedulePoll();
     } catch (e) {
       pollFailRef.current += 1;
       if (pollFailRef.current < 3) {
+        schedulePoll();
         return;
       }
       setErr(isFetchNetworkError(e) ? copy.apiDown : e instanceof Error ? e.message : String(e));
       stopPoll();
-      return;
     }
+  }, [stopPoll, schedulePoll, copy.apiDown, loadJobSteps]);
 
-    pollFailRef.current = 0;
-    setErr((prev) => (prev === copy.apiDown ? null : prev));
+  refreshJobsRef.current = refreshJobs;
 
-    setBatchJobs((prev) =>
-      prev.map((j) => {
-        const u = byId.get(j.job_id);
-        return u ? { ...j, ...u } : j;
-      })
-    );
-
-    const nextPoll = processingPoll || activePoll || lastUpdated;
-    if (nextPoll) setPoll(nextPoll);
-
-    const stillActive = toPoll.some((j) => {
-      const u = byId.get(j.job_id);
-      return Boolean(u && !isTerminalStatus(u.status));
-    });
-    if (!stillActive) {
-      stopPoll();
+  const refreshHistory = useCallback(async (quiet = false) => {
+    if (!quiet) setHistoryRefreshing(true);
+    try {
+      const r = await fetch(`${API}/api/try/history?limit=30`);
+      if (!r.ok) throw new Error(await r.text());
+      const data = (await r.json()) as { jobs?: HistoryJob[] };
+      setHistoryJobs(Array.isArray(data.jobs) ? data.jobs : []);
+    } catch {
+      // history is best-effort; the live poll surfaces real API errors
+    } finally {
+      // 静默轮询不应抢先清掉手动刷新正在显示的 loading。
+      if (!quiet) setHistoryRefreshing(false);
     }
-  }, [stopPoll, copy.apiDown, loadJobSteps]);
+  }, []);
+
+  useEffect(() => {
+    // Adaptive history poll: fast only while something is in flight, slow when
+    // idle, and paused when the tab is hidden. A fixed 5s poll ran ~12req/min
+    // forever (2MB+ of access logs/day) even with zero active jobs.
+    const ACTIVE_MS = 5000;
+    const IDLE_MS = 30000;
+    let timerId: ReturnType<typeof setTimeout> | null = null;
+    let disposed = false;
+
+    const hasActive = () => {
+      const inBatch = batchJobsRef.current.some((j) => !isTerminalStatus(j.status));
+      // historyJobs is state (not a ref); read the latest via a ref kept below.
+      const inHistory = historyJobsRef.current.some((j) => !isTerminalStatus(j.status));
+      return inBatch || inHistory;
+    };
+    const tick = async () => {
+      if (disposed) return;
+      if (document.visibilityState === "visible") await refreshHistory(true);
+      if (disposed) return;
+      timerId = setTimeout(() => void tick(), hasActive() ? ACTIVE_MS : IDLE_MS);
+    };
+    void tick();
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && !disposed) void refreshHistory(true);
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      disposed = true;
+      if (timerId) clearTimeout(timerId);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [refreshHistory]);
 
   const retryJobStep = useCallback(
     async (jobId: number, stepKey: string) => {
@@ -1110,18 +1631,19 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
           )
         );
         if (!timer.current) {
-          timer.current = setInterval(() => {
-            void refreshJobs();
-          }, 3000);
+          schedulePoll();
         }
         void refreshJobs();
+        // 展开详情里的 pack_tasks 状态/步骤摘要来自 job snapshot，需同步刷新。
+        void loadJobDetail(jobId, true);
+        void refreshHistory(true);
       } catch (e) {
         setErr(e instanceof Error ? e.message : String(e));
       } finally {
         setStepRetryBusy(null);
       }
     },
-    [refreshJobs]
+    [refreshJobs, loadJobDetail, refreshHistory, schedulePoll]
   );
 
   const toggleQueuePause = useCallback(async () => {
@@ -1174,19 +1696,94 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
           }
           return prev;
         });
+        // history-only（CLI/手动）任务不进 batchJobs，乐观更新让列表立即归类；
+        // 随后 refreshHistory 会与后端对齐。
+        setHistoryJobs((prev) =>
+          prev.map((j) => {
+            if (j.job_id === jobId) {
+              return {
+                ...j,
+                status: data.status || j.status,
+                error: data.error ?? null,
+                updated_sec_ago: 0,
+              };
+            }
+            if (action === "cancel" && cancelledSet.has(j.job_id)) {
+              return { ...j, status: "cancelled", updated_sec_ago: 0 };
+            }
+            return j;
+          })
+        );
         if (action === "retry" && !timer.current) {
-          timer.current = setInterval(() => {
-            void refreshJobs();
-          }, 3000);
+          schedulePoll();
         }
         void refreshJobs();
+        // CLI/手动任务不进 batchJobs，靠 history 轮询刷新，操作后立即同步。
+        void refreshHistory(true);
       } catch (e) {
         setErr(e instanceof Error ? e.message : String(e));
       } finally {
         setJobActionBusy(null);
       }
     },
-    [refreshJobs]
+    [refreshJobs, refreshHistory, schedulePoll]
+  );
+
+  const runBatchAction = useCallback(
+    async (busyKey: string, ids: number[], name: string, action: "delete" | "retry") => {
+      if (!ids.length) return;
+      if (
+        action === "delete" &&
+        !window.confirm(fillCopy(copy.jobDeleteConfirm, { n: ids.length, name }))
+      ) {
+        return;
+      }
+      setGroupActionBusy(busyKey);
+      try {
+        const r = await fetch(`${API}/api/try/group/action`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ job_ids: ids, action }),
+        });
+        if (!r.ok) {
+          const body = (await r.json().catch(() => ({}))) as { detail?: string };
+          throw new Error(body.detail || r.statusText);
+        }
+        const data = (await r.json()) as { job_ids?: number[] };
+        const changed = new Set((data.job_ids || ids).map(Number));
+        if (action === "delete") {
+          setHistoryJobs((prev) => prev.filter((j) => !changed.has(j.job_id)));
+          setBatchJobs((prev) => prev.filter((j) => !changed.has(j.job_id)));
+          setExpandedJobIds((prev) => new Set([...prev].filter((id) => !changed.has(id))));
+          setExpandedGroupKeys((prev) => new Set([...prev].filter((k) => k !== busyKey)));
+          setPoll((prev) => (prev && changed.has(prev.job_id) ? null : prev));
+        } else {
+          setHistoryJobs((prev) =>
+            prev.map((j) =>
+              changed.has(j.job_id)
+                ? { ...j, status: "pending", error: null, updated_sec_ago: 0 }
+                : j
+            )
+          );
+          setBatchJobs((prev) =>
+            prev.map((j) =>
+              changed.has(j.job_id) ? { ...j, status: "pending", error: null } : j
+            )
+          );
+          setWorkView("active");
+          if (!timer.current) {
+            schedulePoll();
+          }
+          void refreshJobs();
+        }
+        void refreshHistory(true);
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : String(e));
+      } finally {
+        setGroupActionBusy(null);
+      }
+    },
+    [copy.jobDeleteConfirm, refreshHistory, refreshJobs, schedulePoll]
   );
 
   const resumedRef = useRef(false);
@@ -1213,18 +1810,21 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
           status: j.status,
           path: j.path,
           title: j.title,
+          platform: j.platform,
+          video_id: j.video_id,
+          pack_id: j.pack_id,
           workflow: j.workflow,
           lane: j.lane,
           error: j.error ?? null,
           progress: j.progress,
+          created_at: j.created_at,
+          updated_at: j.updated_at,
         }));
         setBatchJobs(mapped);
         batchJobsRef.current = mapped;
         setPoll(active[0]);
         if (!timer.current) {
-          timer.current = setInterval(() => {
-            void refreshJobs();
-          }, 3000);
+          schedulePoll();
         }
       } catch {
         /* ignore — probe/submit will surface API errors */
@@ -1233,7 +1833,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     return () => {
       cancelled = true;
     };
-  }, [refreshJobs]);
+  }, [schedulePoll]);
 
   useEffect(() => () => stopPoll(), [stopPoll]);
 
@@ -1676,9 +2276,7 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
       if (terminal || mapped.length === 0) {
         setSubmitting(false);
       } else {
-        timer.current = setInterval(() => {
-          void refreshJobs();
-        }, 3000);
+        schedulePoll();
         await refreshJobs();
       }
     } catch (e) {
@@ -1698,42 +2296,232 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
       : copy.submitting
     : copy.submit;
 
-  const statusLabel =
-    poll?.status === "done"
-      ? copy.statusDone
-      : poll?.status === "cancelled"
-        ? copy.statusCancelled
-        : poll?.status === "failed" || poll?.status === "dead"
-          ? copy.statusFailed
-          : poll?.status === "processing"
-            ? copy.statusProcessing
-            : poll
-              ? copy.statusPending
-              : null;
+  // history 接口返回全状态；活动与终态必须各归其位，避免终态任务滞留「进行中」。
+  const activeHistoryJobs = useMemo(
+    () => historyJobs.filter((j) => !isTerminalStatus(j.status)),
+    [historyJobs]
+  );
+  const finishedHistoryJobs = useMemo(
+    () => historyJobs.filter((j) => isTerminalStatus(j.status)),
+    [historyJobs]
+  );
+
+  /** 会话内任务优先（含 path/lane 等更丰富字段），历史里的活动 CLI 任务补进来。只保留未终态。 */
+  const currentJobs = useMemo(() => {
+    const byId = new Map<number, BatchJobView>();
+    for (const j of activeHistoryJobs) {
+      byId.set(j.job_id, {
+        job_id: j.job_id,
+        label: j.title || `${j.platform}:${j.video_id}`,
+        title: j.title,
+        status: j.status,
+        workflow: j.workflow,
+        platform: j.platform,
+        video_id: j.video_id,
+        pack_id: j.pack_id,
+        error: j.error,
+        progress: j.progress,
+        created_at: j.created_at,
+        updated_at: j.updated_at,
+      });
+    }
+    for (const j of batchJobs) {
+      if (isTerminalStatus(j.status)) continue;
+      const prev = byId.get(j.job_id);
+      byId.set(j.job_id, {
+        ...prev,
+        ...j,
+        // history 常带 platform/video_id；会话轮询字段更全时也保留来源键。
+        platform: j.platform || prev?.platform,
+        video_id: j.video_id || prev?.video_id,
+        pack_id: j.pack_id ?? prev?.pack_id,
+        title: j.title || prev?.title,
+        label: j.title || j.label || prev?.label || String(j.job_id),
+        created_at: j.created_at ?? prev?.created_at,
+        updated_at: j.updated_at ?? prev?.updated_at,
+      });
+    }
+    return sortBatchJobsByWorkflow([...byId.values()]);
+  }, [activeHistoryJobs, batchJobs]);
+
+  /** 进行中按来源视频合集；角标与列表都以合集计。 */
+  const activeGroups = useMemo(() => {
+    const byKey = new Map<string, ActiveJobGroup>();
+    for (const j of currentJobs) {
+      const key = jobGroupKey(j);
+      let group = byKey.get(key);
+      if (!group) {
+        const asDone: DoneJobView = {
+          job_id: j.job_id,
+          label: j.label,
+          status: j.status,
+          title: j.title,
+          workflow: j.workflow,
+          platform: j.platform,
+          video_id: j.video_id,
+          pack_id: j.pack_id,
+        };
+        group = {
+          key,
+          label: doneJobTitle(asDone, locale),
+          source: sourceBadge(asDone, locale),
+          jobs: [],
+        };
+        byKey.set(key, group);
+      }
+      group.jobs.push(j);
+    }
+    for (const group of byKey.values()) {
+      group.jobs = sortBatchJobsByWorkflow(group.jobs);
+    }
+    return [...byKey.values()];
+  }, [currentJobs, locale]);
+
+  /** 终态任务统一来自 history + 会话内已终态 batchJobs（后者带 path/笔记入口），按 id 去重。 */
+  const doneJobs = useMemo(() => {
+    const byId = new Map<number, DoneJobView>();
+    for (const j of finishedHistoryJobs) {
+      byId.set(j.job_id, {
+        job_id: j.job_id,
+        label: j.title || `${j.platform}:${j.video_id}`,
+        status: j.status,
+        title: j.title,
+        workflow: j.workflow,
+        priority: j.priority,
+        platform: j.platform,
+        video_id: j.video_id,
+        pack_id: j.pack_id,
+        path: j.path ?? undefined,
+        error: j.error,
+        updated_sec_ago: j.updated_sec_ago,
+        progress: j.progress,
+      });
+    }
+    for (const j of batchJobs) {
+      if (!isTerminalStatus(j.status)) continue;
+      const prev = byId.get(j.job_id);
+      byId.set(j.job_id, {
+        job_id: j.job_id,
+        label: j.title || j.label,
+        status: j.status,
+        title: j.title ?? prev?.title,
+        workflow: j.workflow ?? prev?.workflow,
+        priority: prev?.priority,
+        platform: j.platform || prev?.platform,
+        video_id: j.video_id || prev?.video_id,
+        pack_id: j.pack_id ?? prev?.pack_id,
+        path: j.path,
+        error: j.error ?? prev?.error,
+        updated_sec_ago: prev?.updated_sec_ago,
+        progress: j.progress ?? prev?.progress,
+      });
+    }
+    // 保留 history 的「新→旧」顺序；会话内刚终态但还没进 history 的排在前面。
+    const inHistory = new Set(finishedHistoryJobs.map((j) => j.job_id));
+    const pending = [...byId.values()].filter((j) => !inHistory.has(j.job_id));
+    const seen = [...byId.values()].filter((j) => inHistory.has(j.job_id));
+    return [...pending, ...seen];
+  }, [finishedHistoryJobs, batchJobs]);
+
+  /** 同一来源视频的任务聚成合集；无 video_id 的手动任务按标题聚合。保持 doneJobs 的新→旧顺序。 */
+  const doneGroups = useMemo(() => {
+    const byKey = new Map<string, DoneJobGroup>();
+    for (const j of doneJobs) {
+      const key = jobGroupKey(j);
+      let group = byKey.get(key);
+      if (!group) {
+        group = {
+          key,
+          label: doneJobTitle(j, locale),
+          source: sourceBadge(j, locale),
+          jobs: [],
+        };
+        byKey.set(key, group);
+      }
+      group.jobs.push(j);
+    }
+    return [...byKey.values()];
+  }, [doneJobs, locale]);
+
+  // Expanded pack detail: slower than the active poll, paused while the tab is hidden.
+  const openActiveKey = [...expandedJobIds]
+    .filter((id) => currentJobs.some((j) => j.job_id === id && !isTerminalStatus(j.status)))
+    .sort((a, b) => a - b)
+    .join(",");
+  useEffect(() => {
+    if (!openActiveKey) return;
+    const ids = openActiveKey.split(",").map(Number);
+    let timerId: ReturnType<typeof setTimeout> | null = null;
+    let disposed = false;
+    const DETAIL_MS_VISIBLE = 8000;
+    const DETAIL_MS_HIDDEN = 20000;
+    const schedule = () => {
+      if (disposed) return;
+      const delay =
+        typeof document !== "undefined" && document.visibilityState !== "visible"
+          ? DETAIL_MS_HIDDEN
+          : DETAIL_MS_VISIBLE;
+      timerId = setTimeout(() => {
+        timerId = null;
+        if (disposed) return;
+        if (document.visibilityState === "visible") {
+          for (const id of ids) void loadJobDetail(id, true);
+        }
+        schedule();
+      }, delay);
+    };
+    schedule();
+    const onVis = () => {
+      if (document.visibilityState !== "visible" || disposed) return;
+      for (const id of ids) void loadJobDetail(id, true);
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      disposed = true;
+      if (timerId) clearTimeout(timerId);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [openActiveKey, loadJobDetail]);
 
   const batchCounts = useMemo(() => {
-    const total = batchJobs.length;
-    const running = batchJobs.filter((j) => j.status === "processing").length;
-    const queued = batchJobs.filter((j) => j.status === "pending").length;
+    const total = activeGroups.length;
+    const running = activeGroups.filter((g) =>
+      g.jobs.some((j) => j.status === "processing")
+    ).length;
+    const queued = activeGroups.filter(
+      (g) =>
+        !g.jobs.some((j) => j.status === "processing") &&
+        g.jobs.some((j) => j.status === "pending")
+    ).length;
     return { total, running, queued };
-  }, [batchJobs]);
+  }, [activeGroups]);
 
-  const hasActiveBatch = batchJobs.some((j) => !isTerminalStatus(j.status));
+  const hasActiveBatch = activeGroups.length > 0;
 
-  const progress = poll?.progress;
-  const stage = stageLabel(copy, progress?.stage);
-  const detail = progressDetail(copy, progress);
-  const pollSourceRaw = poll?.title || batchJobs[0]?.label;
-  const pollSourceLabel = pollSourceRaw
-    ? formatBatchJobLabel(pollSourceRaw, locale)
-    : null;
-  const queueAhead = poll?.queue_ahead;
-  const queueAheadProgress = queueAhead?.progress;
-  const queueAheadStage = stageLabel(copy, queueAheadProgress?.stage);
-  const queueAheadLabel = queueAhead?.title
-    ? formatBatchJobLabel(queueAhead.title, locale)
-    : null;
-  const queueAheadPct = queueAheadProgress?.percent ?? 0;
+  const etaTrackRef = useRef<Map<string, EtaTrack>>(new Map());
+  useEffect(() => {
+    const alive = new Set<string>();
+    for (const g of activeGroups) {
+      alive.add(g.key);
+      alive.add(`${g.key}:content`);
+      alive.add(`${g.key}:media`);
+      for (const j of g.jobs) alive.add(`job:${j.job_id}`);
+    }
+    for (const key of [...etaTrackRef.current.keys()]) {
+      if (!alive.has(key)) etaTrackRef.current.delete(key);
+    }
+  }, [activeGroups]);
+
+  // Pause / resume the single poll loop with tab visibility (best practice).
+  useEffect(() => {
+    const onVis = () => {
+      if (!batchJobsRef.current.some((j) => !isTerminalStatus(j.status))) return;
+      if (document.visibilityState === "visible") void refreshJobsRef.current?.();
+      else schedulePoll();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, [schedulePoll]);
 
   async function fillClipsFromKeyPoints() {
     const jid = poll?.job_id || batchJobs.find((j) => j.job_id)?.job_id;
@@ -1793,8 +2581,153 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
     return () => window.clearTimeout(t);
   }, [langsOpen]);
 
+  const renderPackTasks = (tasks: NonNullable<Poll["pack_tasks"]>) =>
+    tasks && tasks.length > 0 ? (
+      <ul className="try-pack-tasks" aria-label="workflows">
+        {tasks.map((t) => {
+          const pct =
+            t.progress?.percent ??
+            (t.status === "done" || t.status === "partial" ? 100 : 0);
+          const steps = jobStepsById[t.job_id] || [];
+          const langSteps = steps.filter(
+            (s) => s.kind === "translate" || s.kind === "notes_localize"
+          );
+          const summaryLabel =
+            t.steps_summary && t.steps_summary.total > 0
+              ? fillCopy(copy.stepsSummary, {
+                  done: t.steps_summary.done,
+                  total: t.steps_summary.total,
+                })
+              : null;
+          return (
+            <li key={t.job_id} className={`try-pack-task is-${t.status}`}>
+              <div className="try-pack-task-head">
+                <span className="try-pack-task-wf">{t.workflow}</span>
+                <span className="try-pack-task-st">
+                  {jobStatusLabel(copy, t.status)}
+                </span>
+                {summaryLabel ? (
+                  <span className="try-pack-task-steps">{summaryLabel}</span>
+                ) : null}
+                {t.input_from ? (
+                  <span className="try-pack-task-in">←{t.input_from}</span>
+                ) : null}
+                {t.download_url ? (
+                  <a className="try-pack-task-dl" href={t.download_url} download>
+                    ↓
+                  </a>
+                ) : null}
+              </div>
+              <div
+                className="try-progress-bar try-pack-task-bar"
+                role="progressbar"
+                aria-valuenow={pct}
+                aria-valuemin={0}
+                aria-valuemax={100}
+              >
+                <span className="try-progress-fill" style={{ width: `${pct}%` }} />
+              </div>
+              {langSteps.length > 0 ? (
+                <div className="try-step-chips" aria-label={copy.stepLangChips}>
+                  {langSteps.map((s) => {
+                    const mark = stepChipMark(s);
+                    const canRetry =
+                      s.status === "failed" ||
+                      s.status === "queued" ||
+                      s.qa_status === "needs_review";
+                    const busy = stepRetryBusy === `${t.job_id}:${s.step_key}`;
+                    const label = s.lang || s.step_key.split(".").pop() || s.step_key;
+                    return (
+                      <button
+                        key={s.step_key}
+                        type="button"
+                        className={`try-step-chip ${stepChipClass(s)}`}
+                        title={
+                          s.error ||
+                          (canRetry ? copy.stepRetry : s.step_key)
+                        }
+                        disabled={!canRetry || busy || t.status === "processing"}
+                        onClick={() => void retryJobStep(t.job_id, s.step_key)}
+                      >
+                        {label} {mark}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+              {t.products && t.products.length > 0 ? (
+                <ul className="try-pack-task-products">
+                  {t.products.slice(0, 6).map((p) => (
+                    <li key={p.rel}>
+                      {p.url ? (
+                        <a href={p.url.startsWith("/") && !p.url.startsWith("/derived") ? `${API}${p.url}` : p.url} download={p.name}>
+                          {p.name}
+                        </a>
+                      ) : (
+                        <span>{p.name}</span>
+                      )}
+                    </li>
+                  ))}
+                  {t.products.length > 6 ? (
+                    <li>+{t.products.length - 6}</li>
+                  ) : null}
+                </ul>
+              ) : null}
+            </li>
+          );
+        })}
+      </ul>
+    ) : null;
+
+  const packTasksList = renderPackTasks(poll?.pack_tasks || []);
+
   return (
     <div className="try-panel">
+      <div className="try-view-tabs" role="tablist" aria-label={copy.viewTabsLabel}>
+        <button
+          type="button"
+          role="tab"
+          id="try-tab-new"
+          aria-controls="try-panel-new"
+          className={workView === "new" ? "try-view-tab active" : "try-view-tab"}
+          aria-selected={workView === "new"}
+          onClick={() => setWorkView("new")}
+        >
+          {copy.viewNew}
+        </button>
+        <button
+          type="button"
+          role="tab"
+          id="try-tab-active"
+          aria-controls="try-panel-active"
+          className={workView === "active" ? "try-view-tab active" : "try-view-tab"}
+          aria-selected={workView === "active"}
+          onClick={() => setWorkView("active")}
+        >
+          {copy.viewActive}
+          {activeGroups.length ? (
+            <span className="try-batch-jobs-count">{activeGroups.length}</span>
+          ) : null}
+          {hasActiveBatch ? <span className="try-view-dot" aria-hidden="true" /> : null}
+        </button>
+        <button
+          type="button"
+          role="tab"
+          id="try-tab-done"
+          aria-controls="try-panel-done"
+          className={workView === "done" ? "try-view-tab active" : "try-view-tab"}
+          aria-selected={workView === "done"}
+          onClick={() => setWorkView("done")}
+        >
+          {copy.viewDone}
+          {doneGroups.length ? (
+            <span className="try-batch-jobs-count">{doneGroups.length}</span>
+          ) : null}
+        </button>
+      </div>
+
+      {workView === "new" ? (
+        <div id="try-panel-new" role="tabpanel" aria-labelledby="try-tab-new">
       <div className="try-workflow-rail-wrap">
       <div className="try-workflow-lanes" aria-label={copy.modulesSection}>
         <ol className="try-workflow-rail try-workflow-rail-content" aria-label={copy.workflowRailContentLane}>
@@ -1901,24 +2834,6 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
               </button>
             </li>
           ))}
-          {/* WF-07 rail gated: AI remake redesign — see trans/AI二创设计.md */}
-          <li className="is-soon" title={copy.workflowRailRemixSoon}>
-            <button
-              type="button"
-              className="try-workflow-rail-toggle"
-              aria-pressed={false}
-              aria-disabled="true"
-              disabled
-            >
-              <span className="try-workflow-rail-n" aria-hidden="true">
-                –
-              </span>
-              <span className="try-workflow-rail-label">
-                {copy.workflowRailRemix}
-                <span className="try-workflow-rail-soon">{copy.workflowRailRemixSoon}</span>
-              </span>
-            </button>
-          </li>
         </ol>
       </div>
       <p className="try-workflow-rail-hint">{copy.workflowRailHint}</p>
@@ -2574,283 +3489,6 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
 
       {err ? <p className="try-error">{err}</p> : null}
 
-      {poll ? (
-        <div className="try-status" aria-live="polite">
-          <p className="try-status-head">
-            <strong>{statusLabel}</strong>
-            {pollSourceLabel ? (
-              <span className="try-status-source" title={pollSourceRaw}>
-                {" "}
-                · {pollSourceLabel}
-              </span>
-            ) : null}
-          </p>
-
-          {progress &&
-          (poll.status === "pending" || poll.status === "processing") ? (
-            <div className="try-progress">
-              <div
-                className="try-progress-bar"
-                role="progressbar"
-                aria-valuenow={progress.percent}
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-label={stage}
-              >
-                <div
-                  className="try-progress-fill"
-                  style={{ width: `${Math.max(progress.percent, 2)}%` }}
-                />
-              </div>
-              <p className="try-progress-meta">
-                <span>{fillCopy(copy.progressNow, { stage })}</span>
-                {detail ? <span>{detail}</span> : null}
-                <span>{progress.percent}%</span>
-              </p>
-              {progress.active ? (
-                <p className="try-progress-active">{copy.progressActive}</p>
-              ) : progress.stale ? (
-                <p className="try-progress-stale">{copy.progressStale}</p>
-              ) : poll.status === "pending" ? (
-                <p className="try-progress-wait">{copy.stageQueued}</p>
-              ) : progress.stage === "transcribe" && progress.percent <= 20 ? (
-                <p className="try-progress-wait">{copy.stageTranscribe}</p>
-              ) : null}
-            </div>
-          ) : null}
-
-          {poll.pack_zip_url ? (
-            <p className="try-pack-zip">
-              <a href={`${API}${poll.pack_zip_url}`} download>
-                {copy.packZipDownload}
-              </a>
-            </p>
-          ) : null}
-
-          {poll.pack_tasks && poll.pack_tasks.length > 0 ? (
-            <ul className="try-pack-tasks" aria-label="workflows">
-              {poll.pack_tasks.map((t) => {
-                const pct =
-                  t.progress?.percent ??
-                  (t.status === "done" || t.status === "partial" ? 100 : 0);
-                const steps = jobStepsById[t.job_id] || [];
-                const langSteps = steps.filter(
-                  (s) => s.kind === "translate" || s.kind === "notes_localize"
-                );
-                const summaryLabel =
-                  t.steps_summary && t.steps_summary.total > 0
-                    ? fillCopy(copy.stepsSummary, {
-                        done: t.steps_summary.done,
-                        total: t.steps_summary.total,
-                      })
-                    : null;
-                return (
-                  <li key={t.job_id} className={`try-pack-task is-${t.status}`}>
-                    <div className="try-pack-task-head">
-                      <span className="try-pack-task-wf">{t.workflow}</span>
-                      <span className="try-pack-task-st">
-                        {jobStatusLabel(copy, t.status)}
-                      </span>
-                      {summaryLabel ? (
-                        <span className="try-pack-task-steps">{summaryLabel}</span>
-                      ) : null}
-                      {t.input_from ? (
-                        <span className="try-pack-task-in">←{t.input_from}</span>
-                      ) : null}
-                      {t.download_url ? (
-                        <a className="try-pack-task-dl" href={t.download_url} download>
-                          ↓
-                        </a>
-                      ) : null}
-                    </div>
-                    <div
-                      className="try-progress-bar try-pack-task-bar"
-                      role="progressbar"
-                      aria-valuenow={pct}
-                      aria-valuemin={0}
-                      aria-valuemax={100}
-                    >
-                      <span style={{ width: `${pct}%` }} />
-                    </div>
-                    {langSteps.length > 0 ? (
-                      <div className="try-step-chips" aria-label={copy.stepLangChips}>
-                        {langSteps.map((s) => {
-                          const mark = stepChipMark(s);
-                          const canRetry =
-                            s.status === "failed" ||
-                            s.status === "queued" ||
-                            s.qa_status === "needs_review";
-                          const busy = stepRetryBusy === `${t.job_id}:${s.step_key}`;
-                          const label = s.lang || s.step_key.split(".").pop() || s.step_key;
-                          return (
-                            <button
-                              key={s.step_key}
-                              type="button"
-                              className={`try-step-chip ${stepChipClass(s)}`}
-                              title={
-                                s.error ||
-                                (canRetry ? copy.stepRetry : s.step_key)
-                              }
-                              disabled={!canRetry || busy || t.status === "processing"}
-                              onClick={() => void retryJobStep(t.job_id, s.step_key)}
-                            >
-                              {label} {mark}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    ) : null}
-                    {t.products && t.products.length > 0 ? (
-                      <ul className="try-pack-task-products">
-                        {t.products.slice(0, 6).map((p) => (
-                          <li key={p.rel}>
-                            {p.url ? (
-                              <a href={p.url.startsWith("/") && !p.url.startsWith("/derived") ? `${API}${p.url}` : p.url} download={p.name}>
-                                {p.name}
-                              </a>
-                            ) : (
-                              <span>{p.name}</span>
-                            )}
-                          </li>
-                        ))}
-                        {t.products.length > 6 ? (
-                          <li>+{t.products.length - 6}</li>
-                        ) : null}
-                      </ul>
-                    ) : null}
-                  </li>
-                );
-              })}
-            </ul>
-          ) : null}
-
-          {poll.status === "pending" &&
-          (poll.waiting_for_depends_on ||
-            poll.lane_full ||
-            poll.schedule?.waiting_for_depends_on ||
-            poll.schedule?.lane_full ||
-            poll.busy) ? (
-            <>
-              {poll.waiting_for_depends_on || poll.schedule?.waiting_for_depends_on ? (
-                <p className="try-hint">
-                  {fillCopy(copy.waitingDeps, {
-                    dep: String(poll.blocked_on || poll.schedule?.blocked_on || "deps"),
-                  })}
-                </p>
-              ) : poll.lane_full || poll.schedule?.lane_full ? (
-                <p className="try-hint">{copy.laneFull}</p>
-              ) : poll.queue_position && poll.queue_position > 1 ? (
-                <p className="try-hint">
-                  {fillCopy(copy.queuePosition, { n: poll.queue_position })}
-                </p>
-              ) : (
-                <p className="try-hint">{copy.busy}</p>
-              )}
-              {queueAhead && queueAheadProgress ? (
-                <div className="try-queue-ahead">
-                  <p className="try-queue-ahead-label">
-                    {fillCopy(copy.queueAhead, {
-                      title: queueAheadLabel || String(queueAhead.job_id),
-                      stage: queueAheadStage,
-                      percent: queueAheadPct,
-                    })}
-                  </p>
-                  <div
-                    className="try-progress-bar try-queue-ahead-bar"
-                    role="progressbar"
-                    aria-valuenow={queueAheadPct}
-                    aria-valuemin={0}
-                    aria-valuemax={100}
-                    aria-label={queueAheadStage}
-                  >
-                    <div
-                      className="try-progress-fill"
-                      style={{ width: `${Math.max(queueAheadPct, 2)}%` }}
-                    />
-                  </div>
-                </div>
-              ) : null}
-            </>
-          ) : null}
-
-          {poll.error &&
-          (poll.status === "failed" ||
-            poll.status === "dead" ||
-            poll.status === "cancelled") ? (
-            <p className="try-error">{stripAnsi(poll.error)}</p>
-          ) : null}
-          {poll.status === "done" && poll.derived ? (
-            <div className="try-derived">
-              <p className="try-derived-title">{copy.derivedTitle}</p>
-              {poll.derived.remix ? (
-                <RemixPlayer
-                  src={poll.derived.remix}
-                  cuesUrl={poll.derived.remix_cues}
-                  vttUrl={poll.derived.remix_vtt}
-                  label={copy.remixSection}
-                />
-              ) : null}
-              <ul>
-                {poll.derived.dehardsub ? (
-                  <li>
-                    <a href={poll.derived.dehardsub} download>
-                      {copy.workflowRailDehardsub}
-                    </a>
-                  </li>
-                ) : null}
-                {poll.derived.deblur ? (
-                  <li>
-                    <a href={poll.derived.deblur} download>
-                      {copy.workflowRailDeblur}
-                    </a>
-                  </li>
-                ) : null}
-                {poll.derived.concat ? (
-                  <li>
-                    <a href={poll.derived.concat} download>
-                      {copy.derivedConcat}
-                    </a>
-                  </li>
-                ) : null}
-                {poll.derived.enhance ? (
-                  <li>
-                    <a href={poll.derived.enhance} download>
-                      {copy.derivedEnhance}
-                    </a>
-                  </li>
-                ) : null}
-                {poll.derived.compress ? (
-                  <li>
-                    <a href={poll.derived.compress} download>
-                      {copy.derivedCompress}
-                    </a>
-                  </li>
-                ) : null}
-                {poll.derived.remix ? (
-                  <li>
-                    <a href={poll.derived.remix} download>
-                      {copy.derivedRemix}
-                    </a>
-                  </li>
-                ) : null}
-                {poll.derived.remix_vtt ? (
-                  <li>
-                    <a href={poll.derived.remix_vtt} download>
-                      {copy.derivedRemixVtt}
-                    </a>
-                  </li>
-                ) : null}
-                {poll.derived.publish ? (
-                  <li>
-                    <a href={poll.derived.publish} download>
-                      {copy.derivedPublish}
-                    </a>
-                  </li>
-                ) : null}
-              </ul>
-            </div>
-          ) : null}
-
           {dhTask ? (
             <div className="try-derived">
               <p className="try-derived-title">{copy.workflowRailDehardsub}</p>
@@ -2895,29 +3533,38 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
               onConfirm={onDehardsubConfirm}
             />
           ) : null}
-          {poll.status === "done" && poll.path && batchJobs.length <= 1 ? (
-            <p>
-              {poll.cached ? (
-                <span className="try-hint">{copy.alreadyDone} </span>
-              ) : null}
-              <Link className="watch-btn" href={localePath(locale, poll.path)}>
-                {copy.openNotes}
-              </Link>
-            </p>
-          ) : null}
         </div>
       ) : null}
 
-      {batchJobs.length > 0 ? (
+      {workView === "active" ? (
+        <section
+          id="try-panel-active"
+          role="tabpanel"
+          aria-labelledby="try-tab-active"
+          className="try-view-pane"
+          aria-label={copy.viewActive}
+        >
+      {activeGroups.length > 0 ? (
         <div className="try-batch-jobs-wrap">
           <div className="try-batch-jobs-head">
-            <span>{copy.batchJobsTitle}</span>
-            <span className="try-batch-jobs-count">{batchJobs.length}</span>
-            {batchCounts.total > 1 ? (
+            <span>{copy.currentJobsTitle}</span>
+            <span className="try-batch-jobs-count">{activeGroups.length}</span>
+            {batchCounts.total > 0 ? (
               <span className="try-batch-jobs-summary">
                 {fillCopy(copy.batchSummary, batchCounts)}
               </span>
             ) : null}
+            <button
+              type="button"
+              className="watch-btn secondary"
+              disabled={historyRefreshing}
+              onClick={() => {
+                void refreshHistory();
+                for (const j of currentJobs) void loadJobDetail(j.job_id, true);
+              }}
+            >
+              {copy.historyRefresh}
+            </button>
             {hasActiveBatch ? (
               <button
                 type="button"
@@ -2927,103 +3574,477 @@ export function TryForm({ locale, copy }: { locale: Locale; copy: TryCopy }) {
                 {queuePaused ? copy.queueResume : copy.queuePause}
               </button>
             ) : null}
+            <button
+              type="button"
+              className="watch-btn secondary try-batch-toggle"
+              aria-expanded={batchOpen}
+              onClick={() => setBatchOpen((v) => !v)}
+            >
+              {batchOpen ? copy.collapse : copy.expand}
+            </button>
           </div>
-          {queuePaused && hasActiveBatch ? (
+          {queuePaused && hasActiveBatch && batchOpen ? (
             <p className="try-hint try-queue-paused">{copy.queuePaused}</p>
           ) : null}
-          <ul className="try-batch-jobs" aria-label={copy.batchJobsTitle}>
-            {sortBatchJobsByWorkflow(batchJobs).map((j) => {
-              const wf = workflowLabel(copy, j.workflow);
-              const laneTag =
-                j.lane === "media"
-                  ? copy.workflowRailMediaLane
-                  : j.lane === "content"
-                    ? copy.workflowRailContentLane
-                    : "";
-              const label = [
-                formatBatchJobLabel(j.title || j.label, locale),
-                wf,
-                laneTag,
-              ]
-                .filter(Boolean)
-                .join(" · ");
-              const stage = stageLabel(copy, j.progress?.stage);
-              const detail = progressDetail(copy, j.progress);
-              const pct = j.progress?.percent ?? 0;
-              const showProgress =
-                Boolean(j.progress) &&
-                (j.status === "pending" || j.status === "processing");
-              const canCancel = j.status === "pending" || j.status === "processing";
-              const canRetry =
-                j.status === "failed" ||
-                j.status === "dead" ||
-                j.status === "cancelled";
+          <ul className="try-history-list try-active-groups" aria-label={copy.currentJobsTitle} hidden={!batchOpen}>
+            {activeGroups.map((group) => {
+              const gOpen = expandedGroupKeys.has(group.key);
+              const statusChips = groupStatusChips(group.jobs, copy);
+              const lead = groupLeadJob(group.jobs);
+              const leadStage = stageLabel(copy, lead?.progress?.stage);
+              const leadDetail = progressDetail(copy, lead?.progress);
+              const leadPct = Math.round(
+                group.jobs.reduce((s, j) => s + jobEffectivePercent(j), 0) / group.jobs.length
+              );
+              const showProgress = Boolean(
+                lead?.progress &&
+                  (lead.status === "pending" || lead.status === "processing")
+              );
+              const cancelTarget = group.jobs.find(
+                (j) => j.status === "pending" || j.status === "processing"
+              );
               return (
-                <li key={j.job_id} className="try-batch-job">
-                  <div className="try-batch-job-head">
-                    <span className="try-batch-jobs-label" title={j.label}>
-                      {label}
-                    </span>
-                    <span className={`try-batch-jobs-badge ${badgeClass(j.status)}`}>
-                      {jobStatusLabel(copy, j.status)}
-                    </span>
-                    <div className="try-batch-job-actions">
-                      {canCancel ? (
+                <li key={group.key} className={`try-history-group${gOpen ? " detail-open" : ""}`}>
+                  <div className="try-history-group-head">
+                    <button
+                      type="button"
+                      className="try-history-group-toggle"
+                      aria-expanded={gOpen}
+                      onClick={() => toggleGroup(group.key)}
+                    >
+                      <span className="try-history-group-chevron" aria-hidden="true">
+                        {gOpen ? "▾" : "▸"}
+                      </span>
+                      <span className="try-history-group-label" title={group.label}>
+                        {group.label}
+                      </span>
+                      {group.source ? (
+                        <span className="try-history-group-source" title={group.source}>
+                          {group.source}
+                        </span>
+                      ) : null}
+                      {statusChips.length ? (
+                        <span className="try-history-group-statuses">
+                          {statusChips.map((chip) => (
+                            <span
+                              key={chip.status}
+                              className={`try-batch-jobs-badge ${badgeClass(chip.status)}`}
+                            >
+                              {chip.label}
+                            </span>
+                          ))}
+                        </span>
+                      ) : null}
+                      <span className="try-history-group-tag">{copy.historyGroupTag}</span>
+                      <span className="try-history-group-count">
+                        {fillCopy(copy.historyGroupCount, { n: group.jobs.length })}
+                      </span>
+                      <span className="try-history-group-action">
+                        {gOpen ? copy.collapse : copy.expand}
+                      </span>
+                    </button>
+                    <div className="try-history-group-actions">
+                      {cancelTarget ? (
                         <button
                           type="button"
-                          className="watch-btn secondary try-batch-job-btn"
-                          disabled={jobActionBusy === j.job_id}
-                          onClick={() => void runJobAction(j.job_id, "cancel")}
+                          className="watch-btn secondary try-history-group-btn"
+                          disabled={jobActionBusy === cancelTarget.job_id}
+                          onClick={() => void runJobAction(cancelTarget.job_id, "cancel")}
                         >
                           {copy.jobCancel}
                         </button>
                       ) : null}
-                      {canRetry ? (
-                        <button
-                          type="button"
-                          className="watch-btn secondary try-batch-job-btn"
-                          disabled={jobActionBusy === j.job_id}
-                          onClick={() => void runJobAction(j.job_id, "retry")}
-                        >
-                          {copy.jobRetry}
-                        </button>
-                      ) : null}
                     </div>
                   </div>
-                  {showProgress ? (
+                  {showProgress && !gOpen ? (
                     <div className="try-batch-job-progress">
                       <div
                         className="try-progress-bar"
                         role="progressbar"
-                        aria-valuenow={pct}
+                        aria-valuenow={leadPct}
                         aria-valuemin={0}
                         aria-valuemax={100}
-                        aria-label={stage}
+                        aria-label={leadStage}
                       >
                         <div
                           className="try-progress-fill"
-                          style={{ width: `${Math.max(pct, 2)}%` }}
+                          style={{ width: `${Math.max(leadPct, 2)}%` }}
                         />
                       </div>
                       <p className="try-batch-job-progress-meta">
-                        <span>{fillCopy(copy.progressNow, { stage })}</span>
-                        {detail ? <span>{detail}</span> : null}
-                        <span>{pct}%</span>
+                        <span>{fillCopy(copy.progressNow, { stage: leadStage })}</span>
+                        {leadDetail ? <span>{leadDetail}</span> : null}
+                        <span>{leadPct}%</span>
+                        <PackProgressEtaSpan
+                          groupKey={group.key}
+                          jobs={group.jobs}
+                          copy={copy}
+                          trackRef={etaTrackRef}
+                        />
                       </p>
                     </div>
                   ) : null}
-                  {j.path && j.status === "done" ? (
-                    <p className="try-batch-job-done">
-                      <Link href={localePath(locale, j.path)}>{copy.openNotes}</Link>
-                    </p>
-                  ) : null}
-                  {j.error && (j.status === "failed" || j.status === "dead" || j.status === "cancelled") ? (
-                    <p className="try-error try-batch-job-error">{stripAnsi(j.error)}</p>
+                  {gOpen ? (
+                    <ul className="try-history-group-jobs">
+                      {group.jobs.map((j) => {
+                        const wf = workflowLabel(copy, j.workflow);
+                        const laneTag =
+                          j.lane === "media"
+                            ? copy.workflowRailMediaLane
+                            : j.lane === "content"
+                              ? copy.workflowRailContentLane
+                              : "";
+                        const label = [wf, laneTag].filter(Boolean).join(" · ") || String(j.job_id);
+                        const stage = stageLabel(copy, j.progress?.stage);
+                        const detail = progressDetail(copy, j.progress);
+                        const pct = j.progress?.percent ?? 0;
+                        const rowProgress =
+                          Boolean(j.progress) &&
+                          (j.status === "pending" || j.status === "processing");
+                        const canRetry = canRetryStatus(j.status);
+                        const jobDetail = jobDetails[j.job_id];
+                        const detailOpen = expandedJobIds.has(j.job_id);
+                        const hasPack = Boolean(jobDetail?.pack_tasks?.length);
+                        return (
+                          <li key={j.job_id} className={`try-history-item${detailOpen ? " detail-open" : ""}`}>
+                            <div className="try-history-item-head">
+                              <span className="try-history-item-label" title={label}>
+                                {label}
+                              </span>
+                              <span className={`try-batch-jobs-badge ${badgeClass(j.status)}`}>
+                                {jobStatusLabel(copy, j.status)}
+                              </span>
+                              <div className="try-batch-job-actions">
+                                <button
+                                  type="button"
+                                  className="watch-btn secondary try-batch-job-btn"
+                                  aria-expanded={detailOpen}
+                                  onClick={() => toggleJobDetail(j.job_id)}
+                                >
+                                  {detailOpen ? copy.collapse : copy.expand}
+                                </button>
+                                {canRetry ? (
+                                  <button
+                                    type="button"
+                                    className="watch-btn secondary try-batch-job-btn"
+                                    disabled={jobActionBusy === j.job_id}
+                                    onClick={() => void runJobAction(j.job_id, "retry")}
+                                  >
+                                    {copy.jobRetry}
+                                  </button>
+                                ) : null}
+                              </div>
+                            </div>
+                            {rowProgress ? (
+                              <div className="try-batch-job-progress">
+                                <div
+                                  className="try-progress-bar"
+                                  role="progressbar"
+                                  aria-valuenow={pct}
+                                  aria-valuemin={0}
+                                  aria-valuemax={100}
+                                  aria-label={stage}
+                                >
+                                  <div
+                                    className="try-progress-fill"
+                                    style={{ width: `${Math.max(pct, 2)}%` }}
+                                  />
+                                </div>
+                                <p className="try-batch-job-progress-meta">
+                                  <span>{fillCopy(copy.progressNow, { stage })}</span>
+                                  {detail ? <span>{detail}</span> : null}
+                                  <span>{pct}%</span>
+                                  <ProgressEtaSpan
+                                    trackKey={`job:${j.job_id}`}
+                                    pct={jobEffectivePercent(j)}
+                                    copy={copy}
+                                    trackRef={etaTrackRef}
+                                  />
+                                </p>
+                              </div>
+                            ) : null}
+                            {j.error && canRetry ? (
+                              <p className="try-error try-batch-job-error">{stripAnsi(j.error)}</p>
+                            ) : null}
+                            {detailOpen ? (
+                              <div className="try-batch-job-detail">
+                                {detailLoading.has(j.job_id) && !jobDetail ? (
+                                  <p className="try-hint">{copy.detailLoading}</p>
+                                ) : hasPack ? (
+                                  <>
+                                    {jobDetail?.pack_zip_url ? (
+                                      <p className="try-pack-zip">
+                                        <a href={assetHref(jobDetail.pack_zip_url)} download>
+                                          {copy.packZipDownload}
+                                        </a>
+                                      </p>
+                                    ) : null}
+                                    {renderPackTasks(jobDetail?.pack_tasks || [])}
+                                  </>
+                                ) : (
+                                  <p className="try-hint">{copy.detailEmpty}</p>
+                                )}
+                              </div>
+                            ) : null}
+                          </li>
+                        );
+                      })}
+                    </ul>
                   ) : null}
                 </li>
               );
             })}
           </ul>
+        </div>
+      ) : (
+        <p className="try-view-empty">{copy.viewActiveEmpty}</p>
+      )}
+        </section>
+      ) : null}
+
+      {workView === "done" ? (
+        <section
+          id="try-panel-done"
+          role="tabpanel"
+          aria-labelledby="try-tab-done"
+          className="try-view-pane"
+          aria-label={copy.viewDone}
+        >
+          <div className="try-view-pane-head">
+            <div className="try-view-pane-head-title">
+              <span className="try-view-pane-head-mark" aria-hidden="true">
+                ✓
+              </span>
+              <span className="try-view-pane-head-label">{copy.historyTitle}</span>
+              <span className="try-batch-jobs-count">{doneGroups.length}</span>
+            </div>
+            <button
+              type="button"
+              className="watch-btn secondary try-view-refresh-btn"
+              disabled={historyRefreshing}
+              onClick={() => {
+                void refreshHistory();
+                for (const id of expandedJobIds) void loadJobDetail(id, true);
+              }}
+            >
+              <span className="try-view-refresh-icon" aria-hidden="true">
+                ↻
+              </span>
+              {historyRefreshing ? copy.historyRefreshing : copy.historyRefresh}
+            </button>
+          </div>
+          {doneJobs.length === 0 ? (
+            <p className="try-view-empty">{copy.viewDoneEmpty}</p>
+          ) : (
+            <ul className="try-history-list">
+              {doneGroups.map((group) => {
+                const gOpen = expandedGroupKeys.has(group.key);
+                const statusChips = groupStatusChips(group.jobs, copy);
+                return (
+                  <li key={group.key} className={`try-history-group${gOpen ? " detail-open" : ""}`}>
+                    <div className="try-history-group-head">
+                      <button
+                        type="button"
+                        className="try-history-group-toggle"
+                        aria-expanded={gOpen}
+                        onClick={() => toggleGroup(group.key)}
+                      >
+                        <span className="try-history-group-chevron" aria-hidden="true">
+                          {gOpen ? "▾" : "▸"}
+                        </span>
+                        <span className="try-history-group-label" title={group.label}>
+                          {group.label}
+                        </span>
+                        {group.source ? (
+                          <span className="try-history-group-source" title={group.source}>
+                            {group.source}
+                          </span>
+                        ) : null}
+                        {statusChips.length ? (
+                          <span className="try-history-group-statuses">
+                            {statusChips.map((chip) => (
+                              <span
+                                key={chip.status}
+                                className={`try-batch-jobs-badge ${badgeClass(chip.status)}`}
+                              >
+                                {chip.label}
+                              </span>
+                            ))}
+                          </span>
+                        ) : null}
+                        <span className="try-history-group-tag">{copy.historyGroupTag}</span>
+                        <span className="try-history-group-count">
+                          {fillCopy(copy.historyGroupCount, { n: group.jobs.length })}
+                        </span>
+                        <span className="try-history-group-action">
+                          {gOpen ? copy.collapse : copy.expand}
+                        </span>
+                      </button>
+                      <div className="try-history-group-actions">
+                        <button
+                          type="button"
+                          className="watch-btn secondary try-history-group-btn"
+                          disabled={groupActionBusy === group.key}
+                          onClick={() =>
+                            void runBatchAction(
+                              group.key,
+                              group.jobs.map((j) => j.job_id),
+                              group.label,
+                              "retry"
+                            )
+                          }
+                        >
+                          {copy.jobRetry}
+                        </button>
+                        <button
+                          type="button"
+                          className="watch-btn secondary try-history-group-btn danger"
+                          disabled={groupActionBusy === group.key}
+                          onClick={() =>
+                            void runBatchAction(
+                              group.key,
+                              group.jobs.map((j) => j.job_id),
+                              group.label,
+                              "delete"
+                            )
+                          }
+                        >
+                          {copy.jobDelete}
+                        </button>
+                      </div>
+                    </div>
+                    {gOpen ? (
+                      <ul className="try-history-group-jobs">
+                        {group.jobs.map((j) => {
+                          const wf = workflowLabel(copy, j.workflow);
+                          const isManual = j.priority === "normal";
+                          const label = [doneJobTitle(j, locale), wf].filter(Boolean).join(" · ");
+                          const hDetail = jobDetails[j.job_id];
+                          const hOpen = expandedJobIds.has(j.job_id);
+                          const canRetry = canRetryStatus(j.status);
+                          const notesPath = j.path || hDetail?.path;
+                          return (
+                            <li key={j.job_id} className={`try-history-item${hOpen ? " detail-open" : ""}`}>
+                              <div className="try-history-item-head">
+                                <span className="try-history-item-label" title={label}>
+                                  {label}
+                                  {isManual ? (
+                                    <span className="try-history-manual">{copy.historyManualTag}</span>
+                                  ) : null}
+                                </span>
+                                <span className={`try-batch-jobs-badge ${badgeClass(j.status)}`}>
+                                  {jobStatusLabel(copy, j.status)}
+                                </span>
+                                <div className="try-batch-job-actions">
+                                  <button
+                                    type="button"
+                                    className="watch-btn secondary try-batch-job-btn"
+                                    aria-expanded={hOpen}
+                                    onClick={() => toggleJobDetail(j.job_id)}
+                                  >
+                                    {hOpen ? copy.collapse : copy.expand}
+                                  </button>
+                                  {canRetry ? (
+                                    <button
+                                      type="button"
+                                      className="watch-btn secondary try-batch-job-btn"
+                                      disabled={jobActionBusy === j.job_id}
+                                      onClick={() => void runJobAction(j.job_id, "retry")}
+                                    >
+                                      {copy.jobRetry}
+                                    </button>
+                                  ) : null}
+                                  <button
+                                    type="button"
+                                    className="watch-btn secondary try-batch-job-btn danger"
+                                    disabled={groupActionBusy === `job-${j.job_id}`}
+                                    onClick={() =>
+                                      void runBatchAction(
+                                        `job-${j.job_id}`,
+                                        [j.job_id],
+                                        label,
+                                        "delete"
+                                      )
+                                    }
+                                  >
+                                    {copy.jobDelete}
+                                  </button>
+                                </div>
+                              </div>
+                              {j.updated_sec_ago != null ? (
+                                <p className="try-history-meta">
+                                  <span>
+                                    {fillCopy(copy.historyUpdatedAgo, { n: j.updated_sec_ago })}
+                                  </span>
+                                </p>
+                              ) : null}
+                              {isCompletedStatus(j.status) && notesPath ? (
+                                <p className="try-batch-job-done">
+                                  <Link href={localePath(locale, notesPath)}>{copy.openNotes}</Link>
+                                </p>
+                              ) : null}
+                              {j.error && canRetry ? (
+                                <p className="try-error try-batch-job-error">{stripAnsi(j.error)}</p>
+                              ) : null}
+                              {hOpen ? (
+                                <div className="try-batch-job-detail">
+                                  {detailLoading.has(j.job_id) && !hDetail ? (
+                                    <p className="try-hint">{copy.detailLoading}</p>
+                                  ) : hDetail?.pack_tasks?.length ? (
+                                    <>
+                                      {hDetail.pack_zip_url ? (
+                                        <p className="try-pack-zip">
+                                          <a href={assetHref(hDetail.pack_zip_url)} download>
+                                            {copy.packZipDownload}
+                                          </a>
+                                        </p>
+                                      ) : null}
+                                      {renderPackTasks(hDetail.pack_tasks)}
+                                    </>
+                                  ) : (
+                                    <p className="try-hint">{copy.detailEmpty}</p>
+                                  )}
+                                </div>
+                              ) : null}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    ) : null}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
+      ) : null}
+
+      {workView === "new" && statusDrawerOpen && packTasksList ? (
+        <div
+          className="try-detail-drawer"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setStatusDrawerOpen(false);
+          }}
+        >
+          <aside
+            className="try-detail-panel"
+            role="dialog"
+            aria-modal="true"
+            aria-label={copy.detailTitle}
+          >
+            <div className="try-detail-head">
+              <h2>{copy.detailTitle}</h2>
+              <button
+                type="button"
+                className="try-detail-close"
+                aria-label={copy.collapse}
+                onClick={() => setStatusDrawerOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+            <div className="try-detail-body">{packTasksList}</div>
+          </aside>
         </div>
       ) : null}
     </div>

@@ -53,6 +53,30 @@ def test_run_locked_keeps_summary_payload() -> None:
     assert out["claimed"] == 2
 
 
+def test_reconcile_stale_runs_seals_only_prior_process_runs() -> None:
+    """A hard restart orphans `running` runs; boot-time reconcile seals only those."""
+    import time as _time
+
+    store = MemoryStore()
+    now = _time.time()
+    old_id = store.start_run("batch")
+    # Prior-process run started before this boot.
+    store._runs[-1]["started_at"] = now - 100
+    live_id = store.start_run("discover")
+    # Simulate a run belonging to the current process (started after boot ts).
+    store._runs[-1]["started_at"] = now + 20
+
+    sealed = store.reconcile_stale_runs(now)
+    assert sealed == 1
+
+    by_id = {r["id"]: r for r in store._runs}
+    assert by_id[old_id]["status"] == "failed"
+    assert by_id[old_id]["finished_at"] is not None
+    assert "orphaned" in (by_id[old_id]["error"] or "")
+    # A run from "this" process must never be sealed.
+    assert by_id[live_id]["status"] == "running"
+
+
 def test_video_level_queue_controls(tmp_path: Path) -> None:
     db = QueueDB(tmp_path / "q.db")
     try:

@@ -55,7 +55,9 @@ pm2 status
 pm2 logs vitual-api
 ```
 
-`ecosystem.config.cjs` starts **only** `vitual-api` (:8901, one fork). Reuse the existing mongod on :27018; do not start a second Mongo. Admin UI is still `cd admin && npm run dev` on :3001. Do not use `pm2 start -i max` on the API.
+**No CMD flash (Windows):** PM2 parents use `pythonw.exe`. Child `ffmpeg`/`python` must not pop consoles—`import win_no_console` at entry (`api/app.py` / `run_batch` / hub `_run_hub`) patches `subprocess`. New spawn sites: `CREATE_NO_WINDOW` or that import. Rule: `.cursor/rules/windows-no-console-flash.mdc`.
+
+`ecosystem.config.cjs` starts hub + `vitual-api` (:8901, one fork). Reuse the existing mongod on :27018; do not start a second Mongo. Admin UI is still `cd admin && npm run dev` on :3001. Do not use `pm2 start -i max` on the API.
 
 `GET /health` needs no token. All `/admin/*` need header `X-Admin-Token: local-admin`.
 

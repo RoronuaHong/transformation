@@ -5,11 +5,22 @@
 临时产物，已随端口迁移废弃。
 """
 import os
+import sys
+from pathlib import Path
 
 # 关掉 stage-2 重排(cross-encoder reranker)：本机对 15 条素材做 bge-reranker-v2-m3
 # 重排要 ~7.5s，语义检索直接卡死；关掉后走 bi-encoder 向量 + RRF 融合，延迟降到 ~50ms，
 # 对小规模素材库质量无损。需要重排时删掉这行即可(VITUAL_RERANK_MODEL 留空=按模型可用性自动)。
 os.environ["VITUAL_RERANK_MODEL"] = "__none__"
+
+# Hide Windows console flashes from ffmpeg/etc. child processes.
+_pipeline = Path(__file__).resolve().parents[1] / "subtitle_pipeline"
+if str(_pipeline) not in sys.path:
+    sys.path.insert(0, str(_pipeline))
+try:
+    import win_no_console  # noqa: F401
+except ImportError:
+    pass
 
 import server
 

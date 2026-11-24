@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { TryForm } from "@/components/TryForm";
+import { TryFormLazy } from "@/components/TryFormLazy";
 import { siteOrigin } from "@/lib/content";
 import { t } from "@/lib/copy";
 import { isLocale, locales, type Locale } from "@/lib/locales";
@@ -40,7 +40,7 @@ export default async function ToolHomePage({ params }: { params: Promise<{ local
         <h1 className="hero-line">{copy.headline}</h1>
         <p className="lede">{copy.lede}</p>
       </header>
-      <TryForm locale={locale} copy={copy} />
+      <TryFormLazy locale={locale} copy={copy} />
     </main>
   );
 }

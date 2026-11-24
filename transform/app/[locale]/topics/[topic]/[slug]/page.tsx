@@ -50,12 +50,16 @@ export const revalidate = 0;
 
 export function generateStaticParams() {
   const articles = loadArticles();
+  // Windows can't create prerender dirs for params containing : \ / ? * etc.
+  const invalidParam = /[<>:"\\|?*\/]/;
   return locales.flatMap((locale) =>
-    articles.map((a) => ({
-      locale,
-      topic: a.topic,
-      slug: a.slug,
-    }))
+    articles
+      .filter((a) => !invalidParam.test(a.topic) && !invalidParam.test(a.slug))
+      .map((a) => ({
+        locale,
+        topic: a.topic,
+        slug: a.slug,
+      }))
   );
 }
 

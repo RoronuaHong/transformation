@@ -477,3 +477,75 @@ def test_reap_skips_only_active_slot_holders(monkeypatch: pytest.MonkeyPatch) ->
     assert ts._is_active_job(999) is False
     with ts._run_lock:
         ts._active_jobs["content"].clear()
+
+
+def test_group_delete_handles_sqlite_row_and_cascades(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Delete must not call .get() on sqlite3.Row; dependents cascade away."""
+    from api import try_service as ts
+
+    db_path = tmp_path / "group_del.db"
+    monkeypatch.setattr(ts, "QueueDB", lambda: QueueDB(db_path))
+    monkeypatch.setattr(ts, "kick_try_scheduler", lambda: {"ok": True})
+
+    db = QueueDB(db_path)
+    try:
+        c = Candidate(
+            platform="bilibili",
+            video_id="BV_GROUP_DEL",
+            url="https://www.bilibili.com/video/BV_GROUP_DEL",
+            title="group-del",
+            topic_id="general",
+        )
+        pack = pack_id_for("bilibili", "BV_GROUP_DEL")
+        assert db.enqueue(c, workflow="dehardsub", pack_id=pack, priority="high") == "inserted"
+        assert (
+            db.enqueue(
+                c,
+                workflow="deblur",
+                pack_id=pack,
+                priority="high",
+                meta={"depends_on": ["dehardsub"]},
+            )
+            == "inserted"
+        )
+        rows = db.list_video_jobs("bilibili", "BV_GROUP_DEL")
+        by_wf = {str(r["workflow"]): int(r["id"]) for r in rows}
+        for jid in by_wf.values():
+            assert db.cancel_job(jid)
+
+        out = ts.group_action_try_jobs([by_wf["dehardsub"]], "delete")
+        assert out.get("ok") is True
+        assert set(out.get("job_ids") or []) == set(by_wf.values())
+        assert db.get_job(by_wf["dehardsub"]) is None
+        assert db.get_job(by_wf["deblur"]) is None
+    finally:
+        db.close()
+
+
+def test_group_delete_rejects_active(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from api import try_service as ts
+
+    db_path = tmp_path / "group_del_active.db"
+    monkeypatch.setattr(ts, "QueueDB", lambda: QueueDB(db_path))
+
+    db = QueueDB(db_path)
+    try:
+        c = Candidate(
+            platform="bilibili",
+            video_id="BV_GROUP_DEL_ACTIVE",
+            url="https://www.bilibili.com/video/BV_GROUP_DEL_ACTIVE",
+            title="active",
+            topic_id="general",
+        )
+        assert db.enqueue(c, workflow="notes", pack_id="p", priority="high") == "inserted"
+        jid = int(db.get_job_by_workflow("bilibili", "BV_GROUP_DEL_ACTIVE", "notes")["id"])
+        out = ts.group_action_try_jobs([jid], "delete")
+        assert out.get("ok") is False
+        assert "进行中" in str(out.get("error") or "")
+        assert db.get_job(jid) is not None
+    finally:
+        db.close()

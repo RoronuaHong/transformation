@@ -16,27 +16,44 @@ import numpy as np
 from verify_dehardsub import _edge_energy, _ffmpeg_bin, _stream, build_mask
 
 
+def _smear_score(gray: np.ndarray, ink: np.ndarray) -> float:
+    """Soft TELEA/ghost blotch score inside source ink (0..1).
+
+    Sharp leftover glyphs raise Laplacian energy; soft smear *destroys* edges so
+    the edge-ratio gate misses them. Median deviation still lights up on smear.
+    """
+    if ink is None or not np.any(ink):
+        return 0.0
+    med = cv2.medianBlur(gray, 15)
+    diff = np.abs(gray.astype(np.float32) - med.astype(np.float32))
+    hit = (diff > 12.0) & ink
+    if not np.any(hit):
+        return 0.0
+    u8 = hit.astype(np.uint8) * 255
+    u8 = cv2.morphologyEx(u8, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    return float((u8 > 0).mean())
+
+
 def scan_residual_frames(
     src: Path,
     clean: Path,
     box: dict[str, int],
     *,
     pad: int = 6,
-    residual_edge_frac: float = 0.25,
+    residual_edge_frac: float = 0.40,
+    smear_score_thr: float = 0.08,
+    max_hit_frac: float = 0.12,
+    top_k_when_hot: int | None = 64,
+    meta_out: dict[str, Any] | None = None,
 ) -> list[int]:
-    """Return 1-based frame indices where the subtitle was not removed.
+    """Return 1-based frame indices where captions are still readable.
 
-    Mask-weighted: text-edge energy is measured **inside the source's ink mask**
-    (dilated), not over the whole box+padding. On frames where the subtitle is
-    faint the source edge energy is low, so background texture inside the padding
-    can push the plain ratio over the gate on a frame that is actually clean —
-    flagging it would make the repair inpaint an already-good frame and blur its
-    background. Restricting to the ink answers "is the text still there?".
+    Mask-weighted: text-edge energy **and** leftover bright ink inside the
+    source ink mask. Smear-only frames are skipped — re-TELEA them vs v2 made
+    the plate mushier without clearing more glyphs.
 
-    ``residual_edge_frac`` defaults to 0.25, not 0.4: on a real clip the clean
-    frames sit at p95=0.145 / p99=0.325, while faint STTN ghosts land at
-    0.31–0.36. A 0.4 gate lets those visible ghosts through silently; 0.25 sits
-    just above the clean population's 99th percentile and catches them.
+    When hits exceed ``max_hit_frac``, take Top-K (default 64). Set
+    ``top_k_when_hot=None`` to skip-all when too hot.
     """
     x, y, w, h = int(box["x"]), int(box["y"]), int(box["w"]), int(box["h"])
     cy = max(0, y - pad)
@@ -45,7 +62,7 @@ def scan_residual_frames(
     ff = _ffmpeg_bin()
     ps = _stream(ff, str(src), x, cy, w, ch)
     pc = _stream(ff, str(clean), x, cy, w, ch)
-    idxs: list[int] = []
+    scored: list[tuple[float, int]] = []
     n = 0
     try:
         assert ps.stdout is not None and pc.stdout is not None
@@ -68,11 +85,52 @@ def scan_residual_frames(
                 gc = cv2.cvtColor(croi, cv2.COLOR_BGR2GRAY)
                 e_s = float(cv2.Laplacian(gs, cv2.CV_64F)[md].var())
                 e_c = float(cv2.Laplacian(gc, cv2.CV_64F)[md].var())
-                if e_c > residual_edge_frac * max(e_s, 1e-6):
-                    idxs.append(n)
+                edge_hit = e_c > residual_edge_frac * max(e_s, 1e-6)
+                # Also require leftover bright ink (readable captions). Smear-only
+                # hits re-TELEA already-cleared frames and mush the plate vs v2.
+                bright_left = float(((gs > 170) & (gc > 155) & md).mean())
+                caption_left = bright_left >= 0.008
+                if edge_hit and caption_left:
+                    rank = e_c / max(e_s, 1e-6) + 10.0 * bright_left
+                    scored.append((rank, n))
     finally:
         ps.kill()
         pc.kill()
+    idxs = [i for _, i in scored]
+    mode = "ok"
+    hits_raw = len(idxs)
+    if n > 0 and hits_raw / float(n) > float(max_hit_frac):
+        if top_k_when_hot is not None and int(top_k_when_hot) > 0 and scored:
+            scored.sort(key=lambda t: t[0], reverse=True)
+            k = min(int(top_k_when_hot), len(scored))
+            idxs = sorted(i for _, i in scored[:k])
+            mode = "top_k_hot"
+            print(
+                f"[residual_repair] scan too hot "
+                f"hits={hits_raw}/{n} (>{max_hit_frac:.0%}) — "
+                f"Top-K repair n={k}",
+                flush=True,
+            )
+        else:
+            mode = "skipped_too_hot"
+            idxs = []
+            print(
+                f"[residual_repair] scan too hot "
+                f"hits={hits_raw}/{n} (>{max_hit_frac:.0%}) — skip repair",
+                flush=True,
+            )
+    if meta_out is not None:
+        meta_out.clear()
+        meta_out.update(
+            {
+                "mode": mode,
+                "scanned": n,
+                "hits": hits_raw,
+                "frames_selected": len(idxs),
+                "max_hit_frac": float(max_hit_frac),
+                "top_k_when_hot": top_k_when_hot,
+            }
+        )
     return idxs
 
 
@@ -115,6 +173,9 @@ def repair_residual_frames(
     pixels we need to fix; the source mask reliably says where the text was.
     Falls back to a low-threshold mask on the output if the source has no ink
     there (e.g. the box drifted onto background).
+
+    Never full-box TELEA the dialogue band — that is what produced the mosaic
+    smear on BV1P6. Glyph-dilated ink only.
     """
     from _inpaint_shared import _open_ffmpeg_writer
     from visual_cleanup import _enforce_frame_count
@@ -164,10 +225,19 @@ def repair_residual_frames(
                     # faint-ghost fallback on the output itself
                     m = _text_mask(roi, 22.0)
                 if m is not None and float(m.mean()) > 0.002:
-                    dm = cv2.dilate(m.astype(np.uint8), np.ones((9, 9), np.uint8), 1)
+                    from dehardsub_ocr_telea import (
+                        _reject_dark_inpaint,
+                        _ring_median_fill,
+                    )
+
+                    dm = cv2.dilate(m.astype(np.uint8), np.ones((7, 7), np.uint8), 1)
                     full = np.zeros(fr.shape[:2], dtype=np.uint8)
                     full[ry : ry + rh, rx : rx + rw] = (dm > 0).astype(np.uint8) * 255
-                    fr = cv2.inpaint(fr, full, 7, cv2.INPAINT_TELEA)
+                    # Prefer NS; dark reject → ring median (never leave glyphs).
+                    filled = cv2.inpaint(fr, full, 5, cv2.INPAINT_NS)
+                    if _reject_dark_inpaint(fr, filled, full):
+                        filled = _ring_median_fill(fr, full)
+                    fr = filled
             proc.stdin.write(np.ascontiguousarray(fr).tobytes())
     except Exception:
         proc.kill()
@@ -193,13 +263,30 @@ def scan_and_repair(
     box: dict[str, int],
     *,
     pad: int = 6,
-    residual_edge_frac: float = 0.25,
-) -> tuple[Path, list[int]]:
-    """Scan then repair; returns (final_path, repaired_frame_indices)."""
-    idxs = scan_residual_frames(src, clean, box, pad=pad, residual_edge_frac=residual_edge_frac)
+    residual_edge_frac: float = 0.40,
+    smear_score_thr: float = 0.08,
+    max_hit_frac: float = 0.12,
+    top_k_when_hot: int | None = 64,
+) -> tuple[Path, list[int], dict[str, Any]]:
+    """Scan then repair; returns (final_path, repaired_frame_indices, scan_meta)."""
+    meta: dict[str, Any] = {}
+    idxs = scan_residual_frames(
+        src,
+        clean,
+        box,
+        pad=pad,
+        residual_edge_frac=residual_edge_frac,
+        smear_score_thr=smear_score_thr,
+        max_hit_frac=max_hit_frac,
+        top_k_when_hot=top_k_when_hot,
+        meta_out=meta,
+    )
     if not idxs:
-        return clean, []
-    out = repair_residual_frames(src, clean, box, idxs)
-    # One confirmation pass: if the repair left anything, the loop already ran
-    # once; a second scan keeps the reported numbers honest.
-    return out, idxs
+        meta.setdefault("mode", "ok")
+        return clean, [], meta
+    out = repair_residual_frames(src, clean, box, idxs, pad=min(pad, 4))
+    meta["mode"] = (
+        "repaired_top_k" if meta.get("mode") == "top_k_hot" else "repaired"
+    )
+    meta["frames_repaired"] = len(idxs)
+    return out, idxs, meta

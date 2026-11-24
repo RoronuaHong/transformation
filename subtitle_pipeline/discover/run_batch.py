@@ -16,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import win_no_console  # noqa: F401  — hide Windows child consoles (ffmpeg)
+
 from collections.abc import Callable
 
 from discover.content_db import ContentDB, embed_url_for, public_slug, slugify
@@ -370,6 +372,55 @@ def _hardsub_gate(
             )
     else:
         print(f"[hardsub-gate] PASS coverage={rep['coverage']:.0%} -> {report_path}", flush=True)
+    return rep
+
+
+def _dialogue_clear_gate(work_dir: Path, *, dehardsub_done: bool = False) -> dict:
+    """Verify dehardsub actually removed burned dialogue, not just aligned SRT.
+
+    ``VITUAL_DIALOGUE_CLEAR_GATE`` = off | warn | strict (default ``strict``).
+    Unlike hardsub_compare (SRT alignment), this audits clean.mp4 pixels in the
+    dialogue ROIs: caption_remains / left_as_source / dark_smear count as
+    failures. A fully green job with captions still visible must not ship.
+
+    Only runs when dehardsub was in scope and produced clean.mp4; otherwise
+    skipped so audio/soft-subtitle jobs are unaffected.
+    """
+    import os
+
+    mode = (os.environ.get("VITUAL_DIALOGUE_CLEAR_GATE") or "strict").strip().lower()
+    if mode == "off":
+        return {"ok": True, "skipped": True, "reason": "gate_disabled"}
+    try:
+        from dialogue_clear_gate import dialogue_clear_gate as _gate
+    except Exception as e:
+        print(f"[clear-gate] import skipped ({type(e).__name__}: {e})")
+        return {"ok": True, "skipped": True, "reason": f"import_error:{e}"}
+
+    media = job_media_dir(work_dir)
+    clean = media / "dehardsub" / "clean.mp4"
+    if not dehardsub_done or not clean.is_file():
+        return {"ok": True, "skipped": True, "reason": "no_dehardsub_output"}
+
+    try:
+        max_fail = float(os.environ.get("VITUAL_DIALOGUE_MAX_FAIL", "0.15"))
+    except (TypeError, ValueError):
+        max_fail = 0.15
+    # step=1: audit EVERY frame. A 10-frame ghost glitch hides between step=2
+    # samples; per-frame audit is the shipping contract (see DEHARDSUB.md).
+    rep = _gate(work_dir, max_fail_ratio=max_fail, step=1)
+    if rep.get("skipped"):
+        return rep
+    print(f"[clear-gate] {rep['verdict']} fail_ratio={rep['fail_ratio']:.1%} "
+          f"(max={max_fail:.0%}) clears={rep['clear_ratio']:.1%} "
+          f"audited={rep.get('audited')}/{rep.get('frames')} "
+          f"problem_frames={len(rep.get('problem_frames') or [])} "
+          f"sheet={rep.get('problem_sheet')} -> {rep['report']}", flush=True)
+    if not rep["ok"] and mode == "strict":
+        raise RuntimeError(
+            f"dialogue clear gate failed: {rep['fail_ratio']:.1%} caption frames "
+            f"not cleared (max {max_fail:.0%}); see {rep['report']}"
+        )
     return rep
 
 
@@ -949,21 +1000,8 @@ def _process_media_only(
         str((summary or {}).get("source_lang") or "zh")
     )
     print(f"[batch] media-only stages={sorted(enabled)}")
-    _check_cancel("media_before_dehardsub")
-    if "dehardsub" in enabled:
-        from media_ops import strip_hardsubs
-
-        opts = _job_media_opts(job)
-        strip_hardsubs(
-            out_dir,
-            force=bool(opts.get("dehardsub_force")),
-            ratio=float(opts.get("dehardsub_ratio") or 0.14),
-            mode=str(opts.get("dehardsub_mode") or "auto"),
-            vlm_model=str(opts.get("dehardsub_vlm_model") or ""),
-            passes=int(opts.get("dehardsub_passes") or 2),
-            demosaic=bool(opts.get("dehardsub_demosaic", True)),
-            engine=str(opts.get("dehardsub_engine") or "ocr_telea"),
-        )
+    # dehardsub is owned solely by _run_job_postproc (confirm gate + input_from).
+    # An early strip_hardsubs here double-cleaned and skipped require_confirm.
     _check_cancel("media_before_frames")
     if "frames" in enabled or "clips" in enabled:
         summary = _attach_job_media(
@@ -980,6 +1018,10 @@ def _process_media_only(
     try:
         media_st = _run_job_postproc(out_dir, job, enabled, frame_clips=frame_clips)
         _finish_media_status(queue, job_id, out_dir, media_st)
+        if media_st.get("awaiting_confirm"):
+            queue.set_status(job_id, "awaiting_confirm")
+            print(f"[batch] job#{job_id} awaiting dehardsub confirmation")
+            return
     except JobCancelled:
         raise
     except Exception as e:
@@ -994,6 +1036,12 @@ def _process_media_only(
         _finish_media_status(queue, job_id, out_dir, media_st)
 
     _check_cancel("media_before_register")
+    # dehardsub 清除率门禁（用户强制流程）：clean.mp4 字幕没抹掉就不让入库/交付。
+    try:
+        _dialogue_clear_gate(out_dir, dehardsub_done=True)
+    except Exception as e:
+        print(f"[clear-gate] raised ({type(e).__name__}: {e})", flush=True)
+        raise
     article_id = None
     if summary:
         article_id = register_work_dir(
@@ -1498,6 +1546,10 @@ def process_job(
     try:
         media_st = _run_job_postproc(out_dir, job, enabled, frame_clips=frame_clips)
         _finish_media_status(queue, job_id, out_dir, media_st)
+        if media_st.get("awaiting_confirm"):
+            queue.set_status(job_id, "awaiting_confirm")
+            print(f"[batch] job#{job_id} awaiting dehardsub confirmation")
+            return
     except Exception as e:
         media_st = {
             "postproc": "failed",
@@ -1526,6 +1578,12 @@ def process_job(
         except Exception as e:
             print(f"[hardsub-gate] raised ({type(e).__name__}: {e})", flush=True)
             raise
+    # dehardsub 清除率门禁：SRT 对齐 PASS 不代表字幕真的被抹掉，必须审计 clean.mp4。
+    try:
+        _dialogue_clear_gate(out_dir, dehardsub_done=True)
+    except Exception as e:
+        print(f"[clear-gate] raised ({type(e).__name__}: {e})", flush=True)
+        raise
 
     wav_path = existing_wav(out_dir) or (
         Path(wav) if wav and Path(wav).is_file() else None

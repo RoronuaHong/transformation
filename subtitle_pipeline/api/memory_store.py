@@ -132,5 +132,16 @@ class MemoryStore(MongoStore):
                 r["finished_at"] = utc_now()
                 r["error"] = error
 
+    def reconcile_stale_runs(self, before_ts: float) -> int:
+        """Seal runs left ``running`` by a previous process (see MongoStore)."""
+        n = 0
+        for r in self._runs:
+            if r["status"] == "running" and r["started_at"] < float(before_ts):
+                r["status"] = "failed"
+                r["finished_at"] = utc_now()
+                r["error"] = "orphaned: process restarted before run finished"
+                n += 1
+        return n
+
     def list_runs(self, *, limit: int = 50) -> list[dict]:
         return list(reversed(self._runs))[:limit]

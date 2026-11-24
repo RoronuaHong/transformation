@@ -107,7 +107,8 @@ class ContentDB:
     def __init__(self, path: Path | None = None) -> None:
         self.path = Path(path) if path else DEFAULT_DB
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.path)
+        self._conn = sqlite3.connect(self.path, timeout=5.0)
+        self._conn.execute("PRAGMA busy_timeout = 5000")
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
         self._migrate()

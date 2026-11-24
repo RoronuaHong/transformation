@@ -1,0 +1,11 @@
+{
+  "name": "dehardsub_gold_workflow",
+  "accepted": "2026-11-24",
+  "reference": "fix_frame1_final2.py / src_0001_final2.jpg",
+  "clip": "gold50.mp4",
+  "meta": {
+    "video": "BV1P6N76qEuJ",
+    "frames": 50,
+    "accepted": "非常完美"
+  }
+}

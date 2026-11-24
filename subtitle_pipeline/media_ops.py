@@ -31,10 +31,20 @@ HARDSUB_CROP_RATIO = 0.14
 # 稠密字幕时间轴扫描：全片单 pass 解码底部字幕带，按此帧率取样评分。
 # 只判“有没有字幕”用 detect_hardsubs（5 点采样）；要“字幕在哪几秒”必须用稠密扫描。
 CAPTION_SCAN_FPS = float(os.environ.get("VITUAL_CAPTION_SCAN_FPS", "2") or 2)
-CAPTION_SCAN_HIT = 0.28
+# 0.28 missed BV1P6 bilingual outline caps (~score 0.20–0.27 at t≈8).
+CAPTION_SCAN_HIT = 0.20
 # 字幕覆盖率超过该比例 → 认为“几乎全程有字幕”，分段重编码毫无意义，直接全程处理。
 DENSE_COVERAGE_FULL = float(os.environ.get("VITUAL_CAPTION_FULL_COVERAGE", "0.75") or 0.75)
 HARDSUB_VLM_MODEL = os.environ.get("VITUAL_DEHARDSUB_VLM", "gemma4:e2b")
+# Multi-model watermark QA (any dirty vote wins). Override with comma list.
+HARDSUB_VLM_QA_MODELS = [
+    m.strip()
+    for m in (
+        os.environ.get("VITUAL_DEHARDSUB_VLM_QA_MODELS")
+        or "gemma4:e2b,qwen2.5vl:3b"
+    ).split(",")
+    if m.strip()
+]
 DEHARDSUB_MODES = ("auto", "vlm", "band", "delogo", "fill", "crop")
 DEHARDSUB_ENGINES = ("lama", "ocr_telea")
 POSTPROC_MODES = ("fast", "balanced", "quality")
@@ -160,8 +170,8 @@ def _mode_default(src: dict[str, Any], mode: str, key: str, default: Any) -> Any
             "dehardsub_demosaic": True,
             "dehardsub_engine": "ocr_telea",
             "deblur_demosaic": True,
-            # Skip eager LaMa residual polish (CPU/GPU full-pass hours); edgefill covers watermark.
-            "dehardsub_polish_residual_floor": 1.0,
+            # up_watermark may OCR-empty → boxfill; residual LaMa polish still helps logos.
+            "dehardsub_polish_residual_floor": 0.02,
             "dehardsub_dialogue_short_route": "auto",
         },
     }
@@ -208,6 +218,11 @@ def normalize_media_opts(raw: dict | None = None) -> dict[str, Any]:
     force_dehardsub = src.get("dehardsub_force", False)
     if isinstance(force_dehardsub, str):
         force_dehardsub = force_dehardsub.strip().lower() not in ("0", "false", "no", "off")
+    require_confirm = src.get("dehardsub_require_confirm", True)
+    if isinstance(require_confirm, str):
+        require_confirm = require_confirm.strip().lower() not in (
+            "0", "false", "no", "off"
+        )
     try:
         dehardsub_ratio = float(src.get("dehardsub_ratio", HARDSUB_CROP_RATIO))
     except (TypeError, ValueError):
@@ -298,6 +313,7 @@ def normalize_media_opts(raw: dict | None = None) -> dict[str, Any]:
         "remix_lang": remix_lang,
         "postproc_mode": postproc_mode,
         "dehardsub_force": bool(force_dehardsub),
+        "dehardsub_require_confirm": bool(require_confirm),
         "dehardsub_ratio": dehardsub_ratio,
         "dehardsub_mode": dehardsub_mode,
         "dehardsub_vlm_model": dehardsub_vlm_model,
@@ -720,6 +736,121 @@ def _ollama_vision_bbox(
     return {"x": x, "y": y, "w": w, "h": h}
 
 
+def vlm_qa_watermark_crop(
+    jpeg: Path,
+    *,
+    model: str = HARDSUB_VLM_MODEL,
+    timeout: int = 90,
+) -> dict[str, Any]:
+    """Ask local vision model if a corner-watermark crop looks clean.
+
+    Used after up_watermark boxfill so Morphic dark-rect / topL blob / glyph
+    ghosts are caught by a real look (``用大模型去看``), not only pixel metrics.
+    """
+    import base64
+    import json
+    import re
+    import urllib.error
+    import urllib.request
+
+    b64 = base64.b64encode(Path(jpeg).read_bytes()).decode("ascii")
+    prompt = (
+        "This is a TOP-CORNER crop from a video after watermark removal. "
+        "Decide if cleanup FAILED. Fail signs: readable logo/text leftover "
+        "(including 'Made with Morphic', bilibili, Poootaaaato, @handles), "
+        "ghost letter shapes, dark rectangular patch, blurry fog blob, "
+        "or smeared inpainting that does not match the background. "
+        'Reply JSON only: {"clean":true,"issues":[]} or '
+        '{"clean":false,"issues":["dark_rect","ghost_text","fog_blob","logo_left"]}.'
+    )
+    body = {
+        "model": model,
+        "stream": False,
+        "format": "json",
+        "options": {"temperature": 0.0},
+        "messages": [{"role": "user", "content": prompt, "images": [b64]}],
+    }
+    req = urllib.request.Request(
+        f"{_ollama_host()}/api/chat",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        return {"clean": True, "issues": [], "error": str(exc)[:160], "model": model}
+    msg = data.get("message") or {}
+    text = (msg.get("content") or "").strip() or (msg.get("thinking") or "").strip()
+    if not text:
+        return {"clean": True, "issues": [], "error": "empty", "model": model}
+    try:
+        from pipeline import extract_json_object
+
+        parsed = extract_json_object(text)
+    except Exception:
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            m = re.search(r"\{[\s\S]*\}", text)
+            if not m:
+                return {"clean": True, "issues": [], "error": "parse", "model": model}
+            try:
+                parsed = json.loads(m.group(0))
+            except json.JSONDecodeError:
+                return {"clean": True, "issues": [], "error": "parse", "model": model}
+    if not isinstance(parsed, dict):
+        return {"clean": True, "issues": [], "error": "not_dict", "model": model}
+    clean = parsed.get("clean")
+    if isinstance(clean, str):
+        clean = clean.strip().lower() in ("1", "true", "yes", "clean")
+    issues = parsed.get("issues") or []
+    if not isinstance(issues, list):
+        issues = [str(issues)]
+    return {
+        "clean": bool(clean) if clean is not None else True,
+        "issues": [str(x)[:48] for x in issues[:6]],
+        "model": model,
+    }
+
+
+def vlm_qa_watermark_crop_multi(
+    jpeg: Path,
+    *,
+    models: list[str] | None = None,
+    timeout: int = 45,
+) -> dict[str, Any]:
+    """Multi-model watermark QA — dirty if **any** model votes failed.
+
+    Single-model checks miss Morphic leftovers (BV1P6). Ensemble gemma4 +
+    qwen2.5vl by default; override via ``VITUAL_DEHARDSUB_VLM_QA_MODELS``.
+    """
+    mods = [m for m in (models or HARDSUB_VLM_QA_MODELS) if m]
+    if not mods:
+        mods = [HARDSUB_VLM_MODEL]
+    votes: list[dict[str, Any]] = []
+    issues: list[str] = []
+    for mod in mods:
+        one = vlm_qa_watermark_crop(jpeg, model=mod, timeout=timeout)
+        votes.append(one)
+        if one.get("clean") is False:
+            for iss in one.get("issues") or []:
+                s = str(iss)
+                if s and s not in issues:
+                    issues.append(s)
+    dirty_n = sum(1 for v in votes if v.get("clean") is False)
+    # Any dirty vote fails; all-error/empty → treat as clean (metric still runs).
+    clean = dirty_n == 0
+    return {
+        "clean": clean,
+        "issues": issues[:8],
+        "votes": votes,
+        "models": mods,
+        "dirty_votes": dirty_n,
+    }
+
+
 def locate_hardsub_box_vlm(
     video: Path,
     width: int,
@@ -967,15 +1098,20 @@ def locate_hardsub_box_up_watermark(
     video: Path,
     width: int,
     height: int,
+    *,
+    side: str = "right",
 ) -> dict[str, Any] | None:
-    """Top-right UP-master watermark (e.g. Bilibili "XXXbilibili" credit).
+    """Top-corner UP-master watermark (e.g. Bilibili / Morphic credit).
 
     The generic top-title detector only catches yellow text in the top-LEFT and
     the bottom-right detector only covers the lower corner, so the persistent
     top-right copyright credit is currently missed entirely (visible in clean
-    output). Scan the top-right ROI for bright outlined glyphs (white/colored)
-    and return a static region. Route it through STTN glyph holes so only the
-    text is repainted and the (transparent) corner stays natural.
+    output). Scan the top-corner ROI for bright outlined glyphs (white/colored)
+    and return a static region.
+
+    Sampling includes early fracs (watermarks are usually present from t≈0).
+    ROI depth is ~10%H so soft logo underbellies (Morphic ~y42–52 on 480p) are
+    not clipped; top-band clustering still rejects avatar / UI rows below.
     """
     import cv2
     import numpy as np
@@ -984,45 +1120,71 @@ def locate_hardsub_box_up_watermark(
     dur = probe_duration_sec(video) or 0.0
     if dur <= 0.4:
         return None
+    left = str(side).strip().lower() == "left"
+    # Early + mid + late: BV1P6 corner marks are solid at frac≈0.05; old
+    # (0.3,0.55,0.8) never saw the leftmost Poootaaaato glyph extent.
+    sample_fracs = (0.05, 0.12, 0.22, 0.38, 0.55, 0.72, 0.88)
     hits: list[tuple[int, int, int, int]] = []
-    for frac in (0.3, 0.55, 0.8):
+    for frac in sample_fracs:
         raw = _grab_bgr_frame(video, dur * frac)
         if raw is None:
             continue
         if raw.shape[1] != width or raw.shape[0] != height:
             raw = cv2.resize(raw, (width, height), interpolation=cv2.INTER_AREA)
-        y0 = max(0, int(height * 0.005))
-        y1 = int(height * 0.05)
-        x0 = int(width * 0.45)
-        roi = raw[y0:y1, x0:width]
+        y0 = max(0, int(height * 0.002))
+        # 0.05H≈24px on 480p clipped Morphic underbelly; 0.10H≈48 covers it
+        # while top-band clustering still stops before avatars (~y>55).
+        y1 = max(y0 + 28, min(height, int(round(height * 0.10))))
+        # Keep each side in its corner half — a 0.58W left ROI swallowed mid-frame
+        # highlights and ballooned Poootaaaato to w≈445 on BV1P6.
+        x0 = 0 if left else int(width * 0.50)
+        x1 = int(width * 0.48) if left else width
+        roi = raw[y0:y1, x0:x1]
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        # 半透明白字：亮填充 + 暗描边，或亮描边（与右下角水印同口径）。
-        bright = gray >= 185
-        dark = gray <= 105
+        # Soft translucent credits often sit 165–185; keep edge/outline gate so
+        # bright walls don't flood the mask.
+        bright = gray >= 165
+        dark = gray <= 110
         near_dark = cv2.dilate(dark.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=1) > 0
         edge = cv2.morphologyEx(gray, cv2.MORPH_GRADIENT, np.ones((3, 3), np.uint8))
-        mask = ((bright & near_dark) | (bright & (edge >= 20))).astype(np.uint8) * 255
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((2, 4), np.uint8), iterations=1)
+        mask = ((bright & near_dark) | (bright & (edge >= 16))).astype(np.uint8) * 255
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((2, 5), np.uint8), iterations=1)
         mask = cv2.dilate(mask, np.ones((2, 2), np.uint8), iterations=1)
         frac_m = float((mask > 0).mean())
-        if frac_m < 0.001 or frac_m > 0.18:
+        if frac_m < 0.0008 or frac_m > 0.28:
             continue
         n_cc, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
         keep = np.zeros_like(mask)
+        rw = int(roi.shape[1])
         for i in range(1, n_cc):
             area = int(stats[i, cv2.CC_STAT_AREA])
-            if area < 16:
+            if area < 12:
                 continue
             bx = int(stats[i, cv2.CC_STAT_LEFT])
             bw = int(stats[i, cv2.CC_STAT_WIDTH])
-            # 只保留最右侧块（UP 水印在右上角）。
-            if bx + bw < int(roi.shape[1] * 0.30):
+            by = int(stats[i, cv2.CC_STAT_TOP])
+            bh = int(stats[i, cv2.CC_STAT_HEIGHT])
+            # Reject tall mid-ROI blobs (ceiling lamps / UI) — logos are short.
+            if bh > max(22, int((y1 - y0) * 0.72)):
+                continue
+            # Corner preference: left keeps near-left mass; right keeps near-right.
+            if left:
+                if bx > int(rw * 0.78):
+                    continue
+            elif bx + bw < int(rw * 0.18):
+                continue
+            # Prefer components that touch the outer edge of the corner.
+            if left and (bx > int(rw * 0.55)) and area < 80:
+                continue
+            if (not left) and (bx + bw < int(rw * 0.45)) and area < 80:
                 continue
             keep[labels == i] = 255
         # 只取【最顶部】的字行簇：UP 水印文字在头像/在线人数/关闭按钮的上方，
         # 直接取并集会把那些大块亮色内容一并纳入框，STTN 会把头像涂抹毁掉
         # （实测 clip15 clean 顶部头像/1853 计数被涂成白色色块）。
         ys_all, _ = np.where(keep > 0)
+        if len(ys_all) < 12:
+            continue
         rh = keep.shape[0]
         row_proj = np.zeros(rh, dtype=int)
         np.add.at(row_proj, ys_all, 1)
@@ -1048,35 +1210,88 @@ def locate_hardsub_box_up_watermark(
             else:
                 merged_c.append(list(c))
         top_band = merged_c[0]
+        # Cap band height so a merged logo+halo stays a thin strip.
+        max_band = max(18, min(rh, int(round(height * 0.095))))
+        if top_band[1] - top_band[0] > max_band:
+            top_band = [top_band[0], top_band[0] + max_band]
         keep = keep[top_band[0] : top_band[1], :]
         ys, xs = np.where(keep > 0)
-        if len(xs) < 16:
+        if len(xs) < 12:
             continue
-        pad = 8
+        pad_x = 10
+        pad_y = 6
         # 注意 keep 已被切成顶部字行带，ys 相对 top_band[0]，需加回偏移。
-        hits.append(
-            (
-                x0 + max(0, int(xs.min()) - pad),
-                y0 + top_band[0] + max(0, int(ys.min()) - pad),
-                x0 + min(roi.shape[1], int(xs.max()) + pad + 1),
-                y0 + top_band[0] + min(keep.shape[0], int(ys.max()) + pad + 1),
-            )
-        )
+        hx0 = x0 + max(0, int(xs.min()) - pad_x)
+        hy0 = y0 + top_band[0] + max(0, int(ys.min()) - pad_y)
+        hx1 = x0 + min(roi.shape[1], int(xs.max()) + pad_x + 1)
+        hy1 = y0 + top_band[0] + min(keep.shape[0], int(ys.max()) + pad_y + 1)
+        # Anchor to the outer corner so soft left logo stems (x≈8–20) are
+        # not lost when mid-string glyphs dominate the CC mass.
+        if left:
+            hx0 = min(hx0, max(0, x0 + int(xs.min()) - pad_x))
+            if int(xs.min()) <= max(14, int(rw * 0.08)):
+                hx0 = 0
+        else:
+            if int(xs.max()) >= rw - max(14, int(rw * 0.08)):
+                hx1 = width
+        hits.append((hx0, hy0, hx1, hy1))
     if not hits:
         return None
-    x0a = min(h[0] for h in hits)
-    y0a = min(h[1] for h in hits)
-    x1a = max(h[2] for h in hits)
-    y1a = max(h[3] for h in hits)
+    # Robust union: drop a single outlier hit that is >2× taller/wider than the
+    # median (scene-text flash in one sample).
+    def _hw(hh: tuple[int, int, int, int]) -> tuple[int, int]:
+        return max(1, hh[2] - hh[0]), max(1, hh[3] - hh[1])
+
+    ws = sorted(_hw(h)[0] for h in hits)
+    hs = sorted(_hw(h)[1] for h in hits)
+    med_w, med_h = ws[len(ws) // 2], hs[len(hs) // 2]
+    stable = [
+        h
+        for h in hits
+        if _hw(h)[0] <= med_w * 2.2 + 20 and _hw(h)[1] <= med_h * 2.0 + 10
+    ] or hits
+    # Prefer the *tight* corner envelope: take the median outer edge and the
+    # 75th-percentile inward edge so one wide sample can't dominate.
+    if left:
+        x0s = sorted(h[0] for h in stable)
+        x1s = sorted(h[2] for h in stable)
+        y0s = sorted(h[1] for h in stable)
+        y1s = sorted(h[3] for h in stable)
+        x0a = x0s[0]  # leftmost outer
+        x1a = x1s[max(0, (len(x1s) * 3) // 4)]  # p75 inward
+        y0a = y0s[0]
+        y1a = y1s[max(0, (len(y1s) * 3) // 4)]
+        if x0a <= 6:
+            x0a = 0
+    else:
+        x0s = sorted(h[0] for h in stable)
+        x1s = sorted(h[2] for h in stable)
+        y0s = sorted(h[1] for h in stable)
+        y1s = sorted(h[3] for h in stable)
+        x0a = x0s[min(len(x0s) - 1, len(x0s) // 4)]  # p25 inward
+        x1a = x1s[-1]
+        y0a = y0s[0]
+        y1a = y1s[max(0, (len(y1s) * 3) // 4)]
+        if x1a >= width - 6:
+            x1a = width
+    # Cap corner strip width — logos rarely span >42% of the frame.
+    max_w = max(96, int(round(width * 0.42)))
+    if x1a - x0a > max_w:
+        if left:
+            x1a = x0a + max_w
+        else:
+            x0a = x1a - max_w
     box = clamp_hardsub_box(
         {"x": x0a, "y": y0a, "w": max(8, x1a - x0a), "h": max(8, y1a - y0a)},
         width,
         height,
         zone="top",
-        max_h_ratio=0.10,
-        max_h_px=90,
+        max_h_ratio=0.14,
+        max_h_px=96,
         min_y_ratio=0.0,
     )
+    # D4: never ship h≈28 top strips — logo underbelly spills outside (BV1P6).
+    box = ensure_top_up_watermark_min_h(box, width, height)
     return {
         "box": box,
         "norm": {
@@ -1085,11 +1300,299 @@ def locate_hardsub_box_up_watermark(
             "w": box["w"] / width,
             "h": box["h"] / height,
         },
-        "hits": len(hits),
+        "hits": len(stable),
         "source": "up_watermark",
         "zone": "top",
         "role": "up_watermark",
+        "side": "left" if left else "right",
     }
+
+
+def top_up_watermark_min_h(height: int) -> int:
+    """Minimum top-strip height: ~v2 thin bar (≥32 on ≥400p), else ~8%H.
+
+    min_h=48 grew process boxes to h≈58 and copyfill pasted a thick forehead
+    band (BV1P6 visual vs clean_demo_v2). Prefer thin strip like v2 h≈28–40.
+    """
+    ratio = max(8, int(round(int(height) * 0.08)))
+    if int(height) >= 400:
+        return max(32, ratio)
+    return ratio
+
+
+def ensure_top_up_watermark_min_h(
+    box: dict[str, int],
+    width: int,
+    height: int,
+    *,
+    min_h_ratio: float = 0.10,
+    min_h_px: int | None = None,
+) -> dict[str, int]:
+    """Grow short top-edge up_watermark boxes so glyphs+outline fit."""
+    b = {k: int(box[k]) for k in ("x", "y", "w", "h")}
+    y0 = int(b["y"])
+    if y0 > max(4, int(round(height * 0.12))):
+        return b
+    need = (
+        int(min_h_px)
+        if min_h_px is not None
+        else top_up_watermark_min_h(height)
+    )
+    need = max(need, int(round(height * float(min_h_ratio))))
+    need = min(need, max(8, height - y0))
+    if int(b["h"]) < need:
+        b["h"] = need
+    # max_h must stay above min_h (0.14×H on short test clips).
+    max_h_ratio = max(0.14, (need + 2) / float(max(1, height)))
+    return clamp_hardsub_box(
+        b,
+        width,
+        height,
+        zone="top",
+        max_h_ratio=max_h_ratio,
+        max_h_px=max(96, need + 8),
+        min_y_ratio=0.0,
+    )
+
+
+def build_dehardsub_gates(
+    video: Path,
+    boxes: list[dict],
+    *,
+    width: int | None = None,
+    height: int | None = None,
+) -> dict[str, Any]:
+    """Evaluate confirm/process gates (D4). ``ok`` False → block unless force."""
+    video = Path(video)
+    wh = probe_video_wh(video) if (width is None or height is None) else (width, height)
+    if wh is None:
+        return {
+            "ok": False,
+            "top_min_h_ok": False,
+            "outside_box_bright_blobs": 0,
+            "spill_warnings": [],
+            "reasons": ["cannot_probe_video"],
+        }
+    width, height = int(wh[0]), int(wh[1])
+    # Normalize top boxes before measuring spill.
+    norm_boxes: list[dict] = []
+    for b in boxes:
+        bb = {
+            "x": int(b["x"]),
+            "y": int(b["y"]),
+            "w": int(b["w"]),
+            "h": int(b["h"]),
+            "role": b.get("role", "dialogue"),
+        }
+        if bb["role"] == "up_watermark":
+            grown = ensure_top_up_watermark_min_h(bb, width, height)
+            grown["role"] = "up_watermark"
+            norm_boxes.append(grown)
+        else:
+            norm_boxes.append(bb)
+    spill_warnings = scan_up_watermark_spill(video, norm_boxes)
+    top_min_h_ok = True
+    reasons: list[str] = []
+    need = top_up_watermark_min_h(height)
+    for b in norm_boxes:
+        if b.get("role") != "up_watermark":
+            continue
+        if int(b.get("y") or 0) > max(4, int(height * 0.12)):
+            continue
+        if int(b.get("h") or 0) < need:
+            top_min_h_ok = False
+            reasons.append(f"top_min_h {b.get('h')}<{need}")
+            break
+    if spill_warnings:
+        reasons.append(f"spill_warnings={len(spill_warnings)}")
+    ok = top_min_h_ok and not spill_warnings
+    return {
+        "ok": ok,
+        "top_min_h_ok": top_min_h_ok,
+        "outside_box_bright_blobs": len(spill_warnings),
+        "spill_warnings": spill_warnings,
+        "reasons": reasons,
+        "boxes_normalized": norm_boxes,
+    }
+
+
+def scan_up_watermark_spill(
+    video: Path,
+    boxes: list[dict],
+    *,
+    spill_px: int = 16,
+    bright_thr: int = 180,
+    samples: int = 5,
+) -> list[dict[str, Any]]:
+    """Warn when bright ink below a top up_watermark box rivals ink inside (D4)."""
+    import cv2
+    import numpy as np
+
+    video = Path(video)
+    dur = probe_duration_sec(video) or 0.0
+    if dur <= 0.2:
+        return []
+    wh = probe_video_wh(video)
+    if wh is None:
+        return []
+    width, height = int(wh[0]), int(wh[1])
+    fracs = np.linspace(0.15, 0.85, max(3, int(samples)))
+    warnings: list[dict[str, Any]] = []
+    for i, b in enumerate(boxes):
+        if str(b.get("role") or "") != "up_watermark":
+            continue
+        x, y, w, h = int(b["x"]), int(b["y"]), int(b["w"]), int(b["h"])
+        if y > max(4, int(height * 0.12)):
+            continue
+        ink_in = 0
+        ink_sp = 0
+        n = 0
+        for f in fracs:
+            raw = _grab_bgr_frame(video, dur * float(f))
+            if raw is None:
+                continue
+            if raw.shape[1] != width or raw.shape[0] != height:
+                raw = cv2.resize(raw, (width, height), interpolation=cv2.INTER_AREA)
+            gray = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
+            bright = gray > int(bright_thr)
+            y1 = min(height, y + h)
+            y2 = min(height, y + h + int(spill_px))
+            x1 = min(width, x + w)
+            ink_in += int(bright[y:y1, x:x1].sum())
+            if y2 > y1:
+                ink_sp += int(bright[y1:y2, x:x1].sum())
+            n += 1
+        if n < 1:
+            continue
+        # Spill comparable to in-box ink → box too short / misaligned.
+        if ink_in > 80 and ink_sp > ink_in * 0.45:
+            warnings.append(
+                {
+                    "box_index": i,
+                    "box": {"x": x, "y": y, "w": w, "h": h},
+                    "ink_in": ink_in,
+                    "ink_spill": ink_sp,
+                    "spill_px": int(spill_px),
+                }
+            )
+    return warnings
+
+
+def locate_at_watermarks_ocr(
+    video: Path,
+    width: int,
+    height: int,
+    *,
+    samples: int = 8,
+    min_hits: int = 4,
+) -> list[dict[str, Any]]:
+    """Persistent ``@xxx`` credits anywhere on frame (UP-master watermarks).
+
+    Corner detectors cover ``XXXbilibili`` and similar static corner marks, but
+    creators also burn ``@handle`` into the middle/side of the picture. OCR with
+    recognition is required for those: geometry-only detectors cannot separate
+    them from legit scene text. Only text repeated at a stable position across
+    sampled frames is returned.
+    """
+    import cv2
+    import numpy as np
+
+    try:
+        from glyph_detect import _get_ocr
+    except Exception:
+        return []
+    try:
+        ocr = _get_ocr()
+    except Exception:
+        return []
+    dur = probe_duration_sec(video) or 0.0
+    if dur <= 0.5:
+        return []
+    clusters: dict[tuple, dict[str, Any]] = {}
+    fracs = np.linspace(0.08, 0.92, max(4, int(samples)))
+    for f in fracs:
+        raw = _grab_bgr_frame(video, dur * float(f))
+        if raw is None:
+            continue
+        if raw.shape[1] != width or raw.shape[0] != height:
+            raw = cv2.resize(raw, (width, height), interpolation=cv2.INTER_AREA)
+        try:
+            res, _ = ocr(raw, use_det=True, use_cls=False, use_rec=True)
+        except Exception:
+            continue
+        for item in res or []:
+            if not isinstance(item, (list, tuple)) or len(item) < 3:
+                continue
+            txt = str(item[1] or "").strip()
+            if "@" not in txt:
+                continue
+            try:
+                score = float(item[2])
+            except (TypeError, ValueError):
+                continue
+            if score < 0.25:
+                continue
+            pts = np.asarray(item[0], dtype=np.float32)
+            if pts.ndim != 2 or pts.shape[1] != 2 or pts.shape[0] < 3:
+                continue
+            x0, y0 = pts.min(axis=0)
+            x1, y1 = pts.max(axis=0)
+            bx = {
+                "x": int(max(0, x0)),
+                "y": int(max(0, y0)),
+                "w": int(min(width, x1 + 1) - max(0, x0)),
+                "h": int(min(height, y1 + 1) - max(0, y0)),
+            }
+            if bx["w"] < 8 or bx["h"] < 6:
+                continue
+            # OCR text varies across frames (@0x / @ox / @0x.diabto); the
+            # *position* is the stable identity of a burned-in credit.
+            key = ("@", int(bx["x"] // 16), int(bx["y"] // 16))
+            c = clusters.setdefault(key, {"n": 0, "boxes": []})
+            c["n"] += 1
+            c["boxes"].append(bx)
+    need = max(2, int(min_hits))
+    out: list[dict[str, Any]] = []
+    for (_txt, _gx, _gy), c in sorted(
+        clusters.items(), key=lambda kv: -kv[1]["n"]
+    ):
+        if c["n"] < need:
+            continue
+        bs = c["boxes"]
+        x0 = min(b["x"] for b in bs)
+        y0 = min(b["y"] for b in bs)
+        x1 = max(b["x"] + b["w"] for b in bs)
+        y1 = max(b["y"] + b["h"] for b in bs)
+        pad = 6
+        box = {
+            "x": int(max(0, x0 - pad)),
+            "y": int(max(0, y0 - pad)),
+            "w": int(min(width, x1 + pad) - max(0, x0 - pad)),
+            "h": int(min(height, y1 + pad) - max(0, y0 - pad)),
+        }
+        if box["w"] < 8 or box["h"] < 6:
+            continue
+        cy = box["y"] + box["h"] / 2
+        out.append(
+            {
+                "box": box,
+                "norm": {
+                    "x": box["x"] / width,
+                    "y": box["y"] / height,
+                    "w": box["w"] / width,
+                    "h": box["h"] / height,
+                },
+                "hits": int(c["n"]),
+                "source": "ocr_at",
+                "zone": "top" if cy < height * 0.25 else (
+                    "bottom" if cy > height * 0.75 else "middle"
+                ),
+                "role": "up_watermark",
+            }
+        )
+        if len(out) >= 4:
+            break
+    return out
 
 
 def resolve_hardsub_box(
@@ -1462,11 +1965,17 @@ def resolve_hardsub_boxes(
         )
         out.append(mark)
 
-    # 右上角 UP 主水印（"XXXbilibili"）此前被 top-title(左上黄字) 与 watermark(右下)
-    # 两个检测器双双漏掉 → 此处补上，走 STTN 字形洞只去文字、保留透明角落。
-    up = locate_hardsub_box_up_watermark(video, width, height)
-    if up and up.get("box"):
-        out.append(dict(up))
+    # 顶部两侧 UP 主水印（"XXXbilibili"）：左上白描边标题此前被只认黄字的
+    # top-title 漏掉，右上由专用探测器覆盖。两者都走字形洞，只去文字。
+    for side in ("right", "left"):
+        up = locate_hardsub_box_up_watermark(video, width, height, side=side)
+        if up and up.get("box"):
+            out.append(dict(up))
+
+    # 画面中部/侧边的 "@handle" 固定水印：必须靠带识别的 OCR，不能按位置框瞎猜。
+    for at_box in locate_at_watermarks_ocr(video, width, height):
+        if at_box.get("box"):
+            out.append(at_box)
 
     return out
 
@@ -1976,10 +2485,13 @@ def score_hardsub_band(raw: bytes) -> dict[str, float]:
     var = sum((b - mean) ** 2 for b in raw) / n
     std = var**0.5
     bright = sum(1 for b in raw if b >= 200) / n
+    # Mid-bright: outlined / soft bilingual captions (BV1P6 "We're good") sit
+    # below 200 and were invisible to the hard threshold alone.
+    mid = sum(1 for b in raw if b >= 165) / n
     if bright > HARDSUB_MAX_BAND_BRIGHT:
         return {"score": 0.0, "mean": round(mean, 2), "std": round(std, 2),
                 "bright_frac": round(bright, 4), "note": "solid_bright"}
-    score = min(1.0, bright * 5.0 + min(std, 70.0) / 140.0)
+    score = min(1.0, bright * 5.0 + mid * 2.0 + min(std, 70.0) / 140.0)
     return {
         "score": round(score, 4),
         "mean": round(mean, 2),
@@ -2135,7 +2647,7 @@ def _merge_time_windows(
     duration: float,
     *,
     pad: float = 1.4,
-    merge_gap: float = 2.5,
+    merge_gap: float = 4.0,
     min_len: float = 2.0,
 ) -> list[tuple[float, float]]:
     if duration <= 0.1 or not hits:
@@ -2159,6 +2671,109 @@ def _merge_time_windows(
             start = max(0.0, mid - min_len / 2.0)
             end = min(duration, start + min_len)
         out.append((round(start, 3), round(end, 3)))
+    return out
+
+
+def expand_windows_fade_hold(
+    windows: list[tuple[float, float]],
+    duration: float,
+    *,
+    hold_sec: float = 0.25,
+) -> list[tuple[float, float]]:
+    """D11: pad each window by ±hold so faint fade-in/out frames stay in-band."""
+    if not windows or duration <= 0.1:
+        return list(windows or [])
+    hold = max(0.0, float(hold_sec))
+    expanded: list[tuple[float, float]] = []
+    for s, e in windows:
+        expanded.append(
+            (max(0.0, float(s) - hold), min(float(duration), float(e) + hold))
+        )
+    # Re-merge overlaps / near-gaps after pad (same gap policy as timeline merge).
+    expanded.sort()
+    merged: list[tuple[float, float]] = []
+    gap = 2.0
+    for s, e in expanded:
+        if not merged or s > merged[-1][1] + gap:
+            merged.append((round(s, 3), round(e, 3)))
+        else:
+            merged[-1] = (merged[-1][0], round(max(merged[-1][1], e), 3))
+    return merged
+
+
+def build_wipe_plan(
+    boxes: list[dict],
+    *,
+    active_windows: list[tuple[float, float]] | None = None,
+    duration_sec: float = 0.0,
+) -> list[dict[str, Any]]:
+    """D10: light WipePlan — per-track role + remove|keep (+ advisory windows).
+
+    Process currently enforces ``action`` only (drop keep tracks). Dialogue
+    time-gating uses caption ``active_windows`` in hybrid/OCR, not per-track
+    ``windows`` (those are confirm/meta hints until a fuller WipePlan lands).
+    """
+    wins = [
+        {"start": float(s), "end": float(e)} for s, e in (active_windows or [])
+    ]
+    full = (
+        [{"start": 0.0, "end": round(float(duration_sec), 3)}]
+        if float(duration_sec) > 0.1
+        else []
+    )
+    plan: list[dict[str, Any]] = []
+    for i, b in enumerate(boxes or []):
+        role = str(b.get("role") or "dialogue").strip().lower() or "dialogue"
+        action = str(b.get("action") or "remove").strip().lower()
+        if action not in ("remove", "keep"):
+            action = "remove"
+        # Dialogue follows caption timeline; static overlays cover the whole clip.
+        track_wins = wins if role == "dialogue" and wins else (full or wins)
+        plan.append(
+            {
+                "id": f"{role}_{i}",
+                "role": role,
+                "action": action,
+                "box": {
+                    "x": int(b["x"]),
+                    "y": int(b["y"]),
+                    "w": int(b["w"]),
+                    "h": int(b["h"]),
+                },
+                "windows": track_wins,
+            }
+        )
+    return plan
+
+
+def filter_boxes_by_wipe_plan(
+    boxes: list[dict],
+    wipe_plan: list[dict] | None = None,
+) -> list[dict]:
+    """Drop tracks marked ``action=keep`` (confirm-editable)."""
+    keep_ids: set[str] = set()
+    keep_roles_idx: set[tuple[str, int]] = set()
+    for t in wipe_plan or []:
+        if str(t.get("action") or "remove").lower() != "keep":
+            continue
+        tid = str(t.get("id") or "")
+        if tid:
+            keep_ids.add(tid)
+        role = str(t.get("role") or "")
+        # Fallback match by role+ordinal in id suffix.
+        if "_" in tid:
+            try:
+                keep_roles_idx.add((role, int(tid.rsplit("_", 1)[-1])))
+            except ValueError:
+                pass
+    out: list[dict] = []
+    for i, b in enumerate(boxes or []):
+        role = str(b.get("role") or "dialogue").strip().lower() or "dialogue"
+        if str(b.get("action") or "remove").lower() == "keep":
+            continue
+        if f"{role}_{i}" in keep_ids or (role, i) in keep_roles_idx:
+            continue
+        out.append(b)
     return out
 
 
@@ -2413,21 +3028,46 @@ def detect_dehardsub_regions(
     boxes = []
     for loc in located:
         b = loc.get("box") or {}
-        boxes.append({
+        role = loc.get("role", "dialogue")
+        box = {
             "x": int(b["x"]), "y": int(b["y"]),
             "w": int(b["w"]), "h": int(b["h"]),
-            "role": loc.get("role", "dialogue"),
-        })
+            "role": role,
+        }
+        if role == "up_watermark":
+            box = ensure_top_up_watermark_min_h(box, width, height)
+            box["role"] = "up_watermark"
+        boxes.append(box)
+    gates = build_dehardsub_gates(src, boxes, width=width, height=height)
+    # Prefer normalized (min_h grown) boxes for preview/confirm.
+    if gates.get("boxes_normalized"):
+        boxes = list(gates["boxes_normalized"])
+    duration_sec = float(probe_duration_sec(src) or 0.0)
+    wipe_plan = build_wipe_plan(boxes, duration_sec=duration_sec)
     payload = {
         "confirmed": False,
         "detected_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "width": width,
         "height": height,
         "note": (
-            "Review dehardsub_regions_preview.jpg. Edit boxes if needed, "
-            "set confirmed:true, then run the process stage."
+            "Review dehardsub_regions_preview.jpg. Edit boxes / wipe_plan "
+            "(action remove|keep) if needed, set confirmed:true, then process."
+            + (
+                " BLOCKED: fix top watermark height/spill before confirm "
+                f"({', '.join(gates.get('reasons') or [])})."
+                if not gates.get("ok")
+                else ""
+            )
         ),
         "boxes": boxes,
+        "wipe_plan": wipe_plan,
+        "gates": {
+            "ok": bool(gates.get("ok")),
+            "outside_box_bright_blobs": int(gates.get("outside_box_bright_blobs") or 0),
+            "top_min_h_ok": bool(gates.get("top_min_h_ok")),
+            "spill_warnings": gates.get("spill_warnings") or [],
+            "reasons": gates.get("reasons") or [],
+        },
     }
     (dest_dir / "dehardsub_regions.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -2575,6 +3215,51 @@ def strip_hardsubs(
             return src, report
         boxes_override = json.loads(rj.read_text(encoding="utf-8")).get("boxes")
 
+    # D4: hard-block process when top watermark min_h/spill gates fail (unless force).
+    _gate_boxes = boxes_override
+    rj_gate = dest_dir / "dehardsub_regions.json"
+    if _gate_boxes is None and rj_gate.is_file():
+        try:
+            _gate_boxes = json.loads(rj_gate.read_text(encoding="utf-8")).get("boxes")
+        except Exception:
+            _gate_boxes = None
+    if _gate_boxes:
+        gates = build_dehardsub_gates(src, _gate_boxes, width=width, height=height)
+        report["gates"] = {
+            "ok": bool(gates.get("ok")),
+            "top_min_h_ok": bool(gates.get("top_min_h_ok")),
+            "outside_box_bright_blobs": int(gates.get("outside_box_bright_blobs") or 0),
+            "reasons": list(gates.get("reasons") or []),
+            "spill_warnings": gates.get("spill_warnings") or [],
+        }
+        if gates.get("boxes_normalized"):
+            boxes_override = list(gates["boxes_normalized"])
+            # Persist grown boxes so next confirm/preview matches process.
+            if rj_gate.is_file():
+                try:
+                    data_g = json.loads(rj_gate.read_text(encoding="utf-8"))
+                    data_g["boxes"] = boxes_override
+                    data_g["gates"] = report["gates"]
+                    rj_gate.write_text(
+                        json.dumps(data_g, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                except Exception:
+                    pass
+        if (not gates.get("ok")) and (not force):
+            report["action"] = "gates_blocked"
+            report["quality"] = "degraded"
+            report["quality_note"] = (
+                "dehardsub gates blocked: " + ", ".join(gates.get("reasons") or [])
+            )
+            _write_meta(meta_path, report)
+            print(
+                f"[dehardsub] BLOCKED by gates: {report['quality_note']} "
+                f"(pass force=True to override)",
+                flush=True,
+            )
+            return dest if dest.is_file() else src, report
+
     ffmpeg = find_ffmpeg()
     encode_dest = dest
     if src.resolve() == dest.resolve():
@@ -2601,12 +3286,73 @@ def strip_hardsubs(
     dense_hits = [float(t) for t in (scan.get("hits") or [])]
     timeline_hits = dense_hits or sparse_hits
     active_windows = _merge_time_windows(timeline_hits, duration_sec)
+    # D11: hold faint fade edges so OCR-weak lead/trail frames stay in-window.
+    active_windows = expand_windows_fade_hold(
+        active_windows, duration_sec, hold_sec=0.25
+    )
     if active_windows:
         report["active_windows"] = [{"start": s, "end": e} for s, e in active_windows]
     covered_sec = sum(max(0.0, end - start) for start, end in active_windows)
     caption_coverage = (covered_sec / duration_sec) if duration_sec > 0 else 0.0
     report["caption_coverage"] = round(caption_coverage, 4)
     report["caption_covered_sec"] = round(covered_sec, 3)
+
+    # D10: WipePlan — merge regions.json plan + filter keep tracks before process.
+    wipe_plan_src: list[dict] = []
+    if rj_gate.is_file():
+        try:
+            wipe_plan_src = list(
+                json.loads(rj_gate.read_text(encoding="utf-8")).get("wipe_plan") or []
+            )
+        except Exception:
+            wipe_plan_src = []
+    plan_boxes = list(boxes_override or _gate_boxes or [])
+    wipe_plan = build_wipe_plan(
+        plan_boxes,
+        active_windows=active_windows,
+        duration_sec=float(duration_sec or 0.0),
+    )
+    # Preserve explicit keep actions from confirm file; stamp onto boxes too.
+    if wipe_plan_src:
+        by_id = {str(t.get("id")): t for t in wipe_plan_src if t.get("id")}
+        for t in wipe_plan:
+            prev = by_id.get(str(t.get("id")))
+            if prev and str(prev.get("action") or "").lower() in ("remove", "keep"):
+                t["action"] = str(prev.get("action")).lower()
+        if boxes_override is not None:
+            for i, b in enumerate(boxes_override):
+                role = str(b.get("role") or "dialogue").strip().lower() or "dialogue"
+                tid = f"{role}_{i}"
+                prev = by_id.get(tid)
+                if prev and str(prev.get("action") or "").lower() == "keep":
+                    b["action"] = "keep"
+    if boxes_override is not None:
+        before_n = len(boxes_override)
+        boxes_override = filter_boxes_by_wipe_plan(boxes_override, wipe_plan)
+        if len(boxes_override) < before_n:
+            print(
+                f"[dehardsub] wipe_plan keep: skipped "
+                f"{before_n - len(boxes_override)} track(s)",
+                flush=True,
+            )
+    report["wipe_plan"] = wipe_plan
+    # Persist refreshed plan (windows + actions) back into regions.json.
+    if rj_gate.is_file():
+        try:
+            data_w = json.loads(rj_gate.read_text(encoding="utf-8"))
+            data_w["wipe_plan"] = wipe_plan
+            rj_gate.write_text(
+                json.dumps(data_w, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            pass
+    if float(polish_residual_floor) >= 0.99:
+        print(
+            f"[dehardsub] polish=off (polish_residual_floor="
+            f"{float(polish_residual_floor):.3f})",
+            flush=True,
+        )
+    report["polish_residual_floor"] = float(polish_residual_floor)
 
     if mode_s == "crop":
         box = hardsub_band_box(width, height, ratio)
@@ -2723,7 +3469,60 @@ def strip_hardsubs(
                 action = f"delogo_{located.get('source') or 'box'}"
 
     if encode_dest.resolve() != dest.resolve():
-        encode_dest.replace(dest)
+        from _inpaint_shared import replace_file_robust
+        replace_file_robust(encode_dest, dest)
+
+    # 通用后处理：切镜重复帧 / 水印白糊斑（opt-out: VITUAL_DEHARDSUB_POSTFIX=0）。
+    # 检测全部相对 source + regions.json，不含视频特定值；只改命中的帧。
+    try:
+        from dehardsub_postfix import postfix_enabled, run_postfix
+        if postfix_enabled():
+            regions_path = dest_dir / "dehardsub_regions.json"
+            if regions_path.exists():
+                postfix_tmp = dest_dir / "_clean_postfix.mp4"
+                final_stats = run_postfix(
+                    src, dest, postfix_tmp, regions_path,
+                    stats_out=dest_dir / "dehardsub_postfix.json",
+                )
+                if postfix_tmp.exists() and postfix_tmp.stat().st_size > 0:
+                    from _inpaint_shared import replace_file_robust
+                    replace_file_robust(postfix_tmp, dest)
+                report["postfix"] = {
+                    k: final_stats.get(k) for k in
+                    ("cut_repeat_frames", "watermark_smear", "bright_watermark_residual",
+                     "dark_patch_frames", "source_frames", "clean_frames",
+                     "output_frames", "frame_alignment")
+                }
+    except Exception as exc:  # 后处理失败不影响主产物
+        print(f"[dehardsub] postfix skipped: {exc}", flush=True)
+        report["postfix_error"] = str(exc)
+
+    # 官方审阅产物：帧准确并排视频 + 全帧风险排序（opt-out: VITUAL_DEHARDSUB_REVIEW=0）。
+    # 风险分只用于优先复核，不是画质分；最终以肉眼验收为准。
+    try:
+        if os.environ.get("VITUAL_DEHARDSUB_REVIEW", "1").strip().lower() not in ("0", "false", "no", "off"):
+            from dehardsub_review import build_review_pair, score_risk
+            regions_path = dest_dir / "dehardsub_regions.json"
+            if regions_path.exists():
+                review_path = dest_dir / "dehardsub_review.mp4"
+                risk_csv = dest_dir / "frame_risk.csv"
+                risk_json = dest_dir / "frame_risk_top.json"
+                risk_sheet = dest_dir / "frame_risk_top12.jpg"
+                rv = build_review_pair(src, dest, review_path)
+                rs = score_risk(src, dest, regions_path, out_csv=risk_csv,
+                                out_json=risk_json, out_sheet=risk_sheet)
+                report["review"] = {
+                    "video": review_path.name,
+                    "aligned": rv["aligned"],
+                    "frames": rv["written_frames"],
+                    "risk_csv": risk_csv.name,
+                    "risk_json": risk_json.name,
+                    "risk_sheet": risk_sheet.name,
+                    "frames_scored": rs["frames_scored"],
+                }
+    except Exception as exc:  # 审阅产物失败不影响主产物
+        print(f"[dehardsub] review skipped: {exc}", flush=True)
+        report["review_error"] = str(exc)
 
     out_wh = probe_video_wh(dest)
     report["action"] = action
@@ -4364,6 +5163,40 @@ def run_postproc(
         seed = working if working is not None else source
         if seed is None:
             raise FileNotFoundError(f"dehardsub needs a source video in {work_dir}")
+        boxes_override: list[dict] | None = None
+        if bool(opts.get("dehardsub_require_confirm")):
+            regions_path = job_dehardsub_dir(work_dir) / "dehardsub_regions.json"
+            payload: dict = {}
+            if regions_path.is_file():
+                try:
+                    payload = json.loads(regions_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError, TypeError):
+                    payload = {}
+            if not (payload.get("confirmed") and payload.get("boxes")):
+                detect_dehardsub_regions(
+                    work_dir,
+                    mode=str(opts.get("dehardsub_mode") or "auto"),
+                    ratio=float(opts.get("dehardsub_ratio") or HARDSUB_CROP_RATIO),
+                    vlm_model=str(opts.get("dehardsub_vlm_model") or HARDSUB_VLM_MODEL),
+                )
+                preview = job_dehardsub_dir(work_dir) / "dehardsub_regions_preview.jpg"
+                status_payload = {
+                    "postproc": "awaiting_confirm",
+                    "awaiting_confirm": True,
+                    "stages": [],
+                    "produced": {},
+                    "remix": "skipped",
+                    "regions": str(regions_path),
+                    "preview": str(preview) if preview.is_file() else None,
+                }
+                _write_live_status("dehardsub", status="awaiting_confirm")
+                write_media_status(work_dir, status_payload)
+                print(
+                    "[dehardsub] awaiting confirmation: "
+                    f"{regions_path} / {preview} — confirm boxes then requeue job"
+                )
+                return produced
+            boxes_override = list(payload["boxes"])
         cleaned, report = strip_hardsubs(
             work_dir,
             video=seed,
@@ -4379,6 +5212,8 @@ def run_postproc(
             demosaic_engine=str(
                 opts.get("dehardsub_demosaic_engine") or DEFAULT_DEMOSAIC_ENGINE
             ),
+            boxes_override=boxes_override,
+            require_confirm=False,
         )
         if report.get("action") not in (None, "skip") and cleaned.is_file():
             produced["dehardsub"] = cleaned

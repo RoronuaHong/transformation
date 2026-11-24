@@ -98,11 +98,37 @@ export type TryCopy = {
   cookiesBlockBatch: string;
   cookiesLocalDetected: string;
   batchQueued: string;
+  viewTabsLabel: string;
+  viewNew: string;
+  viewActive: string;
+  viewActiveEmpty: string;
+  viewDone: string;
+  viewDoneEmpty: string;
   batchJobsTitle: string;
+  currentJobsTitle: string;
   batchSummary: string;
+  historyTitle: string;
+  historyEmpty: string;
+  historyRefresh: string;
+  historyRefreshing: string;
+  historyManualTag: string;
+  historyUpdatedAgo: string;
+  historyGroupTag: string;
+  historyGroupCount: string;
   progressNow: string;
+  progressEta: string;
+  etaSeconds: string;
+  etaMinutes: string;
+  etaHours: string;
+  expand: string;
+  collapse: string;
+  detailTitle: string;
+  detailLoading: string;
+  detailEmpty: string;
   jobCancel: string;
   jobRetry: string;
+  jobDelete: string;
+  jobDeleteConfirm: string;
   queuePause: string;
   queueResume: string;
   queuePaused: string;
@@ -141,6 +167,7 @@ export type TryCopy = {
   statusPending: string;
   statusProcessing: string;
   statusDone: string;
+  statusPublished: string;
   statusPartial: string;
   statusFailed: string;
   statusCancelled: string;
@@ -638,11 +665,37 @@ const en: UiCopy = {
     cookiesBlockBatch: "This batch needs login cookies for: {platforms}",
     cookiesLocalDetected: "Local cookies.txt detected on this machine.",
     batchQueued: "{n} items queued — dual-lane will fill free slots.",
+    viewTabsLabel: "Workbench views",
+    viewNew: "New task",
+    viewActive: "Running",
+    viewActiveEmpty: "No tasks are running right now. Submit a new task to get started.",
+    viewDone: "Completed",
+    viewDoneEmpty: "Nothing here yet. Finished and failed jobs will show up here.",
     batchJobsTitle: "Batch jobs",
-    batchSummary: "{total} jobs · {running} running · {queued} queued",
+    currentJobsTitle: "Current tasks",
+    batchSummary: "{total} packs · {running} running · {queued} queued",
+    historyTitle: "Task history",
+    historyEmpty: "No jobs yet. Submit one above to see its status and progress here.",
+    historyRefresh: "Refresh",
+    historyRefreshing: "Refreshing…",
+    historyManualTag: "CLI",
+    historyUpdatedAgo: "updated {n}s ago",
+    historyGroupTag: "Collection",
+    historyGroupCount: "{n} jobs",
     progressNow: "Now: {stage}",
+    progressEta: "ETA {time}",
+    etaSeconds: "{n}s",
+    etaMinutes: "{n} min",
+    etaHours: "{n} h",
+    expand: "Expand",
+    collapse: "Collapse",
+    detailTitle: "Job details",
+    detailLoading: "Loading details…",
+    detailEmpty: "No sub-tasks for this job.",
     jobCancel: "Cancel pack",
     jobRetry: "Retry",
+    jobDelete: "Delete",
+    jobDeleteConfirm: "Delete {n} finished task(s) for “{name}”? Only the queue record is removed; files and notes are kept.",
     queuePause: "Pause queue",
     queueResume: "Resume queue",
     queuePaused: "Queue paused — running jobs finish, then no new jobs start.",
@@ -682,6 +735,7 @@ const en: UiCopy = {
     statusPending: "Queued",
     statusProcessing: "Processing",
     statusDone: "Done",
+    statusPublished: "Published",
     statusPartial: "Partial",
     statusFailed: "Failed",
     statusCancelled: "Cancelled",
@@ -1172,11 +1226,37 @@ const zh: UiCopy = {
     cookiesBlockBatch: "本批需要以下平台的登录态：{platforms}",
     cookiesLocalDetected: "已检测到本机 cookies.txt。",
     batchQueued: "已排队 {n} 条 — 双轨有空位会并行开跑。",
+    viewTabsLabel: "工作台视图",
+    viewNew: "新任务",
+    viewActive: "进行中",
+    viewActiveEmpty: "当前没有进行中的任务。在「新任务」提交后即可在这里跟踪进度。",
+    viewDone: "已完成",
+    viewDoneEmpty: "这里还没有记录。已完成或失败的任务会显示在这里。",
     batchJobsTitle: "批量任务",
-    batchSummary: "共 {total} 条 · {running} 进行中 · {queued} 排队",
+    currentJobsTitle: "当前任务",
+    batchSummary: "共 {total} 个合集 · {running} 进行中 · {queued} 排队",
+    historyTitle: "任务历史",
+    historyEmpty: "暂无任务。在上方提交后，这里会显示状态与进度。",
+    historyRefresh: "刷新",
+    historyRefreshing: "刷新中…",
+    historyManualTag: "命令行",
+    historyUpdatedAgo: "{n} 秒前更新",
+    historyGroupTag: "合集",
+    historyGroupCount: "{n} 项任务",
     progressNow: "当前：{stage}",
+    progressEta: "约剩余 {time}",
+    etaSeconds: "{n} 秒",
+    etaMinutes: "{n} 分钟",
+    etaHours: "{n} 小时",
+    expand: "展开详情",
+    collapse: "收起详情",
+    detailTitle: "任务详情",
+    detailLoading: "正在加载详情…",
+    detailEmpty: "该任务没有子任务。",
     jobCancel: "取消整包",
     jobRetry: "重跑",
+    jobDelete: "删除",
+    jobDeleteConfirm: "删除「{name}」下的 {n} 条已完成任务？只移除队列记录，文件和笔记保留。",
     queuePause: "暂停队列",
     queueResume: "继续队列",
     queuePaused: "队列已暂停 — 进行中的任务跑完后不再启动新任务。",
@@ -1215,6 +1295,7 @@ const zh: UiCopy = {
     statusPending: "排队中",
     statusProcessing: "处理中",
     statusDone: "完成",
+    statusPublished: "已发布",
     statusPartial: "部分完成",
     statusFailed: "失败",
     statusCancelled: "已取消",
@@ -1692,15 +1773,42 @@ const zhHant: UiCopy = {
     submit: "生成筆記",
     reset: "重置",
     openNotes: "查看筆記",
+    viewTabsLabel: "工作台視圖",
+    viewNew: "新任務",
+    viewActive: "進行中",
+    viewActiveEmpty: "目前沒有進行中的任務。在「新任務」提交後即可在這裡追蹤進度。",
+    viewDone: "已完成",
+    viewDoneEmpty: "這裡還沒有記錄。已完成或失敗的任務會顯示在這裡。",
     batchJobsTitle: "批量任務",
-    batchSummary: "共 {total} 條 · {running} 進行中 · {queued} 排隊",
+    currentJobsTitle: "當前任務",
+    batchSummary: "共 {total} 個合集 · {running} 進行中 · {queued} 排隊",
+    historyTitle: "任務歷史",
+    historyEmpty: "暫無任務。在上方提交後，這裡會顯示狀態與進度。",
+    historyRefresh: "重新整理",
+    historyRefreshing: "重新整理中…",
+    historyManualTag: "命令列",
+    historyUpdatedAgo: "{n} 秒前更新",
+    historyGroupTag: "合集",
+    historyGroupCount: "{n} 項任務",
     progressNow: "當前：{stage}",
+    progressEta: "約剩餘 {time}",
+    etaSeconds: "{n} 秒",
+    etaMinutes: "{n} 分鐘",
+    etaHours: "{n} 小時",
+    expand: "展開詳情",
+    collapse: "收起詳情",
+    detailTitle: "任務詳情",
+    detailLoading: "正在載入詳情…",
+    detailEmpty: "該任務沒有子任務。",
     jobCancel: "取消整包",
     jobRetry: "重跑",
+    jobDelete: "刪除",
+    jobDeleteConfirm: "刪除「{name}」下的 {n} 條已完成任務？只移除佇列記錄，檔案和筆記保留。",
     queuePause: "暫停佇列",
     queueResume: "繼續佇列",
     queuePaused: "佇列已暫停 — 進行中的任務跑完後不再啟動新任務。",
     statusCancelled: "已取消",
+    statusPublished: "已發布",
     statusPartial: "部分完成",
     stepLangChips: "語言",
     stepRetry: "重試該語",

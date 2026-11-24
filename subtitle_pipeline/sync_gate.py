@@ -33,6 +33,7 @@ UNIT_TARGETS = [
     "test_game_claim.py",
     "test_keypoint_clips.py",
     "test_llm_fallback.py",
+    "test_dialogue_clear_gate.py",
 ]
 UNIT_IGNORE = "remix_burns or run_postproc or vertical_ffmpeg"
 

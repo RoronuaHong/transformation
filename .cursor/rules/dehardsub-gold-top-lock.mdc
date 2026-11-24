@@ -1,0 +1,26 @@
+# Dehardsub top-bar gold lock
+
+When editing watermark / dehardsub top-bar removal:
+
+## Locked path (do not “improve” without user re-acceptance)
+
+1. Entry: `subtitle_pipeline/dehardsub_gold_workflow.py` → `wipe_top_watermarks`
+2. Box: **regions/confirm raw `x,y,w,h` only**
+3. Method: `ns_box_wipe(feather=GOLD_TOP_FEATHER, radius=GOLD_TOP_RADIUS)` from `visual_cleanup`
+4. Glyph tails: only the **internal** downward probe inside `ns_box_wipe`
+
+## Forbidden on the top bar
+
+- `expand_static_overlay_box` before wipe (measured Morphic MAD ~3.8 → ~9 vs gold50)
+- Morphic tile / homemade TELEA / ink-composite / keyframe donor paste on top
+- LaMa on dense white top logos (regenerates glyphs)
+
+## Regression
+
+- Assets: `subtitle_pipeline/eval/gold/dehardsub_gold_workflow/` (`src_0001_final2.jpg`, `gold50.mp4`)
+- Tests: `test_dehardsub_gold_workflow.py` (`test_top_wipe_aligns_bv1p6_f0_to_gold_final2`, expand guardrail)
+- Contract: `top_gold_contract()` — keep `expand_static_overlay_box: false`
+
+Keyframe bank (`VITUAL_DEHARDSUB_GOLD_KF`) may help **mid/dialogue only**; it must not change top wipe.
+
+`VITUAL_DEHARDSUB_GOLD_TOP_PLATE` defaults **off**. NS-median / src-median top plates were A/B’d on BV1P6 hard KFs and lost to raw-box `ns_box_wipe` vs gold50 (persistent Morphic/Pooot survive temporal median).

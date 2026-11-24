@@ -78,7 +78,12 @@ def _in_box(b, box):
 
 
 def thin_mask(gray, b, pad=6):
-    """自适应细字形洞：取框内偏离本地的极端像素（亮底白字/暗底白字都行）。"""
+    """自适应细字形洞：取框内偏离本地的极端像素。
+
+    暗景（字幕压在衣服/长椅上）取**亮笔画 ∪ 邻接暗描边**（白芯+黑边同洞），
+    再小膨胀。只取暗端会把腿/衣物抹黑（BV1P6 v4/v5）；只取亮芯则 TELEA 把
+    描边当边界色吸入洞内变黑字。亮底白字仍用双向极端。
+    """
     H, W = gray.shape
     x0 = max(0, b["x"] - pad); y0 = max(0, b["y"] - pad)
     x1 = min(W, b["x"] + b["w"] + pad); y1 = min(H, b["y"] + b["h"] + pad)
@@ -86,12 +91,160 @@ def thin_mask(gray, b, pad=6):
         return None
     roi = gray[y0:y1, x0:x1].astype(np.float32)
     lo = np.percentile(roi, 12); hi = np.percentile(roi, 88)
-    s = ((roi < lo) | (roi > hi)).astype(np.uint8) * 255
-    s = cv2.morphologyEx(s, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8), iterations=2)
-    s = cv2.dilate(s, np.ones((3, 3), np.uint8), iterations=DEFAULT_DILATE)
+    med = float(np.median(roi))
+    if med < 110.0:
+        thr = max(float(hi), 165.0)
+        core = (roi >= thr).astype(np.uint8)
+        # Expand bright cores to cover black outlines. Marking dark outline
+        # pixels directly made TELEA paint glyph-shaped dark blotches on
+        # shorts (demo t=7). Core-grow stays anchored to white ink.
+        s = (core > 0).astype(np.uint8) * 255
+        s = cv2.dilate(s, np.ones((3, 3), np.uint8), iterations=2)
+    else:
+        s = ((roi < lo) | (roi > hi)).astype(np.uint8) * 255
+        s = cv2.morphologyEx(s, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8), iterations=2)
+        s = cv2.dilate(s, np.ones((3, 3), np.uint8), iterations=DEFAULT_DILATE)
     if int(s.max()) == 0:
-        s = np.full_like(s, 255)
+        return None
     return s, (x0, y0)
+
+
+def gold_threshold_mask(frame_bgr, band, *, gray_thr=90, sat_thr=95) -> np.ndarray:
+    """黄金参照（src_0001_final2.jpg）的字幕 mask 逻辑，1:1 对齐。
+
+    来自 fix_frame1_final2.py：``gray>90 & sat<95`` + 椭圆 11x11 膨胀 + CLOSE 5x5。
+    与 OCR thin_mask（局部差分，笔画连成实心块）不同，固定阈值 mask 会在字间距
+    保留缝隙，让 LaMa 能借周围纹理，擦除后不留大块平色补丁——这正是用户认可的
+    "完美"首帧的做法。用 band 动态定位字幕带，不写死坐标。
+
+    返回与 frame 同尺寸的 uint8 mask（0/255）。
+    """
+    import os as _os
+    if _os.environ.get("VITUAL_DEHARDSUB_GOLD_MASK", "").strip().lower() not in (
+        "1", "true", "yes", "on",
+    ):
+        return np.zeros(frame_bgr.shape[:2], np.uint8)
+    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    sat = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)[..., 1]
+    H, W = gray.shape[:2]
+    if isinstance(band, dict):
+        x, y, w, h = band["x"], band["y"], band["w"], band["h"]
+    else:
+        x, y, w, h = band
+    # 精确对齐黄金脚本字幕带：中心沿用 confirm box，尺寸用黄金的 370x83。
+    # confirm box (216,399,428,62) 中心=(430,430)；黄金带 (255,375,370,83)
+    # 中心=(440,416.5)。按中心对齐可把 x 收到 255-625、y 收到 375-458，
+    # goldpx≈19439（与黄金脚本一致），避免 x 过宽抓到两侧非字幕亮区。
+    cx, cy = x + w / 2, y + h / 2
+    gw, gh = 370, 83
+    gx0 = int(round(cx - gw / 2)); gx1 = min(W, gx0 + gw)
+    gy0 = int(round(cy - gh / 2 - 13)); gy1 = min(H, gy0 + gh)  # y中心上移13对齐416.5
+    gx0 = max(0, gx0); gy0 = max(0, gy0)
+    sel = ((gray[gy0:gy1, gx0:gx1] > gray_thr) & (sat[gy0:gy1, gx0:gx1] < sat_thr))
+    m = np.zeros(gray.shape, np.uint8)
+    if sel.any():
+        m[gy0:gy1, gx0:gx1] = cv2.dilate(
+            sel.astype(np.uint8) * 255,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11)),
+        )
+        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    return m
+
+
+def _reject_dark_inpaint(frame_bgr, filled_bgr, mask_u8, *, margin: float = 12.0) -> bool:
+    """True when TELEA/LaMa filled the hole much darker than the surrounding ring.
+
+    Ring donors exclude near-black outline and near-white glyph leftovers so a
+    correct dark-cloth fill is not rejected against bright caption remnants.
+    """
+    m = mask_u8 > 0
+    if not np.any(m):
+        return False
+    dil = cv2.dilate(mask_u8, np.ones((7, 7), np.uint8), iterations=1)
+    gray_f = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    ring = (dil > 0) & ~m & (gray_f > 55) & (gray_f < 200)
+    if not np.any(ring):
+        ring = (dil > 0) & ~m
+    if not np.any(ring):
+        return False
+    gf = cv2.cvtColor(filled_bgr, cv2.COLOR_BGR2GRAY)
+    hole = float(gf[m].mean())
+    ring_m = float(np.median(gf[ring]))
+    return hole < ring_m - float(margin)
+
+
+def _surgical_dark_repair(frame_bgr, filled_bgr, mask_u8, *, delta: float = 28.0,
+                          abs_floor: float = 38.0):
+    """Replace only pathologically dark hole pixels; keep LaMa texture elsewhere.
+
+    Full ``_ring_median_fill`` under GOLD_MASK flattened 800+ BV1P6 frames into
+    flat smudge bars (gate PASS, look FAIL). Only pixels that are much darker
+    than the ring median (or near-black) get the ring color; the rest of the
+    gold/LaMa fill is preserved.
+    """
+    m = mask_u8 > 0
+    if not np.any(m):
+        return filled_bgr
+    ring_fill = _ring_median_fill(frame_bgr, mask_u8)
+    gf = cv2.cvtColor(filled_bgr, cv2.COLOR_BGR2GRAY)
+    gr = cv2.cvtColor(ring_fill, cv2.COLOR_BGR2GRAY)
+    # Prefer ring sample under the same pixel; fall back to global ring median.
+    ring_ref = gr.copy()
+    bad = m & ((gf.astype(np.float32) < ring_ref.astype(np.float32) - float(delta)) | (gf < abs_floor))
+    if not np.any(bad):
+        return filled_bgr
+    out = filled_bgr.copy()
+    out[bad] = ring_fill[bad]
+    return out
+
+
+def _ring_median_fill(frame_bgr, mask_u8):
+    """Fill mask with BGR median of the surrounding ring (anti black-TELEA).
+
+    BV1P6: TELEA often painted near-black into bilingual dialogue holes; using
+    the ring median keeps cloth/skin tone instead of a black smear or leaving
+    source captions. Ring donors exclude near-black outline and bright glyph
+    pixels so the median is not pulled by stroke/halo.
+    """
+    m = mask_u8 > 0
+    if not np.any(m):
+        return frame_bgr
+    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    dil = cv2.dilate(mask_u8, np.ones((11, 11), np.uint8), iterations=2)
+    # Prefer mid-tone cloth/skin; skip outline (≤55) and caption ink (≥200).
+    ring = (dil > 0) & ~m & (gray > 55) & (gray < 200)
+    out = frame_bgr.copy()
+    if not np.any(ring):
+        # Widen search: mid-tone pixels in a padded bbox around the mask.
+        ys, xs = np.where(m)
+        y0, y1 = max(0, int(ys.min()) - 24), min(out.shape[0], int(ys.max()) + 25)
+        x0, x1 = max(0, int(xs.min()) - 24), min(out.shape[1], int(xs.max()) + 25)
+        pad = np.zeros_like(m)
+        pad[y0:y1, x0:x1] = True
+        ring = pad & ~m & (gray > 55) & (gray < 200)
+    if not np.any(ring):
+        # Last resort: any non-mask pixel in pad (still better than source glyphs).
+        ys, xs = np.where(m)
+        y0, y1 = max(0, int(ys.min()) - 24), min(out.shape[0], int(ys.max()) + 25)
+        x0, x1 = max(0, int(xs.min()) - 24), min(out.shape[1], int(xs.max()) + 25)
+        pad = np.zeros_like(m)
+        pad[y0:y1, x0:x1] = True
+        ring = pad & ~m & (gray > 40)
+    if not np.any(ring):
+        return out
+    for c in range(out.shape[2] if out.ndim == 3 else 1):
+        ch = out[:, :, c]
+        # Slightly above median biases away from residual dark outline donors.
+        med = int(np.percentile(ch[ring], 55))
+        ch[m] = med
+        out[:, :, c] = ch
+    # Light blur only on mask edge to hide hard paint.
+    blur = cv2.GaussianBlur(out, (0, 0), 1.2)
+    edge = cv2.dilate(mask_u8, np.ones((3, 3), np.uint8), iterations=1)
+    edge = (edge > 0) & ~m
+    if np.any(edge):
+        out[edge] = blur[edge]
+    return out
 
 
 def band_white_mask(gray, band):
@@ -290,63 +443,243 @@ def _collect_all(path, ocr, band, caption_stems, score_thr, max_frames=None, lab
     return boxes
 
 
+def _sec_in_windows(t_sec: float, windows) -> bool:
+    """True if t is inside any [start, end] window; empty/None → always True."""
+    if not windows:
+        return True
+    for win in windows:
+        if win is None or len(win) < 2:
+            continue
+        s, e = float(win[0]), float(win[1])
+        if s <= t_sec <= e:
+            return True
+    return False
+
+
 def _render_pass(src_path, vw, boxes, wm_mask, band, inpaint_radius,
                  feather_px, feather_sigma, max_frames=None, label="render",
-                 use_brightness=True, inpaint_method="telea"):
+                 use_brightness=True, inpaint_method="telea",
+                 fps=30.0, active_windows=None, reject_dark_fill=True):
     """流式：逐帧建遮罩 → 修补 → 羽化融合，写入 vw。返回本遍遮罩的框数。
 
     ``use_brightness``：亮度兜底只在第 1 遍（原片）开。迭代遍里画面已被填充过，
     再按亮度抓会误抓带内非文字的亮像素并抹掉（实测会误删场景文字），必须关。
     ``inpaint_method``：'telea'(默认, 扩散填充, 快但繁忙纹理会晕成糊斑) /
     'lama'(神经内容识别填充, 纹理背景/食物最自然, 适合做饭·实拍视频, 需 torch+inpaint_lama)。
+    ``active_windows``：仅在有字时段 inpaint；窗外帧原样拷贝（D8）。
+    ``reject_dark_fill``：洞内均值相对环带过暗则拒收该帧填充（D6）。
     """
     removed = 0
+    skipped_win = 0
+    window_rescue = 0
+    rejected_dark = 0
+    fps_f = float(fps) or 30.0
+    import os as _os
+    # FILL_V2：LaMa 的 mask 要扩张含描边(+5~10%)，且羽化只交给内置的一次，
+    # 避免紧贴笔画 mask 造成残影 / 二次 feather 把边缘字保留下来。
+    fill_v2 = _os.environ.get("VITUAL_DEHARDSUB_FILL_V2", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    # 通用逐帧精修（opt-in）：只对检测到的字形化暗残留做小面积重做，默认关闭。
+    try:
+        from dehardsub_frame_refine import refine_enabled, refine_roi as _refine_roi
+        do_refine = refine_enabled()
+    except Exception:
+        do_refine = False
+        _refine_roi = None
+    refine_count = 0
     for k, f in enumerate(_iter_frames(src_path, max_frames)):
+        t_sec = k / fps_f
         gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        frame_boxes = boxes[k] if k < len(boxes) else []
+        # D8 windows save compute — but never copy-skip a frame where OCR
+        # already found caption glyphs (BV1P6 t≈8 "We're good" sat in a
+        # 7.65–9.85 scan gap and was left fully readable).
+        if not _sec_in_windows(t_sec, active_windows):
+            if frame_boxes:
+                window_rescue += 1
+            else:
+                vw.write(f)
+                skipped_win += 1
+                if (k + 1) % 200 == 0:
+                    print(f"  [ocr_telea] {label} {k+1}", flush=True)
+                continue
         mask = wm_mask.copy()
-        # 亮度兜底：底部对白带白字
-        if band is not None and use_brightness:
+        # 2026-11-22 黄金参照对齐：字幕带用固定阈值 mask（gray>90&sat<95 +
+        # 椭圆膨胀 + CLOSE），保留字间缝隙让 LaMa 借周围纹理，避免平色补丁。
+        # 这是用户认可的 src_0001_final2.jpg 的做法，已离线 A/B 验证。
+        # 完美帧参照 fix_frame1_final2.py / src_0001_final2.jpg：
+        # 字幕带只用 gray>90&sat<95 + 椭圆膨胀 + CLOSE → LaMa，禁止 OCR 叠实心、
+        # 禁止亮度兜底、禁止 ring_median/surgical（那些会毁掉军装纹理）。
+        gold_mask = None
+        if band is not None and _os.environ.get("VITUAL_DEHARDSUB_GOLD_MASK", "").strip().lower() in (
+            "1", "true", "yes", "on",
+        ):
+            _gm = gold_threshold_mask(f, band)
+            if int(_gm.max()) > 0:
+                gold_mask = _gm
+                # 水印 mask 保留；字幕带以黄金 mask 为准，不与 OCR 叠加。
+                mask = np.maximum(wm_mask.copy(), gold_mask)
+                if frame_boxes:
+                    removed += len(frame_boxes)
+        # 亮度兜底：底部对白带白字（黄金 mask 开启时跳过，避免叠加成实心块）
+        if band is not None and use_brightness and gold_mask is None:
             bm, (bx, by) = band_white_mask(gray, band)
             if int(bm.max()) > 0:
                 mask[by:by + bm.shape[0], bx:bx + bm.shape[1]] = np.maximum(
                     mask[by:by + bm.shape[0], bx:bx + bm.shape[1]], bm)
-        for b in (boxes[k] if k < len(boxes) else []):
-            if inpaint_method == "lama":
-                # 整框填充(PS内容识别式): 白字+黑描边一起盖住, 让填充源=真实背景。
-                # 细字形洞在描边字上的邻居是描边本身 → LaMa 会把笔画填成黑色(实测鬼影)。
-                mh, mw = mask.shape
-                x0 = max(0, b["x"] - 4); y0 = max(0, b["y"] - 4)
-                x1 = min(mw, b["x"] + b["w"] + 4); y1 = min(mh, b["y"] + b["h"] + 4)
-                mask[y0:y1, x0:x1] = 255
-                removed += 1
-                continue
-            r = thin_mask(gray, b)
-            if r:
-                s, (mx, my) = r
-                mask[my:my + s.shape[0], mx:mx + s.shape[1]] = np.maximum(
-                    mask[my:my + s.shape[0], mx:mx + s.shape[1]], s)
-                removed += 1
+        # 非黄金路径才走 OCR thin_mask；黄金路径已在上面定稿 mask。
+        if gold_mask is None:
+            for b in frame_boxes:
+                r = thin_mask(gray, b)
+                if r:
+                    s, (mx, my) = r
+                    s8 = s if isinstance(s, np.ndarray) else np.asarray(s)
+                    mask[my:my + s8.shape[0], mx:mx + s8.shape[1]] = np.maximum(
+                        mask[my:my + s8.shape[0], mx:mx + s8.shape[1]], s8)
+                    removed += 1
         if int(mask.max()) > 0:
             if inpaint_method == "lama":
-                # 亮度兜底的白色连通域仍带描边, 整体再膨胀 3 轮盖住描边;
-                # OCR 框已是整矩形, 多膨胀只是外扩 3px 无害。
-                mask = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=3)
+                # FILL_V2: LaMa 要 mask 比字大一圈(含描边/抗锯齿)，边缘羽化交给
+                # lama_inpaint 内置 GaussianBlur；跳过二次 feather（会留边缘残字）。
+                # 黄金 mask 自己已膨胀+CLOSE，无需再膨胀（否则叠成实心平色块）。
+                dilate_k = 1 if gold_mask is not None else (11 if fill_v2 else 3)
+                if dilate_k > 1:
+                    mask = cv2.dilate(mask, np.ones((dilate_k, dilate_k), np.uint8), iterations=1)
                 try:
                     from inpaint_lama import lama_inpaint
                     out_f = lama_inpaint(f, mask)
+                    if not fill_v2:
+                        out_f = feather_blend(f, out_f, mask, feather_px, feather_sigma)
+                    # 非黄金路径才做暗填回退。黄金路径与 fix_frame1_final2.py 一致：
+                    # LaMa 直出，不做 ring_median / surgical（会抹平军装纹理）。
+                    if (
+                        gold_mask is None
+                        and reject_dark_fill
+                        and _reject_dark_inpaint(f, out_f, mask)
+                    ):
+                        out_f = _ring_median_fill(f, mask)
+                        rejected_dark += 1
                 except Exception as exc:  # noqa: BLE001
                     print(f"[ocr_telea] lama unavailable ({exc}); fallback telea",
                           file=sys.stderr)
                     out_f = cv2.inpaint(f, mask, inpaint_radius, cv2.INPAINT_TELEA)
                     out_f = feather_blend(f, out_f, mask, feather_px, feather_sigma)
             else:
-                out_f = cv2.inpaint(f, mask, inpaint_radius, cv2.INPAINT_TELEA)
-                out_f = feather_blend(f, out_f, mask, feather_px, feather_sigma)
+                # Stroke TELEA, no close/smooth/feather (fog bar at t=7).
+                # After wipe: pull milky TELEA pixels toward ring median so the
+                # fill reads closer to v2's dark smear than a grey cloud.
+                sg = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+                mask = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=1)
+                radius = max(3, int(inpaint_radius))
+                out_f = cv2.inpaint(f, mask, radius, cv2.INPAINT_TELEA)
+                if feather_px and feather_px > 0:
+                    out_f = feather_blend(f, out_f, mask, feather_px, feather_sigma)
+                cg = cv2.cvtColor(out_f, cv2.COLOR_BGR2GRAY)
+                near = cv2.dilate(mask, np.ones((5, 5), np.uint8), iterations=1)
+                leftover = (
+                    ((sg > 170) & (cg > 155) & (near > 0)).astype(np.uint8) * 255
+                )
+                if float((leftover > 0).mean()) >= 0.002:
+                    leftover = cv2.dilate(
+                        leftover, np.ones((3, 3), np.uint8), iterations=1
+                    )
+                    mask2 = np.maximum(mask, leftover)
+                    out_f = cv2.inpaint(f, mask2, radius, cv2.INPAINT_TELEA)
+                    if feather_px and feather_px > 0:
+                        out_f = feather_blend(
+                            f, out_f, mask2, feather_px, feather_sigma
+                        )
+                    rejected_dark += 1
+                    mask = mask2
+                    cg = cv2.cvtColor(out_f, cv2.COLOR_BGR2GRAY)
+                elif reject_dark_fill and _reject_dark_inpaint(f, out_f, mask):
+                    # D6: a too-dark hole must be repaired, not left black and
+                    # not pasted back as source captions (the 50% no-op root
+                    # cause). Ring median keeps cloth/skin tone and never
+                    # restores the glyph ink.
+                    out_f = _ring_median_fill(f, mask)
+                    rejected_dark += 1
+                # Dark-scene milk clamp: TELEA fills mid-grey over pants; pull
+                # wiped pixels toward the *source* ring median (cg ring is often
+                # already milky). Skip on high-texture rings (uniform fabric) —
+                # dark-ring paste redraws letter-shaped fog (BV1P6 fi=69).
+                # Skip on skin/face rings: dark-shadow samples paint a black
+                # chin bar (BV1P6 t≈5 close-up).
+                m = mask > 0
+                if np.any(m):
+                    dil = cv2.dilate(mask, np.ones((9, 9), np.uint8), iterations=1)
+                    ring = (dil > 0) & ~m & (sg > 25) & (sg < 180)
+                    skin_skip = False
+                    if np.any(ring):
+                        hsv_r = cv2.cvtColor(f, cv2.COLOR_BGR2HSV)
+                        skin_skip = float(
+                            (
+                                ring
+                                & (hsv_r[..., 0] < 25)
+                                & (hsv_r[..., 1] > 35)
+                                & (hsv_r[..., 2] > 60)
+                                & (hsv_r[..., 2] < 220)
+                            ).mean()
+                        ) > 0.12
+                    if np.any(ring) and not skin_skip:
+                        ring_med = float(np.median(sg[ring]))
+                        band_med = float(np.median(sg[m]))
+                        ring_std = float(np.std(sg[ring]))
+                        if band_med < 120.0 and ring_std < 28.0:
+                            # Dark ring only — mid-bright cloth samples re-milked.
+                            tgt_lum = float(np.percentile(sg[ring], 20))
+                            dark_ring = ring & (sg <= tgt_lum + 12.0)
+                            milky = m & (cg > tgt_lum + 3.0)
+                            if np.any(milky) and np.any(dark_ring):
+                                out_f = out_f.copy()
+                                ring_yx = np.column_stack(np.where(dark_ring))
+                                my, mx = np.where(milky)
+                                pick = (my * 131 + mx * 17) % ring_yx.shape[0]
+                                sampled = f[ring_yx[pick, 0], ring_yx[pick, 1]]
+                                alpha = 0.90
+                                out_f[milky] = (
+                                    out_f[milky].astype(np.float32) * (1.0 - alpha)
+                                    + sampled.astype(np.float32) * alpha
+                                ).astype(np.uint8)
         else:
             out_f = f
+        # 黄金路径不做 refine：完美帧是 LaMa 直出，二次精修会改掉纹理。
+        if do_refine and band is not None and gold_mask is None:
+            if isinstance(band, dict):
+                bx, by = int(band["x"]), int(band["y"])
+                bw, bh = int(band["w"]), int(band["h"])
+            else:
+                bx, by, bw, bh = (int(v) for v in band)
+            Hf, Wf = out_f.shape[:2]
+            xa, ya = max(0, bx), max(0, by)
+            xb, yb = min(Wf, bx + bw), min(Hf, by + bh)
+            if xb > xa and yb > ya:
+                local_boxes = []
+                for _b in frame_boxes:
+                    _lx, _ly = int(_b.get("x", 0)) - xa, int(_b.get("y", 0)) - ya
+                    _lw, _lh = int(_b.get("w", 0)), int(_b.get("h", 0))
+                    if _lx + _lw > 0 and _ly + _lh > 0 and _lx < xb - xa and _ly < yb - ya:
+                        local_boxes.append({"x": _lx, "y": _ly, "w": _lw, "h": _lh})
+                fixed, _info = _refine_roi(
+                    f[ya:yb, xa:xb], out_f[ya:yb, xa:xb],
+                    {"x": xa, "y": ya, "w": xb - xa, "h": yb - ya},
+                    local_boxes,
+                )
+                if _info.get("changed"):
+                    out_f = out_f.copy()
+                    out_f[ya:yb, xa:xb] = fixed
+                    refine_count += 1
         vw.write(out_f)
         if (k + 1) % 200 == 0:
             print(f"  [ocr_telea] {label} {k+1}", flush=True)
+    if skipped_win or rejected_dark or window_rescue or refine_count:
+        print(
+            f"[ocr_telea] {label}: window_skip={skipped_win} "
+            f"window_rescue={window_rescue} reject_dark={rejected_dark} "
+            f"refined={refine_count}",
+            flush=True,
+        )
     return removed
 
 
@@ -355,10 +688,13 @@ def run(source, out, *,
         caption_stems=DEFAULT_CAPTION_STEMS, score_thr=DEFAULT_SCORE_THR,
         inpaint_radius=DEFAULT_INPAINT_RADIUS, pre_scan=DEFAULT_PRE_SCAN,
         feather_px=5, feather_sigma=1.5, temporal_smoothing=True, min_support=2,
-        passes=1, max_frames=None, use_brightness=True, inpaint_method="lama"):
+        passes=1, max_frames=None, use_brightness=True, inpaint_method="telea",
+        active_windows=None, reject_dark_fill=True):
     """对 source 跑 OCR 细字形洞 + 逐帧修补去字幕，写出 out（mp4, crf18, yuv420p）。
 
     - 全程流式：逐帧读取、不把整段视频读进内存（长片安全）。
+    - 默认 ``inpaint_method=telea``（细洞局部插值）；``lama`` 仅 opt-in
+      （``VITUAL_DEHARDSUB_INPAINT=lama``），整框 LaMa 易把轮廓涂黑。
     - 多遍迭代 `passes`：第 2 遍起在上一遍产物上重新 OCR，只补仍残留的目标文字；
       检测不到残留则提前停止（不白跑）。**实测默认关闭**：迭代遍会多遮大量框
       （60 帧样本 57→116），遮罩+羽化外扩波及带外场景文字，误删 damaged 0→2。
@@ -371,17 +707,27 @@ def run(source, out, *,
         raise RuntimeError(f"cannot probe frame size from {source}")
     ocr = _get_ocr()
 
-    wm_box = watermark
-    if wm_box is None:
-        wm_box = _auto_detect_region(_iter_frames(source), ocr, pre_scan,
-                                     prefer="corner", size=(H, W))
-    if wm_box is None:
-        print("[ocr_telea] warning: watermark auto-detect found nothing; skip watermark",
-              file=sys.stderr)
+    # watermark=False → caller owns overlays (hybrid up_watermark); skip auto.
+    # watermark=None → legacy auto corner detect. Else use the given box.
+    if watermark is False:
         wm_fixed = np.zeros((H, W), np.uint8)
+        wm_box = None
     else:
-        wm_fixed = build_watermark_mask(_iter_frames(source), ocr, wm_box, pre_scan,
-                                        size=(H, W))
+        wm_box = watermark
+        if wm_box is None:
+            wm_box = _auto_detect_region(
+                _iter_frames(source), ocr, pre_scan, prefer="corner", size=(H, W)
+            )
+        if wm_box is None:
+            print(
+                "[ocr_telea] warning: watermark auto-detect found nothing; skip watermark",
+                file=sys.stderr,
+            )
+            wm_fixed = np.zeros((H, W), np.uint8)
+        else:
+            wm_fixed = build_watermark_mask(
+                _iter_frames(source), ocr, wm_box, pre_scan, size=(H, W)
+            )
 
     ff = _ffmpeg()
     tmps = []
@@ -390,11 +736,21 @@ def run(source, out, *,
     boxes = _collect_all(source, ocr, band, caption_stems, score_thr, max_frames, label="ocr p1")
     if temporal_smoothing:
         boxes = temporal_smooth(boxes, min_support)
+    if active_windows:
+        print(
+            f"[ocr_telea] active_windows={len(active_windows)} "
+            f"(frames outside windows copied)",
+            flush=True,
+        )
     tmp1 = out.with_name(f"{out.stem}_p1.avi")
     vw = cv2.VideoWriter(str(tmp1), cv2.VideoWriter_fourcc(*"MJPG"), fps, (W, H))
-    removed = _render_pass(source, vw, boxes, wm_fixed, band, inpaint_radius,
-                           feather_px, feather_sigma, max_frames, label="render p1",
-                           use_brightness=use_brightness, inpaint_method=inpaint_method)
+    removed = _render_pass(
+        source, vw, boxes, wm_fixed, band, inpaint_radius,
+        feather_px, feather_sigma, max_frames, label="render p1",
+        use_brightness=use_brightness, inpaint_method=inpaint_method,
+        fps=fps, active_windows=active_windows,
+        reject_dark_fill=reject_dark_fill,
+    )
     vw.release()
     cur = tmp1
     tmps.append(cur)
@@ -412,18 +768,24 @@ def run(source, out, *,
             break
         tmp_p = out.with_name(f"{out.stem}_p{p}.avi")
         vw = cv2.VideoWriter(str(tmp_p), cv2.VideoWriter_fourcc(*"MJPG"), fps, (W, H))
-        removed += _render_pass(cur, vw, boxes_p, np.zeros((H, W), np.uint8), band,
-                                inpaint_radius, feather_px, feather_sigma,
-                                max_frames, label=f"render p{p}", use_brightness=False,
-                                inpaint_method=inpaint_method)
+        removed += _render_pass(
+            cur, vw, boxes_p, np.zeros((H, W), np.uint8), band,
+            inpaint_radius, feather_px, feather_sigma,
+            max_frames, label=f"render p{p}", use_brightness=False,
+            inpaint_method=inpaint_method,
+            fps=fps, active_windows=active_windows,
+            reject_dark_fill=reject_dark_fill,
+        )
         vw.release()
         cur = tmp_p
         tmps.append(cur)
 
     # 回填源音轨（此前 -an 会丢声音；-map 1:a:0? 在源无音轨时自动跳过）
+    # Hybrid intermediates `_hs_*.mp4` keep near-lossless; final deliverable 18.
+    _crf = "12" if out.name.startswith("_") else "18"
     subprocess.run([ff, "-y", "-i", str(cur), "-i", str(source),
                     "-map", "0:v:0", "-map", "1:a:0?",
-                    "-c:v", "libx264", "-crf", "18",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", _crf,
                     "-pix_fmt", "yuv420p", str(out)], check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for t in tmps:

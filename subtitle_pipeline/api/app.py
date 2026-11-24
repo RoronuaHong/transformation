@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+# Windows: hide ffmpeg/python child console flashes (must patch before workers run).
+import win_no_console  # noqa: F401
+
 import json
 import os
 import subprocess
 import sys
+import time
 import urllib.request
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -22,6 +26,9 @@ from api.settings import Settings, get_settings
 
 _store: MongoStore | None = None
 _scheduler = None
+# Runs started before this instant belong to a prior process; on boot they can
+# never still be in flight, so any left `running` are orphans and get sealed.
+_PROCESS_BOOT_TS = time.time()
 
 
 def store() -> MongoStore:
@@ -60,6 +67,19 @@ async def lifespan(app: FastAPI):
         )
         _store = MemoryStore()
         _store.write_log("info", "api", "ops api started (memory fallback)")
+
+    # Seal runs orphaned by a hard restart of a previous process. Runs started
+    # after our boot ts are untouched (none exist at startup), so a live job can
+    # never be mislabeled.
+    try:
+        sealed = _store.reconcile_stale_runs(_PROCESS_BOOT_TS)
+        if sealed:
+            _store.write_log(
+                "warning", "api", f"sealed {sealed} orphaned run(s) from prior process"
+            )
+    except Exception as e:
+        print(f"WARNING: run reconciliation failed: {e}")
+
     if settings.schedule_enabled and mongo_ready:
         from apscheduler.schedulers.background import BackgroundScheduler
         from apscheduler.triggers.cron import CronTrigger
@@ -842,6 +862,11 @@ class TryUrlsBody(BaseModel):
     media_opts: dict | None = None
 
 
+class TryGroupActionBody(BaseModel):
+    job_ids: list[int] = Field(default_factory=list, max_length=100)
+    action: Literal["delete", "retry"]
+
+
 @app.post("/api/try/probe")
 def try_probe(body: TryProbeBody) -> dict:
     from api.try_service import probe_urls
@@ -1425,6 +1450,25 @@ def try_active(limit: int = 10) -> dict:
     return list_active_try_jobs(limit=limit)
 
 
+@app.get("/api/try/history")
+def try_history(limit: int = 30) -> dict:
+    """Recent try jobs across all statuses (read-only, no stale reaping)."""
+    from api.try_service import list_try_job_history
+
+    return list_try_job_history(limit=limit)
+
+
+@app.post("/api/try/group/action")
+def try_group_action(body: TryGroupActionBody) -> dict:
+    """Delete or re-run the finished jobs of one history group."""
+    from api.try_service import group_action_try_jobs
+
+    out = group_action_try_jobs(body.job_ids, body.action)
+    if not out.get("ok"):
+        raise HTTPException(status_code=409, detail=str(out.get("error") or "operation failed"))
+    return out
+
+
 @app.post("/api/try/queue/pause")
 def try_queue_pause() -> dict:
     from api.try_service import pause_try_queue
@@ -1673,6 +1717,8 @@ def dehardsub_detect(body: DehardsubDetectBody) -> dict:
         "width": payload.get("width"),
         "height": payload.get("height"),
         "boxes": payload.get("boxes") or [],
+        "wipe_plan": payload.get("wipe_plan") or [],
+        "gates": payload.get("gates") or {},
         "dynamic_watermarks": dynamic_wms,
         "preview_b64": b64,
         "preview_mime": "image/jpeg",
@@ -1683,19 +1729,42 @@ def dehardsub_detect(body: DehardsubDetectBody) -> dict:
 def dehardsub_confirm(body: DehardsubConfirmBody, background: BackgroundTasks) -> dict:
     work_dir = _dehardsub_resolve_work_dir(body.work_dir)
     boxes: list[dict[str, Any]] = []
+    explicit_action: list[bool] = []
     for b in body.boxes or []:
         try:
-            boxes.append(
-                {
-                    "x": int(b["x"]),
-                    "y": int(b["y"]),
-                    "w": int(b["w"]),
-                    "h": int(b["h"]),
-                    "role": str(b.get("role") or "dialogue"),
-                }
-            )
+            row = {
+                "x": int(b["x"]),
+                "y": int(b["y"]),
+                "w": int(b["w"]),
+                "h": int(b["h"]),
+                "role": str(b.get("role") or "dialogue"),
+            }
+            has_act = "action" in b and b.get("action") is not None
+            if has_act:
+                act = str(b.get("action") or "remove").strip().lower()
+                if act in ("remove", "keep"):
+                    row["action"] = act
+            boxes.append(row)
+            explicit_action.append(bool(has_act and row.get("action") in ("remove", "keep")))
         except (KeyError, TypeError, ValueError):
             continue
+    # Merge wipe_plan keep only when client omitted action (UI re-enable must win).
+    try:
+        from media_ops import job_dehardsub_dir
+
+        rj = job_dehardsub_dir(work_dir) / "dehardsub_regions.json"
+        if rj.is_file():
+            plan = json.loads(rj.read_text(encoding="utf-8")).get("wipe_plan") or []
+            by_id = {str(t.get("id")): t for t in plan if t.get("id")}
+            for i, b in enumerate(boxes):
+                if i < len(explicit_action) and explicit_action[i]:
+                    continue
+                tid = f"{b.get('role') or 'dialogue'}_{i}"
+                prev = by_id.get(tid)
+                if prev and str(prev.get("action") or "").lower() == "keep":
+                    b["action"] = "keep"
+    except Exception:
+        pass
     if not boxes and not body.dynamic:
         raise HTTPException(status_code=400, detail="no valid boxes or dynamic watermarks")
 
@@ -1714,7 +1783,7 @@ def dehardsub_confirm(body: DehardsubConfirmBody, background: BackgroundTasks) -
         try:
             from media_ops import strip_hardsubs, job_dehardsub_dir
 
-            # Static regions first (multi-pass + STTN), then opt-in moving
+            # Static regions first (hybrid ocr_telea), then opt-in moving
             # watermarks chained per-frame on the result.
             from note_frames import existing_source_video
 
@@ -1727,48 +1796,60 @@ def dehardsub_confirm(body: DehardsubConfirmBody, background: BackgroundTasks) -
                 cur = src_path
                 rep = {"action": "dynamic_only"}
             cur = Path(cur)
+            action_s = str(rep.get("action") or "")
 
             dyn_report: list[dict[str, Any]] = []
-            for i, dyn in enumerate(body.dynamic or []):
-                traj = dyn.get("trajectory") or []
-                if not traj:
-                    continue
-                fps = float(dyn.get("fps") or 25.0) or 25.0
-                dw_w = int(dyn.get("width") or 0)
-                dw_h = int(dyn.get("height") or 0)
-                if not dw_w or not dw_h:
-                    from media_ops import probe_video_wh
+            # gates_blocked / all-keep: do not chain dyn/repair on a non-clean.
+            if action_s not in ("gates_blocked", "wipe_plan_all_keep", "copy_no_regions"):
+                for i, dyn in enumerate(body.dynamic or []):
+                    traj = dyn.get("trajectory") or []
+                    if not traj:
+                        continue
+                    fps = float(dyn.get("fps") or 25.0) or 25.0
+                    dw_w = int(dyn.get("width") or 0)
+                    dw_h = int(dyn.get("height") or 0)
+                    if not dw_w or not dw_h:
+                        from media_ops import probe_video_wh
 
-                    dw_w, dw_h = probe_video_wh(cur)
-                from dynamic_watermark import strip_moving_watermark
+                        dw_w, dw_h = probe_video_wh(cur)
+                    from dynamic_watermark import strip_moving_watermark
 
-                nxt = job_dehardsub_dir(work_dir) / f"_dyn_{i}.mp4"
-                strip_moving_watermark(
-                    cur, nxt, traj, fps=fps, width=dw_w, height=dw_h
-                )
-                cur = nxt
-                dyn_report.append(
-                    {"motion_px": dyn.get("motion_px"), "frames": len(traj)}
-                )
+                    nxt = job_dehardsub_dir(work_dir) / f"_dyn_{i}.mp4"
+                    strip_moving_watermark(
+                        cur, nxt, traj, fps=fps, width=dw_w, height=dw_h
+                    )
+                    cur = nxt
+                    dyn_report.append(
+                        {"motion_px": dyn.get("motion_px"), "frames": len(traj)}
+                    )
 
-            # Self-check → repair loop: re-scan the output and inpaint ONLY the
-            # frames the gate flags as residual (clean still holds the source's
-            # text-edge energy). Other frames pass through untouched, so a frame
-            # the main pass already fixed can never be degraded.
-            if body.repair:
-                dlg_box = next(
-                    (b for b in boxes if b.get("role") == "dialogue"), None
-                )
-                if dlg_box and src_path.is_file():
-                    from residual_repair import scan_and_repair
+                # Extra residual pass only on dialogue tracks still marked remove.
+                # Hybrid already ran scan_and_repair; skip keep / filtered dialogue.
+                if body.repair:
+                    dlg_box = next(
+                        (
+                            b
+                            for b in boxes
+                            if b.get("role") == "dialogue"
+                            and str(b.get("action") or "remove").lower() != "keep"
+                        ),
+                        None,
+                    )
+                    if dlg_box and src_path.is_file():
+                        from residual_repair import scan_and_repair
 
-                    cur, repaired = scan_and_repair(src_path, cur, dlg_box)
-                    if repaired:
-                        dyn_report.append({"residual_repaired": len(repaired)})
-                        print(
-                            f"[dehardsub] residual repair: {len(repaired)} frame(s)",
-                            flush=True,
+                        cur, repaired, _rmeta = scan_and_repair(
+                            src_path, cur, dlg_box
                         )
+                        if repaired:
+                            dyn_report.append(
+                                {"residual_repaired": len(repaired)}
+                            )
+                            print(
+                                f"[dehardsub] residual repair: "
+                                f"{len(repaired)} frame(s)",
+                                flush=True,
+                            )
 
             rel = cur.resolve().relative_to(work_dir.resolve()).as_posix()
             from urllib.parse import quote as _quote
@@ -1776,16 +1857,32 @@ def dehardsub_confirm(body: DehardsubConfirmBody, background: BackgroundTasks) -
             url = f"/api/try/dehardsub/asset?work_dir={_quote(body.work_dir)}&rel={_quote(rel)}"
             report = {
                 k: rep.get(k)
-                for k in ("action", "box_roles", "box_source", "pass_stats")
+                for k in (
+                    "action",
+                    "box_roles",
+                    "box_source",
+                    "pass_stats",
+                    "quality",
+                    "quality_note",
+                    "wipe_plan",
+                    "gates",
+                    "qa_flags",
+                    "active_windows",
+                    "postfix",
+                    "review",
+                )
             }
             if dyn_report:
                 report["dynamic"] = dyn_report
+            task_status = (
+                "blocked" if action_s == "gates_blocked" else "done"
+            )
             with _DEHARDSUB_LOCK:
                 _DEHARDSUB_TASKS[task_id].update(
                     {
-                        "status": "done",
+                        "status": task_status,
                         "result_rel": rel,
-                        "result_url": url,
+                        "result_url": url if task_status == "done" else None,
                         "report": report,
                     }
                 )
@@ -1797,6 +1894,136 @@ def dehardsub_confirm(body: DehardsubConfirmBody, background: BackgroundTasks) -
 
     background.add_task(_run)
     return {"ok": True, "task_id": task_id}
+
+
+class BatchDehardsubConfirmBody(BaseModel):
+    boxes: list[dict[str, Any]] | None = Field(
+        default=None,
+        description="optional edited boxes; omitted = accept detected boxes as-is",
+    )
+
+
+@app.post("/api/jobs/{job_id}/dehardsub/confirm")
+def batch_dehardsub_confirm(job_id: int, body: BatchDehardsubConfirmBody) -> dict:
+    """Confirm a batch job parked in ``awaiting_confirm`` and requeue it."""
+    import time as _time
+
+    from api.try_service import WORK_ROOT
+    from discover.queue_db import QueueDB
+    from discover.run_batch import _job_work_dir
+    from media_ops import job_dehardsub_dir
+
+    db = QueueDB()
+    try:
+        job = db.get_job(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"job {job_id} not found")
+        work_dir = _job_work_dir(
+            Path(WORK_ROOT), str(job["platform"]), str(job["video_id"])
+        )
+        regions = job_dehardsub_dir(work_dir) / "dehardsub_regions.json"
+        if not regions.is_file():
+            raise HTTPException(
+                status_code=409, detail="no dehardsub_regions.json; detect did not run"
+            )
+        try:
+            payload = json.loads(regions.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=500, detail=f"bad regions json: {exc}") from None
+        from media_ops import build_dehardsub_gates, build_wipe_plan, probe_duration_sec
+        from note_frames import existing_source_video
+
+        if body.boxes is not None:
+            cleaned: list[dict[str, Any]] = []
+            for b in body.boxes:
+                try:
+                    row = {
+                        "x": int(b["x"]),
+                        "y": int(b["y"]),
+                        "w": int(b["w"]),
+                        "h": int(b["h"]),
+                        "role": str(b.get("role") or "dialogue"),
+                    }
+                    if "action" in b and b.get("action") is not None:
+                        act = str(b.get("action") or "remove").strip().lower()
+                        if act in ("remove", "keep"):
+                            row["action"] = act
+                    cleaned.append(row)
+                except (KeyError, TypeError, ValueError):
+                    continue
+            if not cleaned:
+                raise HTTPException(status_code=400, detail="no valid boxes")
+            payload["boxes"] = cleaned
+        boxes = list(payload.get("boxes") or [])
+        src = existing_source_video(work_dir)
+        if src is not None and src.is_file() and boxes:
+            gates = build_dehardsub_gates(src, boxes)
+            payload["gates"] = {
+                "ok": bool(gates.get("ok")),
+                "top_min_h_ok": bool(gates.get("top_min_h_ok")),
+                "outside_box_bright_blobs": int(
+                    gates.get("outside_box_bright_blobs") or 0
+                ),
+                "reasons": list(gates.get("reasons") or []),
+                "spill_warnings": gates.get("spill_warnings") or [],
+            }
+            if gates.get("boxes_normalized"):
+                boxes = list(gates["boxes_normalized"])
+                # Preserve actions by index when possible.
+                for i, b in enumerate(boxes):
+                    if i < len(payload["boxes"]) and payload["boxes"][i].get("action"):
+                        b["action"] = payload["boxes"][i]["action"]
+                payload["boxes"] = boxes
+            if not gates.get("ok"):
+                payload["confirmed"] = False
+                regions.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "gates_blocked",
+                        "reasons": gates.get("reasons") or [],
+                    },
+                )
+            dur = float(probe_duration_sec(src) or 0.0)
+            prev_plan = {
+                str(t.get("id")): t
+                for t in (payload.get("wipe_plan") or [])
+                if t.get("id")
+            }
+            wipe_plan = build_wipe_plan(boxes, duration_sec=dur)
+            for t in wipe_plan:
+                prev = prev_plan.get(str(t.get("id")))
+                if prev and str(prev.get("action") or "").lower() in (
+                    "remove",
+                    "keep",
+                ):
+                    t["action"] = str(prev.get("action")).lower()
+                if t["action"] == "keep":
+                    try:
+                        idx = int(str(t["id"]).rsplit("_", 1)[-1])
+                        if 0 <= idx < len(boxes):
+                            boxes[idx]["action"] = "keep"
+                    except ValueError:
+                        pass
+            payload["wipe_plan"] = wipe_plan
+            payload["boxes"] = boxes
+        payload["confirmed"] = True
+        payload["confirmed_at"] = _time.strftime("%Y-%m-%dT%H:%M:%S")
+        regions.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        requeued = db.requeue_job(job_id)
+        return {
+            "ok": bool(requeued),
+            "job_id": job_id,
+            "status": "pending" if requeued else str(job["status"]),
+            "boxes": payload["boxes"],
+        }
+    finally:
+        db.close()
 
 
 @app.get("/api/try/dehardsub/status/{task_id}")

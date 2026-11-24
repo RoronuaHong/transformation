@@ -21,11 +21,42 @@ import warnings
 from pathlib import Path
 from typing import Any
 
+def replace_file_robust(src: Path, dst: Path) -> None:
+    """Replace dst even when a stale reader holds it without FILE_SHARE_DELETE.
+
+    Windows `Path.replace` needs DELETE access on dst; a player/UI that opened
+    the video with read+write share but not delete-share makes it fail with
+    WinError 5. Opening for write usually still works, so copy in place as a
+    fallback (this is what lets the dehardsub frame-align land clean.mp4).
+    """
+    import shutil
+
+    try:
+        src.replace(dst)
+        return
+    except OSError:
+        pass
+    with src.open("rb") as fsrc, dst.open("r+b") as fdst:
+        fdst.seek(0)
+        shutil.copyfileobj(fsrc, fdst)
+        fdst.truncate()
+    src.unlink(missing_ok=True)
+
+
 STTN_W = 432
 STTN_H = 240
 REF_LENGTH = 10
 NEIGHBOR_STRIDE = 5
 MAX_LOAD = max(6, int(os.environ.get("VITUAL_STTN_MAX_LOAD", "12") or 12))
+# glyph_black is only safe on a near-uniform opaque plate. A dark textured
+# scene with white subtitles passes the "black bar" detector but painting every
+# >35-gray pixel black destroys the frame (实测 BV1P6N76qEuJ).
+GLYPH_BLACK_PLATE_STD_MAX = float(
+    os.environ.get("VITUAL_GLYPH_BLACK_STD_MAX", "13") or 13
+)
+GLYPH_BLACK_MAX_KILL_FRAC = float(
+    os.environ.get("VITUAL_GLYPH_BLACK_MAX_KILL_FRAC", "0.35") or 0.35
+)
 
 
 def band_is_flat(bgr: Any, box: dict[str, int]) -> bool:
@@ -298,6 +329,7 @@ def classify_dialogue_route(
     checked = 0
     found_boxes: list[dict[str, int]] = []
     band_medians: list[float] = []
+    plate_stds: list[float] = []
     try:
         for idx in idxs:
             cap.set(cv2.CAP_PROP_POS_FRAMES, float(idx))
@@ -324,6 +356,12 @@ def classify_dialogue_route(
                 # through a translucent bar, vs. thin white strokes). Aggregated
                 # below with band_med to flag semi-transparent bars.
                 bright_fracs.append(float((roi_gray > 130).mean()))
+                # Background texture gate for glyph_black. A true opaque plate
+                # has a near-constant dark fill; a dark scene with white glyphs
+                # keeps real midtone texture and must not be painted black.
+                bg_px = roi_gray[roi_gray <= 140]
+                if bg_px.size >= 64:
+                    plate_stds.append(float(np.std(bg_px)))
                 # 平色背景检测（spatial_fill 路由）：字幕压在纯平色底上时，
                 # STTN 时序取材会产生鬼影（同句字幕持续 ~3s，邻帧全有字），
                 # 逐帧空间填充才是对的。判据：高饱和亮色占 ROI>25%（有主导
@@ -389,6 +427,8 @@ def classify_dialogue_route(
 
     band_med = float(np.median(band_medians)) if band_medians else 255.0
     bright_frac = float(np.mean(bright_fracs)) if bright_fracs else 0.0
+    plate_std = float(np.median(plate_stds)) if plate_stds else 0.0
+    black_plate_like = black_hits >= need and band_med <= 120
     # A semi-transparent bar = dark translucent bar (median <=120) with footage
     # bleeding through (a large bright share, well beyond thin white strokes). It
     # is neither an opaque black plate (glyph_black) nor a pure flat bar
@@ -396,8 +436,12 @@ def classify_dialogue_route(
     semi_transparent = band_med <= 120 and bright_frac > 0.25
     if semi_transparent:
         route = "tiles"
-    elif black_hits >= need and band_med <= 120:
+    elif black_plate_like and plate_std <= GLYPH_BLACK_PLATE_STD_MAX:
         route = "glyph_black"
+    elif black_plate_like:
+        # Dark TEXTURED scene (not a flat plate) carrying white glyphs. Painting
+        # >35-gray pixels black here destroys the frame -> OCR+TELEA route.
+        route = "tiles"
     elif bg_flat_hits >= need:
         # 亮色平底上的烧录字幕：逐帧空间填充（STTN 时序取材会鬼影）。
         route = "spatial_fill"
@@ -412,6 +456,8 @@ def classify_dialogue_route(
         "box": tight,
         "seed_box": seed,
         "band_med_gray": band_med,
+        "plate_std_gray": plate_std,
+        "black_plate_like": bool(black_plate_like),
         "black_hits": int(black_hits),
         "flat_hits": int(flat_hits),
         "glyph_flat_hits": int(glyph_flat_hits),
@@ -520,6 +566,53 @@ def _glyph_black_kill_masks_torch(
     )
     full[:, y0:y1, x0:x1] = kill_b
     return full, counts
+
+
+def glyph_black_would_flood(
+    video: Any,
+    box: dict[str, int],
+    *,
+    samples: int = 5,
+    max_frac: float | None = None,
+) -> bool:
+    """Preflight: True when glyph_black would paint too much of the band.
+
+    The GPU kill rule (``roi > 35`` on near-black rows) can turn an entire dark
+    scene band solid black when the route classifier is wrong. Refuse that
+    route before writing any frame.
+    """
+    import cv2
+    import numpy as np
+
+    limit = GLYPH_BLACK_MAX_KILL_FRAC if max_frac is None else float(max_frac)
+    cap = cv2.VideoCapture(str(video))
+    if not cap.isOpened():
+        return False
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    idxs = (
+        [0]
+        if n <= 1
+        else [int(round(i * (n - 1) / max(1, samples - 1))) for i in range(samples)]
+    )
+    frames: list[Any] = []
+    try:
+        for idx in idxs:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, float(idx))
+            ok, fr = cap.read()
+            if ok:
+                frames.append(fr)
+    finally:
+        cap.release()
+    if not frames:
+        return False
+    arr = np.stack(frames, axis=0)
+    plate = _resolve_glyphfill_plate(
+        arr[0], box, height=arr.shape[1], width=arr.shape[2]
+    )
+    kill, counts = _glyph_black_kill_masks_torch(arr, plate, "cpu")
+    del kill
+    area = max(1, int(plate["w"]) * int(plate["h"]))
+    return bool(np.any(np.asarray(counts).reshape(-1) / area > limit))
 
 
 def encode_glyph_black_fill(
@@ -875,7 +968,7 @@ def encode_dialogue_spatial_fill(
             errors="replace",
         )
         if _fixed.is_file() and _fixed.stat().st_size > 800:
-            _fixed.replace(dest_p)
+            replace_file_robust(_fixed, dest_p)
         else:
             print(
                 f"[spatialfill] frame-align warn: trim to {frames} failed: {(_r.stderr or '')[-200:]}",
@@ -1034,13 +1127,14 @@ _VIDEO_ENC_CACHE: dict = {}
 _VIDEO_ENC_LOCK = None  # 懒加载 threading，避免顶层开销
 
 
-def _video_encoder_for(ffmpeg: str, w: int, h: int) -> tuple[str, list[str]]:
-    """选取 H.264 编码器与码控参数（质量对标 libx264 -crf 18）。
+def _video_encoder_for(
+    ffmpeg: str, w: int, h: int, *, crf: int = 18
+) -> tuple[str, list[str]]:
+    """选取 H.264 编码器与码控参数（默认质量对标 libx264 -crf 18）。
 
-    优先 ``h264_nvenc``（GPU 编码，省 CPU 帧 I/O 瓶颈）；若本机不可用
-    （缺驱动/分辨率过小/会话超限）则自动回退 ``libx264``。可用环境变量
-    ``VITUAL_VIDEO_ENCODER`` 强制：``nvenc`` / ``libx264`` / ``auto``（默认）。
-    结果按 (ffmpeg, w, h) 缓存，避免逐段重复探测。
+    ``crf`` 更低 → 更接近无损（中间片建议 12，最终交付 18）。优先
+    ``h264_nvenc``；不可用则回退 ``libx264``。``VITUAL_VIDEO_ENCODER`` 可强制
+    ``nvenc`` / ``libx264`` / ``auto``。缓存键含 crf。
     """
     import os
     import threading
@@ -1048,17 +1142,18 @@ def _video_encoder_for(ffmpeg: str, w: int, h: int) -> tuple[str, list[str]]:
     global _VIDEO_ENC_LOCK
     if _VIDEO_ENC_LOCK is None:
         _VIDEO_ENC_LOCK = threading.Lock()
-    key = (ffmpeg, int(w or 0), int(h or 0))
+    crf_i = max(10, min(28, int(crf)))
+    key = (ffmpeg, int(w or 0), int(h or 0), crf_i)
     with _VIDEO_ENC_LOCK:
         cached = _VIDEO_ENC_CACHE.get(key)
         if cached is not None:
             return cached
-    libx264 = ("libx264", ["-preset", "veryfast", "-crf", "18"])
+    libx264 = ("libx264", ["-preset", "veryfast", "-crf", str(crf_i)])
     override = (os.environ.get("VITUAL_VIDEO_ENCODER") or "auto").strip().lower()
     if override == "libx264":
         res = libx264
     else:
-        res = _try_nvenc(ffmpeg, w, h) or libx264
+        res = _try_nvenc(ffmpeg, w, h, crf=crf_i) or libx264
         if override == "nvenc" and res[0] != "h264_nvenc":
             print("[encoder] VITUAL_VIDEO_ENCODER=nvenc 不可用，回退 libx264", flush=True)
     with _VIDEO_ENC_LOCK:
@@ -1066,16 +1161,17 @@ def _video_encoder_for(ffmpeg: str, w: int, h: int) -> tuple[str, list[str]]:
     return res
 
 
-def _try_nvenc(ffmpeg: str, w: int, h: int):
+def _try_nvenc(ffmpeg: str, w: int, h: int, *, crf: int = 18):
     """自测 h264_nvenc 能否在本机真实编码该分辨率；成功返回 (codec, 码控参数)。"""
     import subprocess
 
+    cq = max(10, min(28, int(crf)))
     tw, th = max(2, (int(w or 2) // 2) * 2), max(2, (int(h or 2) // 2) * 2)
     probe = [
         ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
         "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{tw}x{th}",
         "-i", "pipe:0", "-c:v", "h264_nvenc", "-preset", "p1",
-        "-rc", "vbr", "-cq", "18", "-pix_fmt", "yuv420p", "-f", "mp4", "-",
+        "-rc", "vbr", "-cq", str(cq), "-pix_fmt", "yuv420p", "-f", "mp4", "-",
     ]
     try:
         payload = b"\x80\x80\x80" * (tw * th) + b"\x10\x10\x10" * (tw * th)  # 2 帧
@@ -1088,7 +1184,7 @@ def _try_nvenc(ffmpeg: str, w: int, h: int):
         )
         if v.returncode != 0:
             return None
-        return ("h264_nvenc", ["-preset", "p1", "-rc", "vbr", "-cq", "18"])
+        return ("h264_nvenc", ["-preset", "p1", "-rc", "vbr", "-cq", str(cq)])
     except Exception:
         return None
 
@@ -1099,10 +1195,30 @@ def _open_ffmpeg_writer(
     frame_w: int,
     frame_h: int,
     fps: float,
+    *,
+    crf: int | None = None,
 ) -> Any:
     from media_ops import DEFAULT_AUDIO_K, find_ffmpeg, has_audio_stream
 
     ffmpeg = find_ffmpeg()
+    # D13: temp/`_*` intermediates use near-lossless crf12; final deliverable 18.
+    is_intermediate = Path(dest).name.startswith("_")
+    if crf is None:
+        crf = 12 if is_intermediate else 18
+    # BV1P6 (2026-11-19): dehardsub chains ~9 full-frame re-encodes. bgr24<->
+    # yuv420p's limited-range round-trip loses ~1.9 luma/encode (crf-independent,
+    # confirmed crf=0 still drifts): 9 encodes turned face mean 74.7->57.5.
+    # Intermediates therefore use yuv444p + full range (~0 drift over 9 encodes);
+    # only the final deliverable stays yuv420p for player compatibility.
+    # IMPORTANT: do NOT tag -colorspace/-primaries/-trc here — x264 converts
+    # bgr24 with its default (bt601) matrix, so a bt709 tag makes decoders use a
+    # mismatched matrix and drops ~1.33 luma/encode. Tag -color_range pc only.
+    # Override via env for A/B.
+    env_pix = (os.environ.get("VITUAL_INTERMEDIATE_PIXFMT") or "").strip().lower()
+    if is_intermediate:
+        pix_fmt = env_pix or "yuv444p"
+    else:
+        pix_fmt = "yuv420p"
     # ~1s keyframes so the first media fragment lands quickly (fMP4 playability).
     gop = max(12, min(60, int(round(float(fps) or 25.0)) or 25))
     cmd = [
@@ -1130,8 +1246,15 @@ def _open_ffmpeg_writer(
         cmd.extend(["-map", "1:a:0?", "-c:a", "aac", "-b:a", f"{DEFAULT_AUDIO_K}k"])
     else:
         cmd.append("-an")
-    codec, enc_args = _video_encoder_for(ffmpeg, frame_w, frame_h)
-    cmd.extend(["-c:v", codec, *enc_args, "-pix_fmt", "yuv420p"])
+    codec, enc_args = _video_encoder_for(ffmpeg, frame_w, frame_h, crf=int(crf))
+    cmd.extend(["-c:v", codec, *enc_args, "-pix_fmt", pix_fmt])
+    if is_intermediate:
+        # Full-range tag matches yuv444p's data; NO colorspace/primaries/trc —
+        # those must match x264's actual conversion matrix (bt601 default), else
+        # every decode drifts darker (measured -1.33 luma/encode with a bt709 tag).
+        cmd.extend(["-color_range", "pc"])
+    # Final deliverable: leave color metadata at ffmpeg default (no explicit tag),
+    # which is what all pre-fix deliverables used and players decode consistently.
     cmd.extend(
         [
             "-g",
@@ -1201,9 +1324,9 @@ def _finalize_writing_mp4(writing: Path, dest: Path) -> None:
     last_err: OSError | None = None
     for _ in range(8):
         try:
-            if dest.is_file():
-                dest.unlink()
-            move_from.replace(dest)
+            # 2026-11-22: dest.unlink() 需要 DELETE 权限，播放器/UI 持有
+            # clean.mp4 时会 WinError 5；用 robust 原地 copy 兜底。
+            replace_file_robust(move_from, dest)
             last_err = None
             break
         except OSError as exc:

@@ -836,6 +836,38 @@ ROOT = Path(__file__).resolve().parents[1]
 WORK_ROOT = ROOT / "downloads" / "batch"
 SITE_PUBLIC = ROOT.parent / "transform" / "public"
 SITE_FRAMES = SITE_PUBLIC / "frames"
+ARTICLES_JSON = ROOT.parent / "transform" / "content" / "articles.json"
+
+# history 的笔记链接必须指向已导出的文章，否则点开即 404。
+# articles.json 约 800KB，按 mtime 缓存，仅在导出更新时重读。
+_exported_slugs_cache: tuple[float, frozenset[str]] | None = None
+_exported_slugs_lock = threading.Lock()
+
+
+def _exported_article_slugs() -> frozenset[str]:
+    global _exported_slugs_cache
+    try:
+        mtime = ARTICLES_JSON.stat().st_mtime
+    except OSError:
+        return frozenset()
+    cached = _exported_slugs_cache
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    with _exported_slugs_lock:
+        cached = _exported_slugs_cache
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+        try:
+            payload = json.loads(ARTICLES_JSON.read_text(encoding="utf-8"))
+            slugs = frozenset(
+                str(a.get("slug") or "")
+                for a in (payload.get("articles") or [])
+                if a.get("slug")
+            )
+        except (OSError, ValueError, TypeError):
+            slugs = frozenset()
+        _exported_slugs_cache = (mtime, slugs)
+        return slugs
 
 _queue_paused = False
 _cancel_requested: set[int] = set()
@@ -1039,10 +1071,22 @@ def build_try_pack_zip(job_id: int) -> tuple[bytes, str]:
         queue.close()
 
 
+# infer_try_progress / stale reaper / history 都会调用 _latest_mtime，
+# 前端 3~5s 轮询一次。短 TTL 缓存避免每次递归 stat 整个工作目录（含视频/frames）。
+_latest_mtime_cache: dict[str, tuple[float, float | None]] = {}
+_LATEST_MTIME_TTL = 2.0
+
+
 def _latest_mtime(root: Path) -> float | None:
+    key = str(root)
+    now = time.monotonic()
+    cached = _latest_mtime_cache.get(key)
+    if cached is not None and now - cached[0] < _LATEST_MTIME_TTL:
+        return cached[1]
     if not root.is_dir():
+        _latest_mtime_cache[key] = (now, None)
         return None
-    latest = None
+    latest: float | None = None
     for p in root.rglob("*"):
         if p.is_file():
             try:
@@ -1051,6 +1095,7 @@ def _latest_mtime(root: Path) -> float | None:
                 continue
             if latest is None or mt > latest:
                 latest = mt
+    _latest_mtime_cache[key] = (now, latest)
     return latest
 
 
@@ -1078,6 +1123,43 @@ def infer_work_source_lang(work: Path, srts: dict[str, Path]) -> str:
     if srts:
         return coalesce_source_lang(next(iter(srts)))
     return "en"
+
+
+def _eta_sec_from_progress(progress: dict | None, created_at: object) -> int | None:
+    """Linear ETA from elapsed / percent. None when too early or terminal.
+
+    Skips absurd ETAs from stale ``created_at`` (requeue before created_at reset).
+    """
+    if not isinstance(progress, dict):
+        return None
+    stage = str(progress.get("stage") or "")
+    if stage in ("queued", "done", "failed", "cancelled", "dead"):
+        return None
+    try:
+        pct = float(progress.get("percent") or 0)
+        started = float(created_at)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if pct < 5.0 or started <= 0:
+        return None
+    elapsed = time.time() - started
+    if elapsed < 8.0:
+        return None
+    # >6h clock with mid progress almost always means reused created_at.
+    if elapsed > 6 * 3600 and pct < 95.0:
+        return None
+    eta = int(elapsed * (100.0 - min(pct, 99.5)) / pct)
+    if eta > 12 * 3600:
+        return None
+    return max(0, eta)
+
+
+def _with_eta(progress: dict | None, created_at: object) -> dict | None:
+    if not isinstance(progress, dict):
+        return progress
+    out = dict(progress)
+    out["eta_sec"] = _eta_sec_from_progress(out, created_at)
+    return out
 
 
 def infer_try_progress(
@@ -1454,6 +1536,100 @@ def retry_try_job(job_id: int) -> dict:
         kick_try_scheduler()
 
 
+def group_action_try_jobs(job_ids: list[int], action: str) -> dict:
+    """Delete or re-run a batch of finished jobs (one history group in the UI)."""
+    ids = sorted(
+        {
+            int(i)
+            for i in (job_ids or [])
+            if isinstance(i, (int, float)) and int(i) > 0
+        }
+    )
+    if not ids or len(ids) > 100:
+        return {"ok": False, "error": "invalid job selection"}
+    if action not in ("delete", "retry"):
+        return {"ok": False, "error": "unknown action"}
+
+    queue = QueueDB()
+    terminal = ("done", "published", "failed", "dead", "cancelled", "partial")
+    try:
+        rows = []
+        for jid in ids:
+            row = queue.get_job(jid)
+            if row is not None:
+                rows.append(row)
+        if not rows:
+            return {"ok": False, "error": "任务不存在"}
+
+        targets = rows
+        if action == "delete":
+            # Deleting an upstream workflow would leave downstream jobs waiting
+            # on a dependency that can never be satisfied. Cascade to them.
+            # sqlite3.Row has no .get() — always index columns.
+            by_id = {int(r["id"]): r for r in rows}
+            for pack in {str(r["pack_id"] or "") for r in rows if r["pack_id"]}:
+                for sibling in queue.list_pack_jobs(pack):
+                    by_id.setdefault(int(sibling["id"]), sibling)
+            target_ids = {int(r["id"]) for r in targets}
+            queue_ids = [int(r["id"]) for r in rows]
+            while queue_ids:
+                cur = queue_ids.pop()
+                cur_row = by_id.get(cur)
+                if cur_row is None:
+                    continue
+                cur_wf = str(cur_row["workflow"] or "")
+                if not cur_wf:
+                    continue
+                for sid, sibling in by_id.items():
+                    if sid in queue_ids or sid == cur or sid in target_ids:
+                        continue
+                    deps = _job_meta_dict(sibling).get("depends_on") or []
+                    if cur_wf in deps:
+                        targets.append(sibling)
+                        target_ids.add(sid)
+                        queue_ids.append(sid)
+            targets = [by_id[i] for i in target_ids if i in by_id]
+
+        active = [
+            int(r["id"])
+            for r in targets
+            if _is_active_job(int(r["id"]))
+            or str(r["status"] or "") in ("processing", "pending", "awaiting_confirm")
+        ]
+        if active:
+            return {
+                "ok": False,
+                "error": "有任务仍在进行中，请稍后再试",
+                "active_job_ids": active,
+            }
+
+        changed: list[int] = []
+        if action == "delete":
+            for row in targets:
+                jid = int(row["id"])
+                if queue.delete_job(jid, allow_statuses=terminal):
+                    changed.append(jid)
+        else:
+            for row in targets:
+                jid = int(row["id"])
+                if not queue.requeue_job(jid, allow_done=True):
+                    continue
+                _cancel_requested.discard(jid)
+                changed.append(jid)
+                meta = _job_meta_dict(queue.get_job(jid) or row)
+                stages = {p.strip() for p in str(meta.get("stages") or "").split(",") if p.strip()}
+                if "asr" in stages:
+                    queue.set_meta(jid, {"depends_on_artifacts": []})
+
+        if not changed:
+            return {"ok": False, "error": "没有可操作的任务"}
+        return {"ok": True, "action": action, "job_ids": changed, "count": len(changed)}
+    finally:
+        queue.close()
+        if action == "retry":
+            kick_try_scheduler()
+
+
 def reap_stale_try_jobs(*, stale_sec: int = _STALE_SEC) -> int:
     """Mark orphaned processing try jobs as failed after API restart or timeout.
 
@@ -1527,6 +1703,88 @@ def list_active_try_jobs(*, limit: int = 10) -> dict:
         }
     finally:
         queue.close()
+
+
+def list_try_job_history(*, limit: int = 30) -> dict:
+    """Recent jobs across all statuses for the workbench history list.
+
+    Read-only: unlike ``list_active_try_jobs`` this does NOT call the stale
+    reaper / step-reset, so manual CLI jobs (priority=normal, status=processing)
+    are never mis-marked as failed just by viewing the history. Progress is
+    inferred from on-disk products (same source as the live poll) so in-flight
+    dehardsub / run_postproc jobs show a % and stage.
+    """
+    queue = QueueDB()
+    content: ContentDB | None = None
+    try:
+        content = ContentDB()
+        exported_slugs = _exported_article_slugs()
+        rows = queue.list_jobs(limit=max(1, min(int(limit), 100)))
+        jobs: list[dict] = []
+        now = time.time()
+        for row in rows:
+            jid = int(row["id"])
+            st = str(row["status"] or "pending")
+            wf = _job_workflow(row)
+            platform = str(row["platform"] or "")
+            video_id = str(row["video_id"] or "")
+            work = _work_dir(platform, video_id)
+            title = _source_title(platform, video_id, str(row["title"] or ""), content)
+            if not title:
+                prefix = {
+                    "cancelled": "已取消任务",
+                    "failed": "失败任务",
+                    "dead": "失败任务",
+                    "partial": "部分完成任务",
+                }.get(st, "任务")
+                title = f"{prefix} · {video_id}" if video_id else f"{prefix} #{jid}"
+
+            progress: dict | None = None
+            if st in ("done", "published"):
+                progress = {"percent": 100, "stage": "done", "active": False, "stale": False, "updated_sec_ago": None}
+            elif st in ("failed", "dead", "cancelled"):
+                progress = {"percent": 0, "stage": st, "active": False, "stale": True, "updated_sec_ago": None}
+            elif wf and wf != "all":
+                progress = infer_workflow_progress(wf, st, work, active=False)
+            elif st in ("pending", "processing", "partial"):
+                progress = infer_try_progress(
+                    platform, video_id, st, langs=job_langs(row), job_id=jid
+                )
+
+            last_error = row["last_error"]
+            # 终态任务带上笔记链接，UI 的「已完成」列表无需展开即可打开。
+            path = None
+            if st in ("done", "published"):
+                try:
+                    article = _article_for_job(content, platform, video_id)
+                    # 只给已导出的文章生成链接，避免点开 404。
+                    if article and article["slug"] in exported_slugs:
+                        path = f"/topics/{article['topic']}/{article['slug']}"
+                except Exception:
+                    path = None
+            jobs.append(
+                {
+                    "job_id": jid,
+                    "status": st,
+                    "workflow": wf,
+                    "title": title,
+                    "platform": platform,
+                    "video_id": video_id,
+                    "priority": str(row["priority"] or "normal"),
+                    "pack_id": str(row["pack_id"] or "") or None,
+                    "error": str(last_error) if last_error else None,
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                    "updated_sec_ago": max(0, int(now - float(row["updated_at"] or now))),
+                    "progress": _with_eta(progress, row["created_at"]),
+                    "path": path,
+                }
+            )
+        return {"ok": True, "jobs": jobs, "count": len(jobs)}
+    finally:
+        queue.close()
+        if content is not None:
+            content.close()
 
 
 def list_try_job_steps(job_id: int) -> dict:
@@ -1957,6 +2215,44 @@ def _article_for_job(content: ContentDB, platform: str, video_id: str) -> dict |
     }
 
 
+def _source_title(
+    platform: str,
+    video_id: str,
+    fallback: str = "",
+    content: ContentDB | None = None,
+) -> str:
+    """Original source video title, instead of queue labels like try:bilibili:BV…."""
+    if not video_id:
+        return str(fallback or "").strip()
+
+    def usable(value: object) -> str:
+        title = str(value or "").strip()
+        if not title or title.startswith("try:") or title.lower().startswith("http"):
+            return ""
+        return title
+
+    meta_path = _work_dir(platform, video_id) / "media" / "fetch_meta.json"
+    if meta_path.is_file():
+        try:
+            title = usable(json.loads(meta_path.read_text(encoding="utf-8-sig")).get("title"))
+            if title:
+                return title
+        except (TypeError, ValueError, json.JSONDecodeError, OSError):
+            pass
+    if content is not None:
+        try:
+            row = content._conn.execute(
+                "SELECT title_src FROM articles WHERE platform=? AND video_id=?",
+                (platform, video_id),
+            ).fetchone()
+            title = usable(row["title_src"]) if row else ""
+            if title:
+                return title
+        except Exception:
+            pass
+    return usable(fallback)
+
+
 def _jobs_ahead(queue: QueueDB, job_id: int) -> int:
     """How many try jobs are ahead of this one (processing + earlier pending)."""
     row = queue.get_job(job_id)
@@ -2044,15 +2340,9 @@ def _queue_ahead(queue: QueueDB, job_id: int, status: str) -> dict | None:
         return None
     plat = ahead_job["platform"]
     vid = ahead_job["video_id"]
-    title = str(ahead_job["title"] or "")
-    meta_path = _work_dir(plat, vid) / "media" / "fetch_meta.json"
-    if meta_path.is_file():
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8-sig"))
-            if meta.get("title"):
-                title = str(meta["title"])
-        except (TypeError, ValueError, json.JSONDecodeError, OSError):
-            pass
+    title = _source_title(plat, vid, str(ahead_job["title"] or ""))
+    if not title:
+        title = f"{plat}:{vid}" if vid else f"job #{ahead_id}"
     return {
         "job_id": ahead_id,
         "title": title,
@@ -2064,8 +2354,9 @@ def _queue_ahead(queue: QueueDB, job_id: int, status: str) -> dict | None:
 
 def job_snapshot(job_id: int) -> dict:
     queue = QueueDB()
-    content = ContentDB()
+    content: ContentDB | None = None
     try:
+        content = ContentDB()
         job = queue.get_job(job_id)
         if job is None:
             return {"ok": False, "error": "job not found", "job_id": job_id}
@@ -2098,15 +2389,7 @@ def job_snapshot(job_id: int) -> dict:
                         duration_sec = float(meta["duration"])
                 except (TypeError, ValueError, json.JSONDecodeError, OSError):
                     pass
-        title = str(job["title"] or "")
-        meta_path = _work_dir(platform, video_id) / "media" / "fetch_meta.json"
-        if meta_path.is_file():
-            try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8-sig"))
-                if meta.get("title"):
-                    title = str(meta["title"])
-            except (TypeError, ValueError, json.JSONDecodeError, OSError):
-                pass
+        title = _source_title(platform, video_id, str(job["title"] or ""), content)
         steps_summary = queue.steps_summary(int(job_id))
         out: dict = {
             "ok": True,
@@ -2121,6 +2404,8 @@ def job_snapshot(job_id: int) -> dict:
             "error": job["last_error"],
             "busy": _busy_flag(),
             "duration_sec": duration_sec,
+            "created_at": job["created_at"],
+            "updated_at": job["updated_at"],
             "frame_opts": job_frame_opts(job),
             "lane": _lane_for_job(job),
             "steps_summary": steps_summary,
@@ -2220,7 +2505,7 @@ def job_snapshot(job_id: int) -> dict:
         if article:
             out["article"] = article
             out["path"] = f"/topics/{article['topic']}/{article['slug']}"
-        if st == "done":
+        if st in ("done", "published"):
             from discover.content_db import public_slug
             from media_ops import copy_derived_to_site, derived_public_urls
 
@@ -2237,19 +2522,26 @@ def job_snapshot(job_id: int) -> dict:
             "pending",
             "processing",
             "done",
+            "published",
             "failed",
             "dead",
             "cancelled",
         ):
-            out["progress"] = infer_workflow_progress(
-                wf_now,
-                st,
-                _work_dir(platform, video_id),
-                active=_is_active_job(int(job_id)),
+            out["progress"] = _with_eta(
+                infer_workflow_progress(
+                    wf_now,
+                    st,
+                    _work_dir(platform, video_id),
+                    active=_is_active_job(int(job_id)),
+                ),
+                job["created_at"],
             )
-        elif st in ("pending", "processing", "done", "failed", "dead", "cancelled"):
-            out["progress"] = infer_try_progress(
-                platform, video_id, st, langs=job_langs(job), job_id=job_id
+        elif st in ("pending", "processing", "done", "published", "failed", "dead", "cancelled"):
+            out["progress"] = _with_eta(
+                infer_try_progress(
+                    platform, video_id, st, langs=job_langs(job), job_id=job_id
+                ),
+                job["created_at"],
             )
         out.update(try_status())
         if st == "pending":
@@ -2262,7 +2554,8 @@ def job_snapshot(job_id: int) -> dict:
         return out
     finally:
         queue.close()
-        content.close()
+        if content is not None:
+            content.close()
 
 
 def probe_url_duration(url: str) -> dict:
@@ -2646,14 +2939,23 @@ def submit_url(
             return {"ok": False, "error": str(e)}
 
     dur: float | None = None
+    source_title = ""
     meta_path = _work_dir(platform, video_id) / "media" / "fetch_meta.json"
     if meta_path.is_file():
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8-sig"))
             if meta.get("duration") is not None:
                 dur = float(meta["duration"])
+            source_title = str(meta.get("title") or "").strip()
         except (TypeError, ValueError, json.JSONDecodeError, OSError):
             dur = None
+    # 取消/失败的任务往往在下载前就终止，fetch_meta 里没有标题；提交时补齐，
+    # 这样即使后续任务没跑完，历史列表也能显示原始视频标题（B 站/yt-dlp 均支持）。
+    if not source_title:
+        try:
+            source_title = str(probe_url_duration(url).get("title") or "").strip()
+        except Exception:
+            source_title = ""
 
     frame_opts = normalize_frame_opts(
         frames, gif_sec, clips, gif_ranges=gif_ranges, duration_sec=dur
@@ -2664,7 +2966,7 @@ def submit_url(
         video_id=video_id,
         url=canonical_url(platform, video_id, original_url=url),
         original_url=url,
-        title=f"try:{platform}:{video_id}",
+        title=source_title or f"try:{platform}:{video_id}",
         topic_id=topic,
         score=9999.0,
         duration_sec=int(dur) if dur is not None else None,
@@ -3189,8 +3491,9 @@ def refresh_try_frames(job_id: int, *, stages: str | None = None) -> dict:
         )
 
         queue = QueueDB()
-        content = ContentDB()
+        content: ContentDB | None = None
         try:
+            content = ContentDB()
             job = queue.get_job(job_id)
             if job is None:
                 return {"ok": False, "error": "job not found"}
@@ -3276,7 +3579,8 @@ def refresh_try_frames(job_id: int, *, stages: str | None = None) -> dict:
             return {"ok": False, "error": str(e)[:2000], "job_id": job_id}
         finally:
             queue.close()
-            content.close()
+            if content is not None:
+                content.close()
     finally:
         _release_slot(lane, job_id)
         schedule_next_try_job(skip_job_id=job_id)
@@ -3307,8 +3611,9 @@ def run_try_job(
 
         configure_llm(profile="local")
         queue = QueueDB()
-        content = ContentDB()
+        content: ContentDB | None = None
         try:
+            content = ContentDB()
             job = queue.get_job(job_id)
             if job is None:
                 return {"ok": False, "error": "job not found"}
@@ -3440,7 +3745,8 @@ def run_try_job(
             # Always drop sticky cancel so a later requeue of this id is clean.
             _cancel_requested.discard(int(job_id))
             queue.close()
-            content.close()
+            if content is not None:
+                content.close()
     finally:
         _release_slot(lane, job_id)
         schedule_next_try_job(skip_job_id=job_id)

@@ -66,6 +66,33 @@ def _make_clip(
     return {"x": 8, "y": band_y, "w": fw - 16, "h": band_h}
 
 
+def _write_bgr_frames(path: Path, frames: list[np.ndarray]) -> None:
+    """Write a tiny H.264 clip from explicit BGR frames (no OCR needed)."""
+    from _inpaint_shared import _finalize_writing_mp4
+    from fetch_media import find_ffmpeg
+
+    h, w = frames[0].shape[:2]
+    writing = path.with_name(path.stem + "_writing.mp4")
+    proc = subprocess.Popen(
+        [
+            find_ffmpeg(), "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{w}x{h}",
+            "-r", "10", "-i", "pipe:0", "-an", "-c:v", "libx264",
+            "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+            str(writing),
+        ],
+        stdin=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert proc.stdin is not None
+    for frame in frames:
+        proc.stdin.write(np.ascontiguousarray(frame).tobytes())
+    proc.stdin.close()
+    proc.communicate(timeout=60)
+    if writing.resolve() != path.resolve():
+        _finalize_writing_mp4(writing, path)
+
+
 def test_dialogue_plate_rejects_darker_than_band(tmp_path: Path) -> None:
     from visual_cleanup import dialogue_plate_is_safe
 
@@ -383,6 +410,99 @@ def test_dialogue_safety_restores_w2b(tmp_path: Path) -> None:
     assert out.is_file()
 
 
+def test_dialogue_safety_keeps_successful_dark_glyph_wipe(tmp_path: Path) -> None:
+    """Dark outlined glyphs correctly wiped must NOT be pasted back (P0 no-op)."""
+    from visual_cleanup import audit_dialogue_safety_hits, encode_dialogue_safety_gate
+
+    box = {"x": 8, "y": 40, "w": 80, "h": 20}
+    src_frames: list[np.ndarray] = []
+    clean_frames: list[np.ndarray] = []
+    glyph = (slice(box["y"] + 3, box["y"] + 13), slice(box["x"] + 10, box["x"] + 50))
+    for _ in range(12):
+        frame = np.full((64, 96, 3), 40, dtype=np.uint8)
+        frame[glyph] = 220
+        src_frames.append(frame.copy())
+        clean = frame.copy()
+        clean[glyph] = 40
+        clean_frames.append(clean)
+    src = tmp_path / "src_dark_glyph.mp4"
+    clean = tmp_path / "clean_dark_glyph.mp4"
+    _write_bgr_frames(src, src_frames)
+    _write_bgr_frames(clean, clean_frames)
+
+    out = tmp_path / "safe.mp4"
+    used = encode_dialogue_safety_gate(src, clean, out, box)
+    assert used["restored"] == 0
+    audit = audit_dialogue_safety_hits(src, out, box)
+    assert audit["would_restore"] == 0
+    assert audit["min_bright"] == 0.0
+
+
+def test_dialogue_safety_keeps_bright_plate_dark_glyph_wipe(tmp_path: Path) -> None:
+    """Edge collapse after a correct dark-on-white wipe is not scene damage."""
+    from visual_cleanup import encode_dialogue_safety_gate
+
+    box = {"x": 8, "y": 40, "w": 80, "h": 20}
+    glyph = (slice(box["y"] + 3, box["y"] + 13), slice(box["x"] + 10, box["x"] + 50))
+    src_frames: list[np.ndarray] = []
+    clean_frames: list[np.ndarray] = []
+    for _ in range(12):
+        frame = np.full((64, 96, 3), 235, dtype=np.uint8)
+        frame[glyph] = 30
+        src_frames.append(frame.copy())
+        clean = frame.copy()
+        clean[glyph] = 235
+        clean_frames.append(clean)
+    src = tmp_path / "src_bright_plate.mp4"
+    clean = tmp_path / "clean_bright_plate.mp4"
+    _write_bgr_frames(src, src_frames)
+    _write_bgr_frames(clean, clean_frames)
+
+    out = tmp_path / "safe.mp4"
+    used = encode_dialogue_safety_gate(src, clean, out, box)
+    assert used["restored"] == 0
+
+
+def test_ring_median_fill_repairs_too_dark_hole() -> None:
+    """D6: rejected dark holes get cloth tone, never black or source glyphs."""
+    import cv2
+    from dehardsub_ocr_telea import _reject_dark_inpaint, _ring_median_fill
+
+    frame = np.full((32, 32, 3), 90, dtype=np.uint8)
+    mask = np.zeros((32, 32), dtype=np.uint8)
+    mask[12:20, 12:20] = 255
+    filled = frame.copy()
+    filled[12:20, 12:20] = 5
+    assert _reject_dark_inpaint(frame, filled, mask) is True
+
+    repaired = _ring_median_fill(frame, mask)
+    hole = float(cv2.cvtColor(repaired[12:20, 12:20], cv2.COLOR_BGR2GRAY).mean())
+    assert 70.0 <= hole <= 110.0
+    assert float(repaired[0, 0].mean()) == float(frame[0, 0].mean())
+
+
+def test_surgical_dark_repair_keeps_lama_texture() -> None:
+    """GOLD_MASK path: only black pixels get ring fill; textured LaMa stays."""
+    import cv2
+    from dehardsub_ocr_telea import _surgical_dark_repair
+
+    frame = np.full((40, 40, 3), 100, dtype=np.uint8)
+    # textured cloth in ring
+    frame[0:40, 0:40] = 95
+    frame[5:35:2, 5:35] = 110
+    mask = np.zeros((40, 40), dtype=np.uint8)
+    mask[12:28, 12:28] = 255
+    filled = frame.copy()
+    # most of hole = soft LaMa texture (~90); one black blob
+    filled[12:28, 12:28] = 88
+    filled[16:20, 16:20] = 8
+    out = _surgical_dark_repair(frame, filled, mask)
+    # textured LaMa region preserved
+    assert int(out[13, 13, 0]) == 88
+    # black blob lifted toward ring
+    assert int(out[17, 17, 0]) > 50
+
+
 def test_ocr_telea_window_skip_and_sec_helper() -> None:
     from dehardsub_ocr_telea import _sec_in_windows
 
@@ -535,9 +655,8 @@ def test_morphic_luma_mismatch_refuses_copy() -> None:
     box = {"x": 110, "y": 0, "w": 110, "h": 40}
     assert morphic_use_copy(fr, box) is False
     out, branch = apply_morphic_frame(fr, box, None)
-    # 本测试只要求「不用 left-copy（left-stretch）」且残留低；具体擦除分支
-    # 已演进为 below(默认 fi=69)/lama/telea 三种可选策略。
-    assert branch in ("below", "lama", "telea"), branch
+    # Luma mismatch must refuse 鳞片 copy; hard-ink TELEA only (no fog plate).
+    assert branch == "telea", branch
     roi = out[0:40, 110:220]
     bright = float((cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) > 170).mean())
     assert bright < 0.02

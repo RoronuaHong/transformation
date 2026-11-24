@@ -177,6 +177,27 @@ class MongoStore:
             },
         )
 
+    def reconcile_stale_runs(self, before_ts: float) -> int:
+        """Seal runs left ``running`` by a previous process.
+
+        ``run_locked`` writes ``running`` at start and relies on ``finish_run``
+        in a ``finally`` block. A hard process restart (pm2/watchdog/kill) skips
+        that ``finally``, leaving the run ``running`` forever. On startup no job
+        of this process is in flight yet, so any run started before our boot ts
+        is an orphan. Returns the number of runs sealed.
+        """
+        res = self.runs.update_many(
+            {"status": "running", "started_at": {"$lt": float(before_ts)}},
+            {
+                "$set": {
+                    "status": "failed",
+                    "finished_at": utc_now(),
+                    "error": "orphaned: process restarted before run finished",
+                }
+            },
+        )
+        return int(res.modified_count)
+
     def list_runs(self, *, limit: int = 50) -> list[dict[str, Any]]:
         return [_oid(d) for d in self.runs.find().sort("started_at", DESCENDING).limit(limit)]
 

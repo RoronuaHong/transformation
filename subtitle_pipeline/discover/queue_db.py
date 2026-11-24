@@ -367,6 +367,25 @@ class QueueDB:
         self._conn.commit()
         return int(cur.rowcount)
 
+    def delete_job(self, job_id: int, *, allow_statuses: tuple[str, ...] | None = None) -> int:
+        """Remove one job (and its steps). Files/notes are kept.
+
+        ``allow_statuses`` makes the delete conditional, so a job that got
+        requeued between the UI check and this call is never removed.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT status FROM jobs WHERE id=?", (int(job_id),)
+            ).fetchone()
+            if row is None:
+                return 0
+            if allow_statuses is not None and str(row["status"] or "") not in allow_statuses:
+                return 0
+            self._conn.execute("DELETE FROM job_steps WHERE job_id=?", (int(job_id),))
+            cur = self._conn.execute("DELETE FROM jobs WHERE id=?", (int(job_id),))
+            self._conn.commit()
+            return int(cur.rowcount)
+
     def list_pending(self, *, limit: int = 50) -> list[sqlite3.Row]:
         return list(
             self._conn.execute(
@@ -448,6 +467,22 @@ class QueueDB:
             WHERE id=? AND status IN ('processing', 'done', 'partial')
             """,
             (now, source_wav, canonical_url, job_id),
+        )
+        self._conn.commit()
+        return cur.rowcount == 1
+
+    def set_status(self, job_id: int, status: str) -> bool:
+        """Set an explicit lifecycle status (e.g. ``awaiting_confirm``).
+
+        Claiming only selects ``pending`` rows, so a job parked here will not be
+        picked up again until an operator confirms and requeues it.
+        """
+        allowed = {"pending", "processing", "awaiting_confirm", "partial"}
+        if status not in allowed:
+            raise ValueError(f"unsupported status: {status}")
+        cur = self._conn.execute(
+            "UPDATE jobs SET status=?, updated_at=? WHERE id=? AND status != 'cancelled'",
+            (status, time.time(), job_id),
         )
         self._conn.commit()
         return cur.rowcount == 1
@@ -828,16 +863,21 @@ class QueueDB:
         With ``allow_done=True``, also reopens done/published (e.g. change langs).
         """
         now = time.time()
-        allowed = ("failed", "dead", "cancelled", "partial")
+        allowed = ("failed", "dead", "cancelled", "partial", "awaiting_confirm")
         if allow_done:
-            allowed = ("failed", "dead", "cancelled", "partial", "done", "published")
+            allowed = (
+                "failed", "dead", "cancelled", "partial", "awaiting_confirm",
+                "done", "published",
+            )
+        # Reset created_at too so ETA / "age" reflect this run, not the first enqueue.
         cur = self._conn.execute(
             f"""
             UPDATE jobs
-            SET status='pending', last_error=NULL, attempts=0, updated_at=?
+            SET status='pending', last_error=NULL, attempts=0,
+                created_at=?, updated_at=?
             WHERE id=? AND status IN ({",".join("?" for _ in allowed)})
             """,
-            (now, job_id, *allowed),
+            (now, now, job_id, *allowed),
         )
         self._conn.commit()
         if cur.rowcount == 1:
